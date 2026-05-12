@@ -1,0 +1,143 @@
+import { z } from "zod";
+import { execSync, spawnSync } from "node:child_process";
+import type { AgentTool, ToolExecutionContext } from "../types.js";
+import { createTool } from "../types.js";
+
+interface RunResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  duration: number;
+}
+
+export const runCommandSchema = z.object({
+  command: z.string().min(1),
+  timeout: z.number().int().min(1000).max(300_000).default(120_000),
+});
+
+export const runCommandTool: AgentTool<z.input<typeof runCommandSchema>, string> = createTool({
+  toolName: "runCommand",
+  description: "Run a shell command in the project root. Returns stdout, stderr, exit code, and duration.",
+  inputSchema: runCommandSchema,
+  requiresConfirmation: true,
+  async execute(input: z.output<typeof runCommandSchema>, ctx: ToolExecutionContext): Promise<string> {
+    const blocked = ["rm -rf", "sudo", "curl | sh", "wget | sh", "chmod -R", "chown -R",
+      "git reset --hard", "git clean -fd", "docker system prune", "killall", ":(){", "shutdown"];
+
+    for (const b of blocked) {
+      if (input.command.includes(b)) {
+        throw new Error(`Dangerous command blocked: "${b}"`);
+      }
+    }
+
+    const start = Date.now();
+    try {
+      const result = execSync(input.command, {
+        cwd: ctx.projectRoot,
+        encoding: "utf-8",
+        timeout: input.timeout,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      const duration = Date.now() - start;
+      return `${result.trim()}\n--- Exit: 0, ${duration}ms`;
+    } catch (err: unknown) {
+      const duration = Date.now() - start;
+      const execErr = err as { stdout?: string; stderr?: string; status?: number };
+      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Exit: ${execErr.status ?? 1}, ${duration}ms`;
+    }
+  },
+});
+
+export const runTestsSchema = z.object({
+  command: z.string().default("npm test"),
+  timeout: z.number().int().min(1000).default(300_000),
+});
+
+export const runTestsTool: AgentTool<z.input<typeof runTestsSchema>, string> = createTool({
+  toolName: "runTests",
+  description: "Run the project test suite.",
+  inputSchema: runTestsSchema,
+  requiresConfirmation: false,
+  async execute(input: z.output<typeof runTestsSchema>, ctx: ToolExecutionContext): Promise<string> {
+    const start = Date.now();
+    try {
+      const result = execSync(input.command, {
+        cwd: ctx.projectRoot,
+        encoding: "utf-8",
+        timeout: input.timeout,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const duration = Date.now() - start;
+      return `${result.trim()}\n--- Tests passed, ${duration}ms`;
+    } catch (err: unknown) {
+      const duration = Date.now() - start;
+      const execErr = err as { stdout?: string; stderr?: string; status?: number };
+      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Tests FAILED, ${duration}ms`;
+    }
+  },
+});
+
+export const runBuildSchema = z.object({
+  command: z.string().default("npm run build"),
+  timeout: z.number().int().min(1000).default(300_000),
+});
+
+export const runBuildTool: AgentTool<z.input<typeof runBuildSchema>, string> = createTool({
+  toolName: "runBuild",
+  description: "Run the project build.",
+  inputSchema: runBuildSchema,
+  requiresConfirmation: false,
+  async execute(input: z.output<typeof runBuildSchema>, ctx: ToolExecutionContext): Promise<string> {
+    const start = Date.now();
+    try {
+      const result = execSync(input.command, {
+        cwd: ctx.projectRoot,
+        encoding: "utf-8",
+        timeout: input.timeout,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const duration = Date.now() - start;
+      return `${result.trim()}\n--- Build succeeded, ${duration}ms`;
+    } catch (err: unknown) {
+      const duration = Date.now() - start;
+      const execErr = err as { stdout?: string; stderr?: string; status?: number };
+      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Build FAILED, ${duration}ms`;
+    }
+  },
+});
+
+export const runLintSchema = z.object({
+  command: z.string().default("npm run lint"),
+  timeout: z.number().int().min(1000).default(300_000),
+});
+
+export const runLintTool: AgentTool<z.input<typeof runLintSchema>, string> = createTool({
+  toolName: "runLint",
+  description: "Run the project linter.",
+  inputSchema: runLintSchema,
+  requiresConfirmation: false,
+  async execute(input: z.output<typeof runLintSchema>, ctx: ToolExecutionContext): Promise<string> {
+    const start = Date.now();
+    try {
+      const result = execSync(input.command, {
+        cwd: ctx.projectRoot,
+        encoding: "utf-8",
+        timeout: input.timeout,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const duration = Date.now() - start;
+      return `${result.trim()}\n--- Lint passed, ${duration}ms`;
+    } catch (err: unknown) {
+      const duration = Date.now() - start;
+      const execErr = err as { stdout?: string; stderr?: string; status?: number };
+      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Lint failed, ${duration}ms`;
+    }
+  },
+});
+
+export const runShellTools = [runCommandTool, runTestsTool, runBuildTool, runLintTool];

@@ -7,3 +7,9 @@ export type { ToolExecutionContext, ToolAuditEntry, AgentTool } from "./types.js
 export { createTool } from "./types.js";
 export { allReadOnlyTools } from "./filesystem/readonly-tools.js";
 export { allWriteTools } from "./filesystem/write-tools.js";
+export { allGitTools, gitStatusTool, gitDiffTool, gitDiffFileTool, gitAddTool, gitCommitTool } from "./git/git-tools.js";
+export { CommitMessageGenerator } from "./git/commit-generator.js";
+export type { CommitSuggestion } from "./git/commit-generator.js";
+export { runShellTools, runCommandTool, runTestsTool, runBuildTool, runLintTool } from "./shell/shell-tools.js";
+export { RepoMap } from "./context/repo-map.js";
+export type { RepoMapEntry, RepoMapOptions } from "./context/repo-map.js";
