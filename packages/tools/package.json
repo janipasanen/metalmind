@@ -7,6 +7,7 @@
   "exports": "./src/index.ts",
   "dependencies": {
     "@metalmind/core": "*",
-    "@metalmind/schemas": "*"
+    "@metalmind/schemas": "*",
+    "zod": "^3.25.76"
   }
 }
