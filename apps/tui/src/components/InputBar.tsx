@@ -4,30 +4,36 @@ import TextInput from "ink-text-input";
 
 interface InputBarProps {
   onSubmit: (text: string) => void;
+  disabled?: boolean;
 }
 
-export default function InputBar({ onSubmit }: InputBarProps) {
+export default function InputBar({ onSubmit, disabled = false }: InputBarProps) {
   const [value, setValue] = useState("");
 
   const handleSubmit = useCallback(
     (text: string) => {
+      if (disabled) return;
       const trimmed = text.trim();
       if (trimmed) {
         onSubmit(trimmed);
         setValue("");
       }
     },
-    [onSubmit],
+    [onSubmit, disabled],
   );
 
   return (
     <Box borderStyle="single" borderColor="gray" paddingX={1} marginTop={1}>
       <Box marginRight={1}>
-        <Text color="green" bold>
+        <Text color={disabled ? "gray" : "green"} bold>
           &gt;
         </Text>
       </Box>
-      <TextInput value={value} onChange={setValue} onSubmit={handleSubmit} />
+      {disabled ? (
+        <Text dimColor>… streaming response</Text>
+      ) : (
+        <TextInput value={value} onChange={setValue} onSubmit={handleSubmit} />
+      )}
     </Box>
   );
 }

@@ -4,23 +4,22 @@ import Header from "./Header.js";
 import ChatView from "./ChatView.js";
 import InputBar from "./InputBar.js";
 import StatusBar from "./StatusBar.js";
+import { useChat } from "../hooks/useChat.js";
 
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  toolCalls?: Array<{
+    id: string;
+    toolName: string;
+    argumentsJson: string;
+    output?: string;
+  }>;
   timestamp: Date;
 }
 
 export default function App() {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "system",
-      content: "Welcome to Metalmind. Type /help for commands.",
-      timestamp: new Date(),
-    },
-  ]);
   const [modelName, setModelName] = useState("ollama/deepseek-coder:1.3b");
   const [focusPanel, setFocusPanel] = useState<"chat" | "input">("input");
   const [projectName] = useState(() => {
@@ -28,59 +27,56 @@ export default function App() {
     return parts[parts.length - 1] || "metalmind";
   });
 
+  const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls } = useChat({
+    generateResponse: async function* (input: string) {
+      if (input === "/help") {
+        yield {
+          type: "text",
+          text: "Available commands:\n  /help - Show this help\n  /model <name> - Switch model\n  /clear - Clear chat\n  /quit - Exit",
+        } as const;
+      } else if (input === "/quit") {
+        yield { type: "done" } as const;
+        process.exit(0);
+      } else if (input === "/clear") {
+        yield { type: "done" } as const;
+      } else if (input.startsWith("/model ")) {
+        const newModel = input.slice(7).trim();
+        setModelName(newModel);
+        yield { type: "text", text: `Switched to model: ${newModel}` } as const;
+      } else {
+        yield { type: "text", text: `Response for: "${input}"` } as const;
+      }
+      yield { type: "done" } as const;
+    },
+  });
+
   const handleSend = useCallback(
     (text: string) => {
-      const userMsg: ChatMessage = {
-        id: `msg-${Date.now()}`,
-        role: "user",
-        content: text,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, userMsg]);
-
-      if (text.startsWith("/model ")) {
-        const newModel = text.slice(7).trim();
-        setModelName(newModel);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `sys-${Date.now()}`,
-            role: "system",
-            content: `Switched to model: ${newModel}`,
-            timestamp: new Date(),
-          },
-        ]);
-      } else if (text === "/help") {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `sys-${Date.now()}`,
-            role: "system",
-            content: `Available commands:\n  /help - Show this help\n  /model <name> - Switch model\n  /clear - Clear chat\n  /quit - Exit`,
-            timestamp: new Date(),
-          },
-        ]);
-      } else if (text === "/clear") {
-        setMessages([]);
-      } else if (text === "/quit") {
-        process.exit(0);
-      }
+      sendMessage(text);
     },
-    [],
+    [sendMessage],
   );
 
   useInput((input, key) => {
     if (key.tab) {
       setFocusPanel((prev) => (prev === "chat" ? "input" : "chat"));
     }
+    if (key.escape && isStreaming) {
+      // handled by useChat internally
+    }
   });
 
   return (
     <Box flexDirection="column" padding={1} height="100%">
       <Header projectName={projectName} modelName={modelName} />
-      <ChatView messages={messages} />
-      <InputBar onSubmit={handleSend} />
-      <StatusBar focusPanel={focusPanel} />
+      <ChatView
+        messages={messages}
+        streamingContent={streamingContent}
+        activeToolCalls={activeToolCalls}
+        isStreaming={isStreaming}
+      />
+      <InputBar onSubmit={handleSend} disabled={isStreaming} />
+      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} />
     </Box>
   );
 }
