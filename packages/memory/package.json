@@ -6,6 +6,10 @@
   "main": "./src/index.ts",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@metalmind/schemas": "*"
+    "@metalmind/schemas": "*",
+    "better-sqlite3": "^12.10.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
   }
 }
