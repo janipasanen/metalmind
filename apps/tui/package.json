@@ -5,12 +5,13 @@
   "type": "module",
   "main": "./src/index.tsx",
   "dependencies": {
+    "@metalmind/config": "*",
     "@metalmind/core": "*",
     "@metalmind/providers": "*",
-    "@metalmind/config": "*",
     "@metalmind/schemas": "*",
     "@metalmind/tools": "*",
     "ink": "^5.0.0",
+    "ink-text-input": "^6.0.0",
     "react": "^19.0.0",
     "zod": "^3.24.0"
   },
