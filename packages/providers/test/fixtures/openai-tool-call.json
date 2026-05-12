@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-xxx",
+  "object": "chat.completion",
+  "created": 1715534400,
+  "model": "gpt-4",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_abc123",
+            "type": "function",
+            "function": {
+              "name": "readFile",
+              "arguments": "{\n  \"path\": \"src/auth/login.ts\"\n}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 200,
+    "completion_tokens": 30,
+    "total_tokens": 230
+  }
+}

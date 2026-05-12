@@ -1,0 +1,19 @@
+I'll read the file for you.
+
+[TOOL_CALL: readFile]
+ARGS: {"path": "src/main.ts"}
+[RESULT]
+Found the file, here's what it contains:
+
+```ts
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+
+const app = new Hono();
+app.get("/", (c) => c.text("Hello"));
+
+serve(app);
+```
+[END_RESULT]
+
+Now I understand the file structure.
