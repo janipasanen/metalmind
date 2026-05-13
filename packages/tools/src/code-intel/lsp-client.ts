@@ -1,0 +1,240 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { createInterface, type Interface } from "node:readline";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+
+export interface LspDiagnostic {
+  filePath: string;
+  range: {
+    startLine: number;
+    startCharacter: number;
+    endLine: number;
+    endCharacter: number;
+  };
+  severity: "error" | "warning" | "information" | "hint";
+  message: string;
+  code?: string;
+  source?: string;
+}
+
+interface JsonRpcMessage {
+  jsonrpc: "2.0";
+  id?: number;
+  method?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: { code: number; message: string };
+}
+
+/**
+ * Lightweight LSP client for diagnostics via stdio JSON-RPC.
+ * Targets TypeScript/JavaScript via typescript-language-server.
+ */
+export class LspClient {
+  private process: ChildProcess | null = null;
+  private rl: Interface | null = null;
+  private requestId = 0;
+  private pending = new Map<
+    number,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+  >();
+  private buffer = "";
+  private connected = false;
+  private rootPath: string;
+  private diagnostics = new Map<string, LspDiagnostic[]>();
+
+  constructor(rootPath: string) {
+    this.rootPath = resolve(rootPath);
+  }
+
+  /**
+   * Start the language server and initialize.
+   */
+  async start(): Promise<void> {
+    if (this.connected) return;
+
+    const command = this.findServerCommand();
+    const args = this.getServerArgs();
+
+    this.process = spawn(command, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: this.rootPath,
+    });
+
+    this.process.on("exit", () => {
+      this.connected = false;
+    });
+
+    this.rl = createInterface({ input: this.process.stdout! });
+
+    this.rl.on("line", (line: string) => {
+      try {
+        const msg = JSON.parse(line) as JsonRpcMessage;
+        if (msg.id !== undefined && this.pending.has(msg.id)) {
+          const pending = this.pending.get(msg.id)!;
+          this.pending.delete(msg.id);
+          if (msg.error) {
+            pending.reject(new Error(msg.error.message));
+          } else {
+            pending.resolve(msg.result);
+          }
+        } else if (msg.method === "textDocument/publishDiagnostics") {
+          this.handleDiagnostics(msg.params as PublishDiagnosticsParams);
+        }
+      } catch {
+        // ignore non-JSON
+      }
+    });
+
+    // Initialize
+    await this.request("initialize", {
+      processId: process.pid,
+      rootUri: `file://${this.rootPath}`,
+      capabilities: {
+        textDocument: {
+          publishDiagnostics: {},
+        },
+      },
+    });
+
+    this.sendNotification("initialized", {});
+    this.connected = true;
+  }
+
+  /**
+   * Request diagnostics for a specific file.
+   */
+  async getDiagnostics(filePath: string): Promise<LspDiagnostic[]> {
+    const absPath = resolve(this.rootPath, filePath);
+    const uri = `file://${absPath}`;
+
+    // Notify the server we opened this file
+    this.sendNotification("textDocument/didOpen", {
+      textDocument: {
+        uri,
+        languageId: this.getLanguageId(filePath),
+        version: 1,
+        text: "",
+      },
+    });
+
+    // Wait briefly for diagnostics to arrive
+    await new Promise((r) => setTimeout(r, 500));
+
+    return this.diagnostics.get(uri) ?? [];
+  }
+
+  /**
+   * Get all cached diagnostics.
+   */
+  getAllDiagnostics(): Map<string, LspDiagnostic[]> {
+    return new Map(this.diagnostics);
+  }
+
+  /**
+   * Shutdown the LSP server.
+   */
+  async shutdown(): Promise<void> {
+    try {
+      await this.request("shutdown", {});
+      this.sendNotification("exit", {});
+    } catch {
+      // best effort
+    }
+    this.rl?.close();
+    this.process?.kill();
+    this.process = null;
+    this.connected = false;
+  }
+
+  isConnected(): boolean {
+    return this.connected;
+  }
+
+  private findServerCommand(): string {
+    // Try npx first, fall back to direct
+    return "npx";
+  }
+
+  private getServerArgs(): string[] {
+    return ["-y", "typescript-language-server", "--stdio"];
+  }
+
+  private getLanguageId(filePath: string): string {
+    if (filePath.endsWith(".tsx")) return "typescriptreact";
+    if (filePath.endsWith(".ts")) return "typescript";
+    if (filePath.endsWith(".jsx")) return "javascriptreact";
+    return "javascript";
+  }
+
+  private request(method: string, params?: unknown): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const id = ++this.requestId;
+      this.pending.set(id, { resolve, reject });
+
+      const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+      this.process?.stdin?.write(msg);
+
+      setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error(`LSP request timeout: ${method}`));
+        }
+      }, 30_000);
+    });
+  }
+
+  private sendNotification(method: string, params: unknown): void {
+    const msg = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
+    this.process?.stdin?.write(msg);
+  }
+
+  private handleDiagnostics(params: PublishDiagnosticsParams): void {
+    const fileUri = params.uri;
+    const diags: LspDiagnostic[] = (params.diagnostics ?? []).map((d) => ({
+      filePath: fileUri.replace("file://", ""),
+      range: {
+        startLine: d.range.start.line,
+        startCharacter: d.range.start.character,
+        endLine: d.range.end.line,
+        endCharacter: d.range.end.character,
+      },
+      severity: this.mapSeverity(d.severity),
+      message: d.message,
+      code: d.code ? String(d.code) : undefined,
+      source: d.source,
+    }));
+    this.diagnostics.set(fileUri, diags);
+  }
+
+  private mapSeverity(
+    severity: number | undefined,
+  ): LspDiagnostic["severity"] {
+    switch (severity) {
+      case 1:
+        return "error";
+      case 2:
+        return "warning";
+      case 3:
+        return "information";
+      case 4:
+        return "hint";
+      default:
+        return "information";
+    }
+  }
+}
+
+interface PublishDiagnosticsParams {
+  uri: string;
+  diagnostics: Array<{
+    range: {
+      start: { line: number; character: number };
+      end: { line: number; character: number };
+    };
+    severity?: number;
+    message: string;
+    code?: string | number;
+    source?: string;
+  }>;
+}

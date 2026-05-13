@@ -11,3 +11,6 @@ export {
   resetReferenceIndex,
   indexFile,
 } from "./symbol-tools.js";
+export { LspClient } from "./lsp-client.js";
+export type { LspDiagnostic } from "./lsp-client.js";
+export { createDiagnosticsTool } from "./diagnostics-tool.js";
