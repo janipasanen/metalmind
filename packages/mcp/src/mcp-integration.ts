@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ToolRegistry } from "@metalmind/tools";
 import { McpManager, McpServersConfigSchema } from "./mcp-manager.js";
+import type { PermissionManager } from "@metalmind/core";
 import type { McpServersConfig } from "./mcp-manager.js";
 
 export interface McpIntegrationState {
@@ -23,6 +24,7 @@ export class McpIntegration {
   constructor(
     private readonly toolRegistry: ToolRegistry,
     private readonly mcpManager: McpManager,
+    private readonly permissionManager?: PermissionManager,
   ) {}
 
   /**
@@ -36,6 +38,11 @@ export class McpIntegration {
 
     if (servers) {
       this.mcpManager.configure(servers);
+    }
+
+    // Wire permission manager into MCP tool registry
+    if (this.permissionManager) {
+      this.mcpManager.setPermissionManager(this.permissionManager);
     }
 
     // Listen for server events

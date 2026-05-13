@@ -50,3 +50,36 @@ describe("Phase 6 integration — MCP pipeline", () => {
     expect(result).toBe("data\nmore");
   });
 });
+
+describe("Phase 6 — MCP permission mapping", () => {
+  it("PermissionManager.checkMcpTool respects global allowMcpTools", () => {
+    const pm = new PermissionManager();
+
+    // Default: ask
+    const result = pm.checkMcpTool("any-server", "any-tool");
+    expect(result.needsConfirmation).toBe(true);
+    expect(result.allowed).toBe(true);
+  });
+
+  it("PermissionManager.checkMcpTool blocks when allowMcpTools is false", () => {
+    const pm = new PermissionManager();
+    pm.allowMcpTools = false;
+
+    const result = pm.checkMcpTool("any-server", "any-tool");
+    expect(result.blocked).toBe(true);
+  });
+
+  it("McpToolRegistry.setPermissionManager is callable", () => {
+    const pm = new PermissionManager();
+    const registry = new McpToolRegistry();
+
+    expect(() => registry.setPermissionManager(pm)).not.toThrow();
+  });
+
+  it("McpManager.setPermissionManager propagates to registry", () => {
+    const pm = new PermissionManager();
+    const manager = new McpManager();
+
+    expect(() => manager.setPermissionManager(pm)).not.toThrow();
+  });
+});

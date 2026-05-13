@@ -1,4 +1,5 @@
 import type { AgentTool, ToolExecutionContext } from "@metalmind/tools";
+import type { PermissionManager } from "@metalmind/core";
 import { z, type ZodSchema } from "zod";
 import { McpClient, type McpServerConfig } from "./mcp-client.js";
 
@@ -9,9 +10,17 @@ export interface McpToolState {
 }
 
 export class McpToolRegistry {
+  private permissionManager: PermissionManager | null = null;
   private clients = new Map<string, McpClient>();
   private toolMap = new Map<string, McpToolState>();
   private registeredTools = new Map<string, AgentTool>();
+
+  /**
+   * Set the permission manager for MCP tool permission checks.
+   */
+  setPermissionManager(pm: PermissionManager): void {
+    this.permissionManager = pm;
+  }
 
   /**
    * Connect to an MCP server, discover its tools, and register them.
@@ -111,6 +120,16 @@ export class McpToolRegistry {
       inputSchema: zodSchema,
       requiresConfirmation: true,
       execute: async (input: Record<string, unknown> | undefined, ctx: ToolExecutionContext) => {
+        // Check MCP tool permissions
+        if (this.permissionManager) {
+          const perm = this.permissionManager.checkMcpTool(serverName, mcpTool.name);
+          if (perm.blocked) {
+            throw new Error(
+              `MCP tool "${mcpTool.name}" (server: ${serverName}) is blocked by permission policy`,
+            );
+          }
+        }
+
         const client = this.clients.get(serverName);
         if (!client || !client.connected) {
           throw new Error(`MCP server "${serverName}" is not connected`);

@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { McpToolRegistry } from "./mcp-tool-registry.js";
 import { McpClient, type McpServerConfig } from "./mcp-client.js";
 import { z } from "zod";
+import type { PermissionManager } from "@metalmind/core";
 
 export const McpServersConfigSchema = z.record(
   z.string(),
@@ -49,6 +50,13 @@ export class McpManager extends EventEmitter {
         autoConnect: cfg.autoConnect ?? false,
       });
     }
+  }
+
+  /**
+   * Set the permission manager for MCP tool permission checks.
+   */
+  setPermissionManager(pm: PermissionManager): void {
+    this.registry.setPermissionManager(pm);
   }
 
   /**

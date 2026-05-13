@@ -35,3 +35,72 @@ describe("PermissionManager", () => {
     expect(pm.isAllowed("unknownAction")).toBe(false);
   });
 });
+
+describe("PermissionManager MCP tool permissions", () => {
+  it("defaults to ask for MCP tools", () => {
+    const pm = new PermissionManager();
+    expect(pm.needsConfirmation("allowMcpTools")).toBe(true);
+  });
+
+  it("checkMcpTool defaults to global permission (ask)", () => {
+    const pm = new PermissionManager();
+    const result = pm.checkMcpTool("filesystem", "read_file");
+    expect(result.needsConfirmation).toBe(true);
+    expect(result.allowed).toBe(true);
+    expect(result.blocked).toBe(false);
+  });
+
+  it("checkMcpTool allows when global is true", () => {
+    const pm = new PermissionManager();
+    pm.allowMcpTools = true;
+    const result = pm.checkMcpTool("filesystem", "read_file");
+    expect(result.needsConfirmation).toBe(false);
+    expect(result.allowed).toBe(true);
+    expect(result.blocked).toBe(false);
+  });
+
+  it("checkMcpTool blocks when global is false", () => {
+    const pm = new PermissionManager();
+    pm.allowMcpTools = false;
+    const result = pm.checkMcpTool("filesystem", "read_file");
+    expect(result.needsConfirmation).toBe(false);
+    expect(result.allowed).toBe(false);
+    expect(result.blocked).toBe(true);
+  });
+
+  it("checkMcpTool respects per-server permission", () => {
+    const pm = new PermissionManager();
+    pm.allowMcpTools = false; // blocked globally
+    pm.mcpServerPermissions["filesystem"] = true; // but allowed for this server
+    const result = pm.checkMcpTool("filesystem", "read_file");
+    expect(result.allowed).toBe(true);
+    expect(result.blocked).toBe(false);
+  });
+
+  it("checkMcpTool respects per-tool permission override", () => {
+    const pm = new PermissionManager();
+    pm.allowMcpTools = true; // allowed globally
+    pm.mcpToolPermissions["filesystem:delete_file"] = false; // but blocked for this tool
+    const result = pm.checkMcpTool("filesystem", "delete_file");
+    expect(result.allowed).toBe(false);
+    expect(result.blocked).toBe(true);
+  });
+
+  it("checkMcpTool per-tool takes priority over per-server", () => {
+    const pm = new PermissionManager();
+    pm.mcpServerPermissions["filesystem"] = false; // server blocked
+    pm.mcpToolPermissions["filesystem:read_file"] = true; // but tool allowed
+    const result = pm.checkMcpTool("filesystem", "read_file");
+    expect(result.allowed).toBe(true);
+    expect(result.blocked).toBe(false);
+  });
+
+  it("checkMcpTool ask for per-server overrides global allow", () => {
+    const pm = new PermissionManager();
+    pm.allowMcpTools = true; // allowed globally
+    pm.mcpServerPermissions["unsafe-server"] = "ask"; // but ask for this server
+    const result = pm.checkMcpTool("unsafe-server", "any_tool");
+    expect(result.needsConfirmation).toBe(true);
+    expect(result.allowed).toBe(true);
+  });
+});
