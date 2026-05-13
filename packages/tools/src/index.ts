@@ -13,3 +13,5 @@ export type { CommitSuggestion } from "./git/commit-generator.js";
 export { runShellTools, runCommandTool, runTestsTool, runBuildTool, runLintTool } from "./shell/shell-tools.js";
 export { RepoMap } from "./context/repo-map.js";
 export type { RepoMapEntry, RepoMapOptions } from "./context/repo-map.js";
+export { parseSource, SymbolIndex } from "./code-intel/tree-sitter-parser.js";
+export type { SymbolInfo, ImportInfo, ParseResult } from "./code-intel/tree-sitter-parser.js";
