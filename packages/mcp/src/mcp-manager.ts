@@ -2,20 +2,11 @@ import { EventEmitter } from "node:events";
 import { McpToolRegistry } from "./mcp-tool-registry.js";
 import { McpClient, type McpServerConfig } from "./mcp-client.js";
 import { z } from "zod";
+import { McpServersConfigSchema, type McpServersConfig } from "@metalmind/schemas";
 import type { PermissionManager } from "@metalmind/core";
 
-export const McpServersConfigSchema = z.record(
-  z.string(),
-  z.object({
-    command: z.string().min(1),
-    args: z.array(z.string()).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-    cwd: z.string().optional(),
-    autoConnect: z.boolean().default(false),
-  }),
-);
-
-export type McpServersConfig = z.infer<typeof McpServersConfigSchema>;
+// McpServersConfigSchema imported from @metalmind/schemas
+// McpServersConfig type imported from @metalmind/schemas
 
 export interface McpManagerState {
   servers: Map<string, {
@@ -115,8 +106,25 @@ export class McpManager extends EventEmitter {
   }
 
   /**
+   * Get status of all configured servers for TUI display.
+   */
+  getServerStatus(): Array<{ name: string; connected: boolean; toolCount: number }> {
+    const status: Array<{ name: string; connected: boolean; toolCount: number }> = [];
+    for (const [name, cfg] of this.serverConfigs) {
+      const state = this.serverState.get(name) ?? { connected: false, toolCount: 0 };
+      status.push({
+        name,
+        connected: state.connected,
+        toolCount: state.toolCount,
+      });
+    }
+    return status;
+  }
+
+  /**
    * Shutdown all servers.
    */
+
   async shutdown(): Promise<void> {
     for (const name of this.registry.getServerNames()) {
       try {

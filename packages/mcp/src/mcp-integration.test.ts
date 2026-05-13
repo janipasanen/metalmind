@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ToolRegistry } from "@metalmind/tools";
 import { McpManager } from "./mcp-manager.js";
+import { McpClient } from "./mcp-client.js";
 import { McpIntegration } from "./mcp-integration.js";
 
 describe("McpIntegration", () => {
@@ -75,5 +76,30 @@ describe("McpIntegration", () => {
     await expect(
       integration.disconnectServer("nonexistent"),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("McpManager config and lifecycle", () => {
+  it("getServerStatus returns empty array when no servers configured", () => {
+    const manager = new McpManager();
+    expect(manager.getServerStatus()).toHaveLength(0);
+  });
+
+  it("getServerStatus returns configured servers with state", () => {
+    const manager = new McpManager();
+    manager.configure({
+      "fs": { command: "npx", args: ["-y", "mcp-filesystem"] },
+    });
+
+    const status = manager.getServerStatus();
+    expect(status).toHaveLength(1);
+    expect(status[0].name).toBe("fs");
+    expect(status[0].connected).toBe(false);
+  });
+
+  it("McpClient.isHealthy reflects connection state", () => {
+    const client = new McpClient({ name: "test", command: "echo" });
+    // Before connect, isHealthy returns false (not connected yet)
+    expect(client.isHealthy()).toBe(false);
   });
 });

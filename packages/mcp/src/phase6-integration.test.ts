@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { McpManager, McpServersConfigSchema, McpToolRegistry, normalizeMcpResult } from "./index.js";
+import { McpManager, McpToolRegistry, normalizeMcpResult } from "./index.js";
+import { McpServersConfigSchema } from "@metalmind/schemas";
 import { ToolRegistry } from "@metalmind/tools";
 import { PermissionManager } from "@metalmind/core";
 

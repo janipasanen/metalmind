@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { ToolRegistry } from "@metalmind/tools";
-import { McpManager, McpServersConfigSchema } from "./mcp-manager.js";
+import { McpManager } from "./mcp-manager.js";
+import { McpServersConfigSchema } from "@metalmind/schemas";
 import type { PermissionManager } from "@metalmind/core";
-import type { McpServersConfig } from "./mcp-manager.js";
+
 
 export interface McpIntegrationState {
   connectedServers: string[];

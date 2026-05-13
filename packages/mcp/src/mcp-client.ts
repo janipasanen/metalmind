@@ -111,6 +111,13 @@ export class McpClient extends EventEmitter {
     return result;
   }
 
+  /**
+   * Health check — returns true if the MCP server process is alive and connected.
+   */
+  isHealthy(): boolean {
+    return this.connected && this.process !== null && !this.process.killed;
+  }
+
   async disconnect(): Promise<void> {
     try {
       this.sendNotification("notifications/cancelled", {});

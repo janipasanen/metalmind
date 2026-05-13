@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { normalizeMcpResult } from "./mcp-tool-registry.js";
-import { McpManager, McpServersConfigSchema } from "./mcp-manager.js";
+import { McpManager } from "./mcp-manager.js";
+import { McpServersConfigSchema } from "@metalmind/schemas";
 import { McpClient, type McpServerConfig } from "./mcp-client.js";
 import { McpToolRegistry } from "./index.js";
 
