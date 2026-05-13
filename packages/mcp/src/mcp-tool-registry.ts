@@ -158,17 +158,53 @@ function normalizeMcpResult(raw: unknown): string {
 
   const obj = raw as Record<string, unknown>;
 
+  // MCP error response
+  if (obj.isError === true) {
+    const errorContent = obj.content;
+    if (Array.isArray(errorContent)) {
+      const text = (errorContent as Array<{ type: string; text?: string }>)
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("\n");
+      return `[MCP Error] ${text || "Unknown MCP error"}`;
+    }
+    return "[MCP Error] Unknown MCP error";
+  }
+
   // MCP content array format
   const content = obj.content;
   if (Array.isArray(content)) {
-    return (content as Array<{ type: string; text?: string }>)
+    const text = (content as Array<{ type: string; text?: string }>)
       .filter((c) => c.type === "text")
       .map((c) => c.text ?? "")
       .join("\n");
+
+    // Check for resource links
+    const resources = (content as Array<{ type: string; uri?: string; name?: string }>)
+      .filter((c) => c.type === "resource")
+      .map((c) => c.uri ?? c.name ?? "unknown resource");
+
+    if (resources.length > 0) {
+      return text + "\n\n[Resources]\n" + resources.map((r) => `  - ${r}`).join("\n");
+    }
+
+    return text;
   }
 
   // Tool result with content
   const toolResult = obj.toolResult as Record<string, unknown> | undefined;
+  if (toolResult?.isError === true) {
+    const trContent = toolResult.content;
+    if (Array.isArray(trContent)) {
+      const text = (trContent as Array<{ type: string; text?: string }>)
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("\n");
+      return `[MCP Error] ${text || "MCP tool error"}`;
+    }
+    return "[MCP Error] MCP tool error";
+  }
+
   const trContent = toolResult?.content;
   if (Array.isArray(trContent)) {
     return (trContent as Array<{ type: string; text?: string }>)
@@ -180,7 +216,11 @@ function normalizeMcpResult(raw: unknown): string {
   // Simple result object
   if (obj.result !== undefined) return JSON.stringify(obj.result);
 
+  // Stringify if it has an error message
+  if (typeof obj.error === "string") return `[MCP Error] ${obj.error}`;
+
   return JSON.stringify(obj);
 }
+
 
 export { normalizeMcpResult };

@@ -135,3 +135,45 @@ describe("McpClient config", () => {
     expect(config.args).toEqual(["server.js"]);
   });
 });
+
+describe("normalizeMcpResult — enhanced", () => {
+  it("handles MCP error response (isError flag)", () => {
+    const result = normalizeMcpResult({
+      isError: true,
+      content: [{ type: "text", text: "Something went wrong" }],
+    });
+    expect(result).toBe("[MCP Error] Something went wrong");
+  });
+
+  it("handles MCP error without content text", () => {
+    const result = normalizeMcpResult({ isError: true });
+    expect(result).toBe("[MCP Error] Unknown MCP error");
+  });
+
+  it("handles toolResult with isError", () => {
+    const result = normalizeMcpResult({
+      toolResult: {
+        isError: true,
+        content: [{ type: "text", text: "Tool failed" }],
+      },
+    });
+    expect(result).toBe("[MCP Error] Tool failed");
+  });
+
+  it("handles error string in object", () => {
+    const result = normalizeMcpResult({ error: "Connection refused" });
+    expect(result).toBe("[MCP Error] Connection refused");
+  });
+
+  it("handles resource links in content", () => {
+    const result = normalizeMcpResult({
+      content: [
+        { type: "text", text: "Data loaded" },
+        { type: "resource", uri: "file:///tmp/output.txt", name: "output.txt" },
+      ],
+    });
+    expect(result).toContain("Data loaded");
+    expect(result).toContain("[Resources]");
+    expect(result).toContain("file:///tmp/output.txt");
+  });
+});
