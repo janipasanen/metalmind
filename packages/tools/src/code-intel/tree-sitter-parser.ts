@@ -79,8 +79,11 @@ function walkTree(
 
       // Function declarations
       if (type === "function_declaration") {
-        const name = getChildText(current, "identifier") ?? getChildText(current, "name");
-        if (name) {
+        const nameNode = current.childForFieldName("name");
+        const name = nameNode?.text ?? getChildText(current, "identifier");
+        if (name && nameNode) {
+          symbols.push(makeSymbol(name, "function", nameNode, parentName));
+        } else if (name) {
           symbols.push(makeSymbol(name, "function", current, parentName));
         }
         // Walk children but not deeper into nested functions
@@ -106,10 +109,11 @@ function walkTree(
       }
       // Class declarations
       else if (type === "class_declaration") {
-        const name = getChildText(current, "identifier") ?? getChildText(current, "name") ?? "anonymous";
+        const nameNode = current.childForFieldName("name");
+        const name = nameNode?.text ?? getChildText(current, "identifier") ?? getChildText(current, "name") ?? "anonymous";
         const exported = isExported(current);
         symbols.push({
-          ...makeSymbol(name, "class", current, parentName),
+          ...makeSymbol(name, "class", nameNode ?? current, parentName),
           exported,
         });
 
@@ -127,28 +131,31 @@ function walkTree(
       }
       // Interface declarations
       else if (type === "interface_declaration") {
-        const name = getChildText(current, "type_identifier") ?? getChildText(current, "name") ?? "anonymous";
+        const nameNode = current.childForFieldName("name");
+        const name = nameNode?.text ?? getChildText(current, "type_identifier") ?? "anonymous";
         symbols.push({
-          ...makeSymbol(name, "interface", current, parentName),
+          ...makeSymbol(name, "interface", nameNode ?? current, parentName),
           exported: isExported(current),
         });
       }
       // Type alias
       else if (type === "type_alias_declaration") {
-        const name = getChildText(current, "type_identifier") ?? getChildText(current, "name");
+        const nameNode = current.childForFieldName("name");
+        const name = nameNode?.text ?? getChildText(current, "type_identifier");
         if (name) {
           symbols.push({
-            ...makeSymbol(name, "type", current, parentName),
+            ...makeSymbol(name, "type", nameNode ?? current, parentName),
             exported: isExported(current),
           });
         }
       }
       // Enum declarations
       else if (type === "enum_declaration") {
-        const name = getChildText(current, "identifier") ?? getChildText(current, "name");
+        const nameNode = current.childForFieldName("name");
+        const name = nameNode?.text ?? getChildText(current, "identifier");
         if (name) {
           symbols.push({
-            ...makeSymbol(name, "enum", current, parentName),
+            ...makeSymbol(name, "enum", nameNode ?? current, parentName),
             exported: isExported(current),
           });
         }
