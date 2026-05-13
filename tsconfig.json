@@ -30,6 +30,9 @@
     },
     {
       "path": "packages/apple"
+    },
+    {
+      "path": "packages/skills"
     }
   ],
   "compilerOptions": {
