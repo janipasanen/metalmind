@@ -1,10 +1,11 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, useInput } from "ink";
 import Header from "./Header.js";
 import ChatView from "./ChatView.js";
 import InputBar from "./InputBar.js";
 import StatusBar from "./StatusBar.js";
 import { useChat } from "../hooks/useChat.js";
+import { AgentLoop } from "../agent.js";
 import type { TuiConfig } from "../config.js";
 
 export interface ChatMessage {
@@ -32,6 +33,17 @@ export default function App({ config }: AppProps) {
     return parts[parts.length - 1] || "metalmind";
   });
 
+  const agentRef = useRef<AgentLoop | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      agentRef.current = new AgentLoop(config);
+    } catch (err) {
+      setAgentError(err instanceof Error ? err.message : String(err));
+    }
+  }, [config]);
+
   const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls } = useChat({
     generateResponse: async function* (input: string) {
       if (input === "/help") {
@@ -39,19 +51,39 @@ export default function App({ config }: AppProps) {
           type: "text",
           text: "Available commands:\n  /help - Show this help\n  /model <name> - Switch model\n  /clear - Clear chat\n  /quit - Exit",
         } as const;
-      } else if (input === "/quit") {
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/quit") {
         yield { type: "done" } as const;
         process.exit(0);
-      } else if (input === "/clear") {
+      }
+
+      if (input === "/clear") {
+        agentRef.current?.clearHistory();
         yield { type: "done" } as const;
-      } else if (input.startsWith("/model ")) {
+        return;
+      }
+
+      if (input.startsWith("/model ")) {
         const newModel = input.slice(7).trim();
         setActiveModel(newModel);
         yield { type: "text", text: `Switched to model: ${newModel}` } as const;
-      } else {
-        yield { type: "text", text: `Response for: "${input}"` } as const;
+        yield { type: "done" } as const;
+        return;
       }
-      yield { type: "done" } as const;
+
+      if (!agentRef.current) {
+        yield {
+          type: "error",
+          message: agentError ?? "Agent not initialised — check provider config.",
+        } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      yield* agentRef.current.run(input);
     },
   });
 
