@@ -139,3 +139,91 @@ describe("resolveConfig", () => {
     });
   });
 });
+
+describe("resolveConfig with metalmind.yaml", () => {
+  beforeEach(() => {
+    delete process.env.METALMIND_PROVIDER;
+    delete process.env.METALMIND_MODEL;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OLLAMA_API_KEY;
+    delete process.env.METALMIND_BASE_URL;
+  });
+
+  const fileConfig = {
+    models: {
+      localMlx: {
+        provider: "mlx",
+        model: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
+        baseUrl: "http://127.0.0.1:8742",
+      },
+      ollamaCloud: {
+        provider: "ollama",
+        model: "gemma3",
+        baseUrl: "https://ollama.com",
+        apiKey: "sk-from-yaml",
+      },
+    },
+    routing: {
+      defaultLocalModel: "localMlx",
+      defaultReasoningModel: "ollamaCloud",
+    },
+  };
+
+  it("resolves a named model via --model", () => {
+    const cfg = resolveConfig(["--model", "ollamaCloud"], fileConfig);
+    expect(cfg.provider).toBe("ollama");
+    expect(cfg.model).toBe("gemma3");
+    expect(cfg.baseUrl).toBe("https://ollama.com");
+    expect(cfg.apiKey).toBe("sk-from-yaml");
+  });
+
+  it("honours routing.defaultLocalModel when nothing is specified", () => {
+    const cfg = resolveConfig([], fileConfig);
+    expect(cfg.provider).toBe("mlx");
+    expect(cfg.model).toBe("mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit");
+    expect(cfg.baseUrl).toBe("http://127.0.0.1:8742");
+  });
+
+  it("env var overrides the yaml default local model", () => {
+    withEnv({ METALMIND_PROVIDER: "ollama", METALMIND_MODEL: "llama3" }, () => {
+      const cfg = resolveConfig([], fileConfig);
+      expect(cfg.provider).toBe("ollama");
+      expect(cfg.model).toBe("llama3");
+    });
+  });
+
+  it("CLI flag overrides env var which overrides yaml", () => {
+    withEnv({ METALMIND_MODEL: "ollamaCloud" }, () => {
+      const cfg = resolveConfig(["--model", "localMlx"], fileConfig);
+      expect(cfg.provider).toBe("mlx");
+      expect(cfg.model).toBe("mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit");
+    });
+  });
+
+  it("env API key overrides a named entry's apiKey", () => {
+    withEnv({ OLLAMA_API_KEY: "sk-from-env" }, () => {
+      const cfg = resolveConfig(["--model", "ollamaCloud"], fileConfig);
+      expect(cfg.apiKey).toBe("sk-from-env");
+    });
+  });
+
+  it("METALMIND_BASE_URL overrides a named entry's baseUrl", () => {
+    withEnv({ METALMIND_BASE_URL: "http://127.0.0.1:9000" }, () => {
+      const cfg = resolveConfig(["--model", "localMlx"], fileConfig);
+      expect(cfg.baseUrl).toBe("http://127.0.0.1:9000");
+    });
+  });
+
+  it("falls back to built-in defaults when the model name is not a yaml entry", () => {
+    const cfg = resolveConfig(["--provider", "ollama", "--model", "mistral"], fileConfig);
+    expect(cfg.provider).toBe("ollama");
+    expect(cfg.model).toBe("mistral");
+  });
+
+  it("does not apply the yaml default local model when a provider is explicitly chosen", () => {
+    const cfg = resolveConfig(["--provider", "anthropic"], fileConfig);
+    expect(cfg.provider).toBe("anthropic");
+    expect(cfg.model).toBe("claude-sonnet-4-6");
+  });
+});
