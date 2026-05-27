@@ -5,6 +5,7 @@ import ChatView from "./ChatView.js";
 import InputBar from "./InputBar.js";
 import StatusBar from "./StatusBar.js";
 import { useChat } from "../hooks/useChat.js";
+import type { TuiConfig } from "../config.js";
 
 export interface ChatMessage {
   id: string;
@@ -19,8 +20,12 @@ export interface ChatMessage {
   timestamp: Date;
 }
 
-export default function App() {
-  const [modelName, setModelName] = useState("ollama/deepseek-coder:1.3b");
+interface AppProps {
+  config: TuiConfig;
+}
+
+export default function App({ config }: AppProps) {
+  const [activeModel, setActiveModel] = useState(`${config.provider}/${config.model}`);
   const [focusPanel, setFocusPanel] = useState<"chat" | "input">("input");
   const [projectName] = useState(() => {
     const parts = process.cwd().split("/");
@@ -41,7 +46,7 @@ export default function App() {
         yield { type: "done" } as const;
       } else if (input.startsWith("/model ")) {
         const newModel = input.slice(7).trim();
-        setModelName(newModel);
+        setActiveModel(newModel);
         yield { type: "text", text: `Switched to model: ${newModel}` } as const;
       } else {
         yield { type: "text", text: `Response for: "${input}"` } as const;
@@ -57,18 +62,15 @@ export default function App() {
     [sendMessage],
   );
 
-  useInput((input, key) => {
+  useInput((_input, key) => {
     if (key.tab) {
       setFocusPanel((prev) => (prev === "chat" ? "input" : "chat"));
-    }
-    if (key.escape && isStreaming) {
-      // handled by useChat internally
     }
   });
 
   return (
     <Box flexDirection="column" padding={1} height="100%">
-      <Header projectName={projectName} modelName={modelName} />
+      <Header projectName={projectName} modelName={activeModel} />
       <ChatView
         messages={messages}
         streamingContent={streamingContent}
