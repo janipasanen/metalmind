@@ -6,7 +6,19 @@
  * Tier 3 (cloud reasoning): architecture, large multi-file, complex debugging, planning
  */
 
+import { estimateTokens } from "./cost-tracker.js";
+
 export type TaskTier = "tier1-local" | "tier2-medium" | "tier3-cloud";
+
+/** Matches path-like tokens that carry a 2-4 letter file extension (auth.ts, App.tsx, package.json). */
+const FILE_REFERENCE_PATTERN = /\b[\w/-]+\.[a-z]{2,4}\b/gi;
+
+/** Count distinct file references in a request (real paths, not the literal word "file"). */
+export function countFileReferences(input: string): number {
+  const matches = input.match(FILE_REFERENCE_PATTERN);
+  if (!matches) return 0;
+  return new Set(matches.map((m) => m.toLowerCase())).size;
+}
 
 export interface TaskClassification {
   tier: TaskTier;
@@ -52,10 +64,10 @@ export class TaskClassifier {
     }
 
     const hasTier1 = TIER1_PATTERNS.some((p) => p.test(input));
-    const fileCount = (input.match(/file/i) ?? []).length;
+    const fileCount = countFileReferences(input);
     const isMultiStep =
       /\b(then|after that|next|also|and also)\b/i.test(input);
-    const tokenEstimate = input.length / 2;
+    const tokenEstimate = estimateTokens(input);
 
     if (hasTier1 && !isMultiStep && tokenEstimate < 1000) {
       return {

@@ -23,6 +23,11 @@ const COST_PER_1K_TOKENS: Record<string, Record<string, number>> = {
   ollama: { default: 0 },
 };
 
+/** Shared rough token estimate (~4 characters per token). */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
 export class CostTracker {
   private usageLog: ProviderUsage[] = [];
 
@@ -37,7 +42,7 @@ export class CostTracker {
   }
 
   estimateTokens(text: string): number {
-    return Math.ceil(text.length / 4);
+    return estimateTokens(text);
   }
 
   getSummary(): UsageSummary {
