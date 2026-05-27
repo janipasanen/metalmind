@@ -16,10 +16,10 @@ export function createProvider(
       return new OllamaProvider(model, options?.baseUrl, options?.apiKey);
     case "openai":
       if (!options?.apiKey) throw new Error("openai requires apiKey");
-      return new OpenAIProvider(model, options.apiKey);
+      return new OpenAIProvider(model, options.apiKey, options.baseUrl);
     case "anthropic":
       if (!options?.apiKey) throw new Error("anthropic requires apiKey");
-      return new AnthropicProvider(model, options.apiKey);
+      return new AnthropicProvider(model, options.apiKey, options.baseUrl);
     case "mlx":
       return new MlxProvider({
         baseUrl: options?.baseUrl ?? DEFAULT_MLX_BASE_URL,

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { createProvider, DEFAULT_MLX_BASE_URL } from "../src/provider-factory.js";
 import { OllamaProvider } from "../src/ollama/ollama-provider.js";
 import { MlxProvider } from "../src/mlx/mlx-provider.js";
@@ -44,5 +44,55 @@ describe("createProvider", () => {
 
   it("exposes the default MLX sidecar base URL", () => {
     expect(DEFAULT_MLX_BASE_URL).toBe("http://127.0.0.1:8742");
+  });
+});
+
+describe("createProvider baseUrl forwarding", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function captureFetchUrl(responseBody: unknown): { url: () => string } {
+    let capturedUrl = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string) => {
+        capturedUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => responseBody,
+        };
+      }),
+    );
+    return { url: () => capturedUrl };
+  }
+
+  it("forwards a custom baseUrl to the OpenAI provider", async () => {
+    const cap = captureFetchUrl({ choices: [{ message: { role: "assistant", content: "ok" } }] });
+    const p = createProvider("openai", "gpt-4", {
+      apiKey: "sk-test",
+      baseUrl: "https://gateway.example.com/v1",
+    });
+    await p.completeChat({ messages: [{ role: "user", content: "hi" }] });
+    expect(cap.url()).toBe("https://gateway.example.com/v1/chat/completions");
+  });
+
+  it("forwards a custom baseUrl to the Anthropic provider", async () => {
+    const cap = captureFetchUrl({ role: "assistant", content: [{ type: "text", text: "ok" }] });
+    const p = createProvider("anthropic", "claude-sonnet", {
+      apiKey: "sk-test",
+      baseUrl: "https://proxy.example.com",
+    });
+    await p.completeChat({ messages: [{ role: "user", content: "hi" }] });
+    expect(cap.url()).toBe("https://proxy.example.com/v1/messages");
+  });
+
+  it("OpenAI provider falls back to the default base URL when none is given", async () => {
+    const cap = captureFetchUrl({ choices: [{ message: { role: "assistant", content: "ok" } }] });
+    const p = createProvider("openai", "gpt-4", { apiKey: "sk-test" });
+    await p.completeChat({ messages: [{ role: "user", content: "hi" }] });
+    expect(cap.url()).toBe("https://api.openai.com/v1/chat/completions");
   });
 });
