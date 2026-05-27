@@ -6,6 +6,14 @@ export interface TuiConfig {
   model: string;
   apiKey?: string;
   baseUrl?: string;
+  /** True when the user explicitly chose a provider/model (CLI flag or env) → bypass auto-routing. */
+  explicit: boolean;
+}
+
+/** Resolve credentials/base URL for a provider from the environment. */
+export function providerCredentials(provider: string): { apiKey?: string; baseUrl?: string } {
+  const apiKey = envApiKey(provider);
+  return { apiKey, baseUrl: process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey) };
 }
 
 const PROVIDER_DEFAULTS: Record<string, string> = {
@@ -52,6 +60,7 @@ export function resolveConfig(
 
   const explicitProvider = cliProvider || process.env.METALMIND_PROVIDER || "";
   const explicitModel = cliModel || process.env.METALMIND_MODEL || "";
+  const explicit = Boolean(explicitProvider || explicitModel);
 
   const models = fileConfig.models ?? {};
 
@@ -72,7 +81,7 @@ export function resolveConfig(
     const apiKey = envApiKey(provider) ?? entry.apiKey;
     const baseUrl =
       process.env.METALMIND_BASE_URL ?? entry.baseUrl ?? defaultBaseUrl(provider, apiKey);
-    return { provider, model: entry.model, apiKey, baseUrl };
+    return { provider, model: entry.model, apiKey, baseUrl, explicit };
   }
 
   // Built-in resolution (no named model).
@@ -87,5 +96,5 @@ export function resolveConfig(
   const apiKey = envApiKey(provider);
   const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey);
 
-  return { provider, model, apiKey, baseUrl };
+  return { provider, model, apiKey, baseUrl, explicit };
 }

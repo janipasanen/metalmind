@@ -5,7 +5,7 @@ import ChatView from "./ChatView.js";
 import InputBar from "./InputBar.js";
 import StatusBar from "./StatusBar.js";
 import { useChat } from "../hooks/useChat.js";
-import { AgentLoop } from "../agent.js";
+import { AgentLoop, createDefaultRouter } from "../agent.js";
 import type { TuiConfig } from "../config.js";
 
 export interface ChatMessage {
@@ -38,7 +38,12 @@ export default function App({ config }: AppProps) {
 
   useEffect(() => {
     try {
-      agentRef.current = new AgentLoop(config);
+      // Auto-route across tiers unless the user pinned a provider/model.
+      const router = config.explicit ? undefined : createDefaultRouter(config);
+      agentRef.current = new AgentLoop(config, {
+        router,
+        onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
+      });
     } catch (err) {
       setAgentError(err instanceof Error ? err.message : String(err));
     }

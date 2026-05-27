@@ -1,9 +1,10 @@
 import { createProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
 import type { AgentMessage } from "@metalmind/schemas";
-import type { ModelProvider } from "@metalmind/core";
+import type { ModelProvider, RouteDecision } from "@metalmind/core";
+import { ModelRouter, estimateTokens } from "@metalmind/core";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
-import type { TuiConfig } from "./config.js";
+import { providerCredentials, type TuiConfig } from "./config.js";
 
 function buildRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
@@ -12,27 +13,90 @@ function buildRegistry(): ToolRegistry {
   return registry;
 }
 
+/**
+ * Build a router whose local tier is the resolved config provider/model and whose
+ * cloud tier defaults to Anthropic. Used when the user hasn't pinned a provider.
+ */
+export function createDefaultRouter(config: TuiConfig): ModelRouter {
+  return new ModelRouter({
+    tier1Model: config.model,
+    tier1Provider: config.provider,
+    tier2Model: config.model,
+    tier2Provider: config.provider,
+    tier3Model: "claude-sonnet-4-6",
+    tier3Provider: "anthropic",
+    localFirst: true,
+  });
+}
+
+export interface AgentLoopOptions {
+  /** When provided, the loop routes each turn via the router instead of a fixed provider. */
+  router?: ModelRouter;
+  /** Called whenever a turn is routed, so the UI can show the active tier/model. */
+  onRoute?: (decision: RouteDecision) => void;
+}
+
 export class AgentLoop {
-  private provider: ModelProvider;
+  private config: TuiConfig;
+  private router?: ModelRouter;
+  private onRoute?: (decision: RouteDecision) => void;
   private registry: ToolRegistry;
   private history: AgentMessage[] = [];
   private projectRoot: string;
+  private turnCount = 0;
+  private providerCache = new Map<string, ModelProvider>();
 
-  constructor(config: TuiConfig) {
-    this.provider = createProvider(config.provider, config.model, {
-      apiKey: config.apiKey,
-      baseUrl: config.baseUrl,
-    });
+  constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
+    this.config = config;
+    this.router = options.router;
+    this.onRoute = options.onRoute;
     this.registry = buildRegistry();
     this.projectRoot = process.cwd();
   }
 
   get providerLabel(): string {
-    return `${this.provider.providerName}/${this.provider.providerName}`;
+    return `${this.config.provider}/${this.config.model}`;
+  }
+
+  private getProvider(provider: string, model: string): ModelProvider {
+    const key = `${provider}/${model}`;
+    let cached = this.providerCache.get(key);
+    if (!cached) {
+      const creds =
+        provider === this.config.provider
+          ? { apiKey: this.config.apiKey, baseUrl: this.config.baseUrl }
+          : providerCredentials(provider);
+      cached = createProvider(provider, model, creds);
+      this.providerCache.set(key, cached);
+    }
+    return cached;
+  }
+
+  /** Pick the provider/model for this turn, routing if a router is configured. */
+  private selectProvider(userInput: string): { provider: ModelProvider; label: string } {
+    if (this.router) {
+      const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+      const decision = this.router.route(userInput, 0, {
+        conversationDepth: this.turnCount,
+        historyTokens,
+      });
+      this.onRoute?.(decision);
+      return {
+        provider: this.getProvider(decision.provider, decision.modelId),
+        label: `${decision.provider}/${decision.modelId}`,
+      };
+    }
+    return {
+      provider: this.getProvider(this.config.provider, this.config.model),
+      label: this.providerLabel,
+    };
   }
 
   async *run(userInput: string): AsyncGenerator<ChatStreamEvent> {
     this.history.push({ role: "user", content: userInput });
+    this.turnCount++;
+
+    const { provider } = this.selectProvider(userInput);
 
     const toolDefs = this.registry.list().map((t) => ({
       name: t.toolName,
@@ -49,7 +113,7 @@ export class AgentLoop {
       const pendingToolCalls: Array<{ toolCallId: string; toolName: string; argumentsJson: string }> = [];
 
       try {
-        for await (const event of this.provider.streamChatCompletion({
+        for await (const event of provider.streamChatCompletion({
           messages: [...this.history],
           tools: toolDefs,
         })) {
@@ -121,5 +185,6 @@ export class AgentLoop {
 
   clearHistory(): void {
     this.history = [];
+    this.turnCount = 0;
   }
 }

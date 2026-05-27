@@ -49,6 +49,8 @@ vi.mock("@metalmind/tools", () => ({
 }));
 
 import { createProvider } from "@metalmind/providers";
+import { ModelRouter } from "@metalmind/core";
+import type { RouteDecision } from "@metalmind/core";
 import { AgentLoop } from "../agent.js";
 
 const mockCreateProvider = vi.mocked(createProvider);
@@ -65,7 +67,7 @@ describe("AgentLoop", () => {
       { type: "done" },
     ]) as never);
 
-    const loop = new AgentLoop({ provider: "stub", model: "test" });
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
     const events = await collect(loop.run("hi"));
 
     expect(events.filter((e) => e.type === "text").map((e) => (e as { type: "text"; text: string }).text)).toEqual([
@@ -87,7 +89,7 @@ describe("AgentLoop", () => {
       },
     } as never);
 
-    const loop = new AgentLoop({ provider: "stub", model: "test" });
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
     const events = await collect(loop.run("hi"));
 
     const errEvent = events.find((e) => e.type === "error") as { type: "error"; message: string } | undefined;
@@ -111,7 +113,7 @@ describe("AgentLoop", () => {
       },
     } as never);
 
-    const loop = new AgentLoop({ provider: "stub", model: "test" });
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
     await collect(loop.run("first"));
     await collect(loop.run("second"));
 
@@ -136,7 +138,7 @@ describe("AgentLoop", () => {
       },
     } as never);
 
-    const loop = new AgentLoop({ provider: "stub", model: "test" });
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
     await collect(loop.run("first"));
     loop.clearHistory();
     await collect(loop.run("second"));
@@ -151,8 +153,100 @@ describe("AgentLoop", () => {
       { type: "done" },
     ]) as never);
 
-    const loop = new AgentLoop({ provider: "stub", model: "test" });
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
     const events = await collect(loop.run("hi"));
     expect(events.at(-1)?.type).toBe("done");
+  });
+});
+
+describe("AgentLoop routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeRouter() {
+    return new ModelRouter({
+      tier1Model: "local-small",
+      tier1Provider: "mlx",
+      tier2Model: "local-small",
+      tier2Provider: "mlx",
+      tier3Model: "claude",
+      tier3Provider: "anthropic",
+      localFirst: true,
+    });
+  }
+
+  it("routes a complex turn to the cloud tier and reports the decision", async () => {
+    const createdWith: Array<[string, string]> = [];
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      createdWith.push([provider, model]);
+      return makeProvider([{ type: "text", text: "ok" }, { type: "done" }]) as never;
+    });
+
+    const routes: RouteDecision[] = [];
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router: makeRouter(), onRoute: (d) => routes.push(d) },
+    );
+
+    await collect(loop.run("design the authentication architecture"));
+
+    expect(routes).toHaveLength(1);
+    expect(routes[0].provider).toBe("anthropic");
+    expect(routes[0].tier).toBe("tier3-cloud");
+    expect(createdWith.some(([p, m]) => p === "anthropic" && m === "claude")).toBe(true);
+  });
+
+  it("routes a simple turn to the local tier", async () => {
+    const createdWith: Array<[string, string]> = [];
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      createdWith.push([provider, model]);
+      return makeProvider([{ type: "text", text: "explanation" }, { type: "done" }]) as never;
+    });
+
+    const routes: RouteDecision[] = [];
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router: makeRouter(), onRoute: (d) => routes.push(d) },
+    );
+
+    await collect(loop.run("explain how recursion works conceptually"));
+
+    expect(routes[0].provider).toBe("mlx");
+    expect(routes[0].tier).toBe("tier1-local");
+  });
+
+  it("uses the fixed config provider when no router is given (manual override)", async () => {
+    const createdWith: Array<[string, string]> = [];
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      createdWith.push([provider, model]);
+      return makeProvider([{ type: "done" }]) as never;
+    });
+
+    const loop = new AgentLoop({ provider: "ollama", model: "gemma3", explicit: true });
+    await collect(loop.run("design the authentication architecture"));
+
+    // No routing — went straight to the pinned provider despite a "complex" prompt.
+    expect(createdWith).toEqual([["ollama", "gemma3"]]);
+  });
+
+  it("caches providers across turns (one construction per provider/model)", async () => {
+    const createdWith: Array<[string, string]> = [];
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      createdWith.push([provider, model]);
+      return makeProvider([{ type: "text", text: "ok" }, { type: "done" }]) as never;
+    });
+
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router: makeRouter() },
+    );
+
+    await collect(loop.run("explain recursion conceptually"));
+    await collect(loop.run("explain closures conceptually"));
+
+    // Both simple turns route to mlx/local-small — provider built once.
+    const mlxBuilds = createdWith.filter(([p, m]) => p === "mlx" && m === "local-small");
+    expect(mlxBuilds).toHaveLength(1);
   });
 });
