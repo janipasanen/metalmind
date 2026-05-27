@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "main": "./src/index.tsx",
+  "bin": {
+    "metalmind": "./bin/metalmind.js"
+  },
+  "scripts": {
+    "dev": "tsx --tsconfig ../../tsconfig.json src/index.tsx",
+    "start": "node bin/metalmind.js"
+  },
   "dependencies": {
     "@metalmind/config": "*",
     "@metalmind/core": "*",
@@ -16,6 +23,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0"
+    "@types/react": "^19.0.0",
+    "tsx": "^4.22.3"
   }
 }
