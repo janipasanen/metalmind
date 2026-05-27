@@ -37,16 +37,25 @@ export default function App({ config }: AppProps) {
   const [agentError, setAgentError] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      // Auto-route across tiers unless the user pinned a provider/model.
-      const router = config.explicit ? undefined : createDefaultRouter(config);
-      agentRef.current = new AgentLoop(config, {
-        router,
-        onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
-      });
-    } catch (err) {
-      setAgentError(err instanceof Error ? err.message : String(err));
-    }
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // Auto-route across tiers unless the user pinned a provider/model.
+        const router = config.explicit ? undefined : await createDefaultRouter(config);
+        if (cancelled) return;
+        agentRef.current = new AgentLoop(config, {
+          router,
+          onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
+        });
+      } catch (err) {
+        if (!cancelled) setAgentError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [config]);
 
   const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls } = useChat({

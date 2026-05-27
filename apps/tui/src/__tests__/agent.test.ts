@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ChatStreamEvent } from "../hooks/useChat.js";
 
 // Minimal provider stub
-function makeProvider(events: Array<{ type: string; [k: string]: unknown }>) {
+function makeProvider(
+  events: Array<{ type: string; [k: string]: unknown }>,
+  readiness: { ready: boolean; message: string } = { ready: true, message: "ready" },
+) {
   return {
     providerName: "stub",
     supportedCapabilities: {
@@ -18,6 +21,9 @@ function makeProvider(events: Array<{ type: string; [k: string]: unknown }>) {
     },
     async completeChat() {
       return { message: { role: "assistant" as const, content: "" } };
+    },
+    async readiness() {
+      return readiness;
     },
   };
 }
@@ -51,7 +57,12 @@ vi.mock("@metalmind/tools", () => ({
 import { createProvider } from "@metalmind/providers";
 import { ModelRouter } from "@metalmind/core";
 import type { RouteDecision } from "@metalmind/core";
-import { AgentLoop } from "../agent.js";
+import {
+  AgentLoop,
+  createDefaultRouter,
+  resolveNamedTier,
+  defaultLocalTier,
+} from "../agent.js";
 
 const mockCreateProvider = vi.mocked(createProvider);
 
@@ -82,6 +93,7 @@ describe("AgentLoop", () => {
       providerName: "stub",
       supportedCapabilities: {} as never,
       async *streamChatCompletion() {
+        yield { type: "text", text: "" };
         throw new Error("network error");
       },
       async completeChat() {
@@ -248,6 +260,91 @@ describe("AgentLoop routing", () => {
     // Both simple turns route to mlx/local-small — provider built once.
     const mlxBuilds = createdWith.filter(([p, m]) => p === "mlx" && m === "local-small");
     expect(mlxBuilds).toHaveLength(1);
+  });
+});
+
+describe("createDefaultRouter", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const fileConfig = {
+    models: {
+      localMlx: {
+        provider: "mlx",
+        model: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
+        baseUrl: "http://127.0.0.1:8742",
+      },
+      cloudReasoning: {
+        provider: "anthropic",
+        model: "claude-sonnet-latest",
+      },
+    },
+    routing: {
+      defaultLocalModel: "localMlx",
+      defaultReasoningModel: "cloudReasoning",
+    },
+  };
+
+  it("resolves named tiers from metalmind.yaml", () => {
+    expect(resolveNamedTier("localMlx", fileConfig.models)).toEqual({
+      provider: "mlx",
+      model: fileConfig.models.localMlx.model,
+      baseUrl: fileConfig.models.localMlx.baseUrl,
+    });
+  });
+
+  it("defaults the local tier to MLX on Apple Silicon and Ollama elsewhere", () => {
+    expect(defaultLocalTier(true)).toEqual({
+      provider: "mlx",
+      model: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
+    });
+    expect(defaultLocalTier(false)).toEqual({
+      provider: "ollama",
+      model: "deepseek-coder:1.3b",
+    });
+  });
+
+  it("uses the YAML local MLX model when the sidecar is ready", async () => {
+    mockCreateProvider.mockImplementation((provider: string, model: string, options?: { baseUrl?: string }) => {
+      if (provider === "mlx" && model === fileConfig.models.localMlx.model) {
+        expect(options?.baseUrl).toBe(fileConfig.models.localMlx.baseUrl);
+        return makeProvider([{ type: "done" }]) as never;
+      }
+      return makeProvider([{ type: "text", text: "ok" }, { type: "done" }]) as never;
+    });
+
+    const router = await createDefaultRouter(
+      { provider: "ollama", model: "deepseek-coder:1.3b", explicit: false },
+      fileConfig as never,
+    );
+
+    const local = router.route("explain how recursion works conceptually");
+    const cloud = router.route("design the authentication architecture");
+
+    expect(local.provider).toBe("mlx");
+    expect(local.modelId).toBe(fileConfig.models.localMlx.model);
+    expect(cloud.provider).toBe("anthropic");
+    expect(cloud.modelId).toBe(fileConfig.models.cloudReasoning.model);
+  });
+
+  it("falls back to Ollama when the MLX sidecar is unavailable", async () => {
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      if (provider === "mlx" && model === fileConfig.models.localMlx.model) {
+        return makeProvider([{ type: "done" }], { ready: false, message: "down" }) as never;
+      }
+      return makeProvider([{ type: "text", text: "ok" }, { type: "done" }]) as never;
+    });
+
+    const router = await createDefaultRouter(
+      { provider: "ollama", model: "deepseek-coder:1.3b", explicit: false },
+      fileConfig as never,
+    );
+
+    const local = router.route("read the file src/auth.ts");
+
+    expect(local.provider).toBe("ollama");
+    expect(local.modelId).toBe("deepseek-coder:1.3b");
   });
 });
 

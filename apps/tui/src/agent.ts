@@ -1,7 +1,8 @@
 import { createProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
-import type { AgentMessage } from "@metalmind/schemas";
-import type { ModelProvider, RouteDecision, TriageLabel } from "@metalmind/core";
+import { loadConfigFromFile } from "@metalmind/config";
+import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
+import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities } from "@metalmind/core";
 import { ModelRouter, estimateTokens, evaluateQuality } from "@metalmind/core";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
@@ -20,20 +21,134 @@ function buildRegistry(): ToolRegistry {
   return registry;
 }
 
+interface TierTarget {
+  provider: string;
+  model: string;
+  baseUrl?: string;
+}
+
+/** Known per-provider capabilities (mirrors the provider classes' constants). */
+const PROVIDER_CAPABILITIES: Record<string, ModelCapabilities> = {
+  mlx: {
+    supportsStreaming: true,
+    supportsToolCalling: false,
+    supportsVision: false,
+    supportsReasoning: false,
+    supportsJsonMode: false,
+    maximumContextTokens: 32_768,
+  },
+  ollama: {
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: false,
+    supportsJsonMode: true,
+    maximumContextTokens: 128_000,
+  },
+  anthropic: {
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    supportsJsonMode: false,
+    maximumContextTokens: 200_000,
+  },
+  openai: {
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    supportsJsonMode: true,
+    maximumContextTokens: 256_000,
+  },
+};
+
+export function isAppleSilicon(): boolean {
+  return process.platform === "darwin" && process.arch === "arm64";
+}
+
+/** Resolve a metalmind.yaml named-model reference to a provider/model target. */
+export function resolveNamedTier(
+  name: string | undefined,
+  models: MetalmindConfig["models"],
+): TierTarget | undefined {
+  if (!name) return undefined;
+  const entry = models?.[name];
+  return entry ? { provider: entry.provider, model: entry.model, baseUrl: entry.baseUrl } : undefined;
+}
+
+/** Default local tier: MLX on Apple Silicon (GPU), Ollama elsewhere. */
+export function defaultLocalTier(appleSilicon: boolean): TierTarget {
+  return appleSilicon
+    ? { provider: "mlx", model: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit" }
+    : { provider: "ollama", model: "deepseek-coder:1.3b" };
+}
+
+function tierCapabilities(targets: TierTarget[]): Record<string, ModelCapabilities> {
+  const registry: Record<string, ModelCapabilities> = {};
+  for (const t of targets) {
+    const caps = PROVIDER_CAPABILITIES[t.provider];
+    if (caps) registry[`${t.provider}/${t.model}`] = caps;
+  }
+  return registry;
+}
+
+async function mlxSidecarReady(target: TierTarget): Promise<boolean> {
+  const provider = createProvider("mlx", target.model, { baseUrl: target.baseUrl });
+  const readiness = (provider as { readiness?: () => Promise<{ ready: boolean }> }).readiness;
+  if (!readiness) return true;
+
+  try {
+    const status = await readiness.call(provider);
+    return status.ready;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveLocalTier(fileConfig: MetalmindConfig): Promise<TierTarget> {
+  const models = fileConfig.models ?? {};
+  const routing = fileConfig.routing;
+  const namedLocal =
+    resolveNamedTier(routing?.defaultLocalModel, models) ?? defaultLocalTier(isAppleSilicon());
+
+  if (namedLocal.provider !== "mlx") return namedLocal;
+  if (await mlxSidecarReady(namedLocal)) return namedLocal;
+
+  return defaultLocalTier(false);
+}
+
 /**
- * Build a router whose local tier is the resolved config provider/model and whose
- * cloud tier defaults to Anthropic. Used when the user hasn't pinned a provider.
+ * Build a router from metalmind.yaml routing (named models) when present, defaulting
+ * the local tier to MLX on Apple Silicon and the reasoning tier to Anthropic. If the
+ * MLX sidecar is down at runtime, the quality gate escalates to the cloud tier.
  */
-export function createDefaultRouter(config: TuiConfig): ModelRouter {
-  return new ModelRouter({
-    tier1Model: config.model,
-    tier1Provider: config.provider,
-    tier2Model: config.model,
-    tier2Provider: config.provider,
-    tier3Model: "claude-sonnet-4-6",
-    tier3Provider: "anthropic",
-    localFirst: true,
-  });
+export function createDefaultRouter(
+  config: TuiConfig,
+  fileConfig: MetalmindConfig = loadConfigFromFile(),
+): Promise<ModelRouter> {
+  return (async () => {
+    const models = fileConfig.models ?? {};
+    const routing = fileConfig.routing;
+
+    const local = await resolveLocalTier(fileConfig);
+    const reasoning =
+      resolveNamedTier(routing?.defaultReasoningModel, models) ?? {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      };
+
+    return new ModelRouter({
+      tier1Provider: local.provider,
+      tier1Model: local.model,
+      tier2Provider: local.provider,
+      tier2Model: local.model,
+      tier3Provider: reasoning.provider,
+      tier3Model: reasoning.model,
+      localFirst: true,
+      capabilities: tierCapabilities([local, reasoning]),
+    });
+  })();
 }
 
 export interface AgentLoopOptions {
