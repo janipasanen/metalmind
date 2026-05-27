@@ -13,7 +13,7 @@ export function createProvider(
 ): ModelProvider {
   switch (provider) {
     case "ollama":
-      return new OllamaProvider(model, options?.baseUrl);
+      return new OllamaProvider(model, options?.baseUrl, options?.apiKey);
     case "openai":
       if (!options?.apiKey) throw new Error("openai requires apiKey");
       return new OpenAIProvider(model, options.apiKey);

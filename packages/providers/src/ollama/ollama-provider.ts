@@ -46,14 +46,22 @@ export class OllamaProvider implements ModelProvider {
   readonly supportedCapabilities = ollamaCapabilities;
   private baseUrl: string;
   private modelName: string;
+  private apiKey?: string;
 
-  constructor(model: string, baseUrl = "http://127.0.0.1:11434") {
+  constructor(model: string, baseUrl = "http://127.0.0.1:11434", apiKey?: string) {
     this.modelName = model;
     this.baseUrl = baseUrl;
+    this.apiKey = apiKey;
+  }
+
+  private headers(): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    return headers;
   }
 
   async listModels(): Promise<string[]> {
-    const res = await fetch(`${this.baseUrl}/api/tags`);
+    const res = await fetch(`${this.baseUrl}/api/tags`, { headers: this.headers() });
     const data = (await res.json()) as { models: Array<{ name: string }> };
     return data.models.map((m) => m.name);
   }
@@ -68,7 +76,7 @@ export class OllamaProvider implements ModelProvider {
 
     const res = await fetch(`${this.baseUrl}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(),
       body: JSON.stringify(body),
     });
 
@@ -97,7 +105,7 @@ export class OllamaProvider implements ModelProvider {
 
     const res = await fetch(`${this.baseUrl}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers(),
       body: JSON.stringify(body),
     });
 

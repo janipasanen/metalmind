@@ -136,6 +136,68 @@ describe("OllamaProvider", () => {
       expect(result.tokenCount).toBe(0);
     });
   });
+
+  describe("authentication (Ollama Cloud)", () => {
+    it("sends no Authorization header when no apiKey is set", async () => {
+      let capturedHeaders: Record<string, string> = {};
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+        capturedHeaders = opts.headers;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({ message: { role: "assistant", content: "OK" } }),
+        };
+      }));
+
+      const p = new OllamaProvider("test");
+      await p.completeChat({ messages: [{ role: "user", content: "Hi" }] });
+      expect(capturedHeaders.Authorization).toBeUndefined();
+    });
+
+    it("sends Bearer Authorization header when apiKey is set", async () => {
+      let capturedHeaders: Record<string, string> = {};
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+        capturedHeaders = opts.headers;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({ message: { role: "assistant", content: "OK" } }),
+        };
+      }));
+
+      const p = new OllamaProvider("gemma3", "https://ollama.com", "sk-ollama-test");
+      await p.completeChat({ messages: [{ role: "user", content: "Hi" }] });
+      expect(capturedHeaders.Authorization).toBe("Bearer sk-ollama-test");
+    });
+
+    it("sends Authorization header on streaming requests too", async () => {
+      let capturedHeaders: Record<string, string> = {};
+      const encoder = new TextEncoder();
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+        capturedHeaders = opts.headers;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({}),
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(JSON.stringify({ done: true }) + "\n"));
+              controller.close();
+            },
+          }),
+        };
+      }));
+
+      const p = new OllamaProvider("gemma3", "https://ollama.com", "sk-ollama-test");
+      for await (const _e of p.streamChatCompletion({ messages: [] })) {
+        // drain
+      }
+      expect(capturedHeaders.Authorization).toBe("Bearer sk-ollama-test");
+    });
+  });
 });
 
 describe("OllamaProvider streaming", () => {

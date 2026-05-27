@@ -13,6 +13,7 @@ const PROVIDER_DEFAULTS: Record<string, string> = {
 };
 
 const DEFAULT_MLX_BASE_URL = "http://127.0.0.1:8742";
+const OLLAMA_CLOUD_BASE_URL = "https://ollama.com";
 
 export function resolveConfig(argv: string[] = process.argv.slice(2)): TuiConfig {
   let provider = process.env.METALMIND_PROVIDER ?? "";
@@ -39,10 +40,19 @@ export function resolveConfig(argv: string[] = process.argv.slice(2)): TuiConfig
       ? process.env.ANTHROPIC_API_KEY
       : provider === "openai"
         ? process.env.OPENAI_API_KEY
-        : undefined;
+        : provider === "ollama"
+          ? process.env.OLLAMA_API_KEY
+          : undefined;
+
+  // When an Ollama key is present, default to Ollama Cloud (overridable).
+  const ollamaDefaultBaseUrl =
+    provider === "ollama" && process.env.OLLAMA_API_KEY
+      ? OLLAMA_CLOUD_BASE_URL
+      : undefined;
 
   const baseUrl =
     process.env.METALMIND_BASE_URL ??
+    ollamaDefaultBaseUrl ??
     (provider === "mlx" ? DEFAULT_MLX_BASE_URL : undefined);
 
   return { provider, model, apiKey, baseUrl };

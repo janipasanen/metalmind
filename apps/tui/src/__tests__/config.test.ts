@@ -24,6 +24,7 @@ describe("resolveConfig", () => {
     delete process.env.METALMIND_MODEL;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
+    delete process.env.OLLAMA_API_KEY;
     delete process.env.METALMIND_BASE_URL;
   });
 
@@ -111,6 +112,30 @@ describe("resolveConfig", () => {
       const cfg = resolveConfig([]);
       expect(cfg.provider).toBe("mlx");
       expect(cfg.baseUrl).toBe("http://127.0.0.1:9000");
+    });
+  });
+
+  it("reads OLLAMA_API_KEY and defaults to Ollama Cloud base URL", () => {
+    withEnv({ METALMIND_PROVIDER: "ollama", OLLAMA_API_KEY: "sk-ollama" }, () => {
+      const cfg = resolveConfig([]);
+      expect(cfg.provider).toBe("ollama");
+      expect(cfg.apiKey).toBe("sk-ollama");
+      expect(cfg.baseUrl).toBe("https://ollama.com");
+    });
+  });
+
+  it("does not set an Ollama base URL for local (no key)", () => {
+    withEnv({ METALMIND_PROVIDER: "ollama" }, () => {
+      const cfg = resolveConfig([]);
+      expect(cfg.apiKey).toBeUndefined();
+      expect(cfg.baseUrl).toBeUndefined();
+    });
+  });
+
+  it("lets METALMIND_BASE_URL override the Ollama Cloud default", () => {
+    withEnv({ METALMIND_PROVIDER: "ollama", OLLAMA_API_KEY: "sk-ollama", METALMIND_BASE_URL: "http://192.168.1.10:11434" }, () => {
+      const cfg = resolveConfig([]);
+      expect(cfg.baseUrl).toBe("http://192.168.1.10:11434");
     });
   });
 });
