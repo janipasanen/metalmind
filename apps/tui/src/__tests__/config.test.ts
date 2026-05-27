@@ -97,4 +97,20 @@ describe("resolveConfig", () => {
       expect(cfg.baseUrl).toBe("http://localhost:11434");
     });
   });
+
+  it("selects mlx with its default model and sidecar base URL", () => {
+    const cfg = resolveConfig(["--provider", "mlx"]);
+    expect(cfg.provider).toBe("mlx");
+    expect(cfg.model).toBe("mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit");
+    expect(cfg.baseUrl).toBe("http://127.0.0.1:8742");
+    expect(cfg.apiKey).toBeUndefined();
+  });
+
+  it("lets METALMIND_BASE_URL override the mlx sidecar default", () => {
+    withEnv({ METALMIND_PROVIDER: "mlx", METALMIND_BASE_URL: "http://127.0.0.1:9000" }, () => {
+      const cfg = resolveConfig([]);
+      expect(cfg.provider).toBe("mlx");
+      expect(cfg.baseUrl).toBe("http://127.0.0.1:9000");
+    });
+  });
 });

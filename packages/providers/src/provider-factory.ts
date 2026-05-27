@@ -2,6 +2,9 @@ import type { ModelProvider } from "@metalmind/core";
 import { OllamaProvider } from "./ollama/ollama-provider.js";
 import { OpenAIProvider } from "./openai/openai-provider.js";
 import { AnthropicProvider } from "./anthropic/anthropic-provider.js";
+import { MlxProvider } from "./mlx/mlx-provider.js";
+
+export const DEFAULT_MLX_BASE_URL = "http://127.0.0.1:8742";
 
 export function createProvider(
   provider: string,
@@ -17,6 +20,11 @@ export function createProvider(
     case "anthropic":
       if (!options?.apiKey) throw new Error("anthropic requires apiKey");
       return new AnthropicProvider(model, options.apiKey);
+    case "mlx":
+      return new MlxProvider({
+        baseUrl: options?.baseUrl ?? DEFAULT_MLX_BASE_URL,
+        model,
+      });
     default:
       throw new Error(`Unknown provider: ${provider}`);
   }

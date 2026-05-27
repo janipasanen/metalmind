@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { createProvider } from "../src/provider-factory.js";
+import { createProvider, DEFAULT_MLX_BASE_URL } from "../src/provider-factory.js";
 import { OllamaProvider } from "../src/ollama/ollama-provider.js";
+import { MlxProvider } from "../src/mlx/mlx-provider.js";
 
 describe("createProvider", () => {
   it("creates an OllamaProvider", () => {
@@ -24,5 +25,24 @@ describe("createProvider", () => {
 
   it("throws for anthropic without apiKey", () => {
     expect(() => createProvider("anthropic", "claude")).toThrow(/apiKey/);
+  });
+
+  it("creates an MlxProvider with default sidecar base URL", () => {
+    const p = createProvider("mlx", "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit");
+    expect(p).toBeInstanceOf(MlxProvider);
+    expect(p.providerName).toBe("mlx");
+  });
+
+  it("creates an MlxProvider with a custom base URL", () => {
+    const p = createProvider("mlx", "some-model", { baseUrl: "http://127.0.0.1:9000" });
+    expect(p).toBeInstanceOf(MlxProvider);
+  });
+
+  it("does not require an apiKey for mlx", () => {
+    expect(() => createProvider("mlx", "some-model")).not.toThrow();
+  });
+
+  it("exposes the default MLX sidecar base URL", () => {
+    expect(DEFAULT_MLX_BASE_URL).toBe("http://127.0.0.1:8742");
   });
 });

@@ -9,7 +9,10 @@ const PROVIDER_DEFAULTS: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4o",
   ollama: "deepseek-coder:1.3b",
+  mlx: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
 };
+
+const DEFAULT_MLX_BASE_URL = "http://127.0.0.1:8742";
 
 export function resolveConfig(argv: string[] = process.argv.slice(2)): TuiConfig {
   let provider = process.env.METALMIND_PROVIDER ?? "";
@@ -38,7 +41,9 @@ export function resolveConfig(argv: string[] = process.argv.slice(2)): TuiConfig
         ? process.env.OPENAI_API_KEY
         : undefined;
 
-  const baseUrl = process.env.METALMIND_BASE_URL;
+  const baseUrl =
+    process.env.METALMIND_BASE_URL ??
+    (provider === "mlx" ? DEFAULT_MLX_BASE_URL : undefined);
 
   return { provider, model, apiKey, baseUrl };
 }
