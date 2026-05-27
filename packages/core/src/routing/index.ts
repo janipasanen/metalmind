@@ -3,7 +3,8 @@ import { ModelRouter } from "./model-router.js";
 
 export { TaskClassifier } from "./task-classifier.js";
 export { ModelRouter } from "./model-router.js";
-export type { TaskTier, TaskClassification } from "./task-classifier.js";
+export { countFileReferences, hasStackTrace } from "./task-classifier.js";
+export type { TaskTier, TaskClassification, ClassificationContext } from "./task-classifier.js";
 export type { RouteDecision, RoutingConfig } from "./model-router.js";
 
 export class FallbackManager {

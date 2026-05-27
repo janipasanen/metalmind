@@ -25,6 +25,24 @@ export interface TaskClassification {
   reasoning: string;
   confidence: number; // 0-1
   suggestedMaxTokens?: number;
+  /** Whether the task will likely require tool calls (file ops, shell, git). */
+  needsTools: boolean;
+  /** Whether the task involves images / vision input. */
+  needsVision: boolean;
+  /** Estimated total context tokens (request + attached files + history). */
+  estimatedContextTokens: number;
+}
+
+/** Optional structured context that sharpens classification beyond the prompt text. */
+export interface ClassificationContext {
+  /** Contents (or text) of files attached to the request. */
+  attachedFiles?: string[];
+  /** Tokens already accumulated in the conversation history. */
+  historyTokens?: number;
+  /** Number of prior turns in the conversation. */
+  conversationDepth?: number;
+  /** Whether the request includes image input. */
+  hasImages?: boolean;
 }
 
 const TIER1_PATTERNS = [
@@ -46,44 +64,98 @@ const TIER3_PATTERNS = [
   /\bperformance\s+(optimiz|bottleneck|profile)\b/i,
 ];
 
+/** Complex build verbs that imply non-trivial work even without other signals. */
+const COMPLEX_VERB_PATTERN = /\b(implement|integrate|diagnose|optimize)\b/i;
+
+/** Verbs/keywords implying the agent will need to call tools. */
+const TOOL_VERB_PATTERN =
+  /\b(read|list|search|find|show|edit|change|modify|update|fix|add|create|write|delete|remove|rename|run|refactor|implement|build|integrate|migrate|test)\b/i;
+
+/** Heuristics that detect a pasted error / stack trace (a strong "hard debugging" signal). */
+const STACK_TRACE_PATTERNS = [
+  /Traceback \(most recent call last\)/,
+  /\b\w*(Error|Exception):\s/, // TypeError: , ValueError:
+  /\n\s*at\s+.+:\d+:\d+/, // JS stack frame: at fn (file:line:col)
+  /\bFile ".+", line \d+/, // Python frame
+];
+
+const DEEP_CONVERSATION_THRESHOLD = 6;
+const LARGE_CONTEXT_TOKENS = 2000;
+
+export function hasStackTrace(input: string): boolean {
+  return STACK_TRACE_PATTERNS.some((p) => p.test(input));
+}
+
 export class TaskClassifier {
   /**
-   * Classify a user request into a model tier.
+   * Classify a user request into a model tier, using both the prompt text and
+   * optional structured context (attached files, history size, depth, images).
    */
-  classify(request: string): TaskClassification {
+  classify(request: string, context: ClassificationContext = {}): TaskClassification {
     const input = request.trim();
 
-    const hasTier3 = TIER3_PATTERNS.some((p) => p.test(input));
-    if (hasTier3) {
+    const fileCount = countFileReferences(input);
+    const isMultiStep = /\b(then|after that|next|also|and also)\b/i.test(input);
+    const hasTier1 = TIER1_PATTERNS.some((p) => p.test(input));
+    const hasTier3Keyword = TIER3_PATTERNS.some((p) => p.test(input));
+    const hasComplexVerb = COMPLEX_VERB_PATTERN.test(input);
+    const hasError = hasStackTrace(input);
+    const depth = context.conversationDepth ?? 0;
+
+    const attachedTokens = (context.attachedFiles ?? []).reduce(
+      (sum, f) => sum + estimateTokens(f),
+      0,
+    );
+    const estimatedContextTokens =
+      estimateTokens(input) + attachedTokens + (context.historyTokens ?? 0);
+
+    const needsVision = context.hasImages ?? false;
+    const needsTools = fileCount > 0 || hasError || TOOL_VERB_PATTERN.test(input);
+
+    const signals = { needsTools, needsVision, estimatedContextTokens };
+
+    // Strong complexity signals → cloud reasoning.
+    if (hasTier3Keyword || hasComplexVerb || hasError) {
       return {
         tier: "tier3-cloud",
-        reasoning: "Complex task requiring architectural reasoning",
+        reasoning: hasError
+          ? "Pasted error/stack trace — complex debugging"
+          : hasComplexVerb
+            ? "Complex implementation/integration task"
+            : "Complex task requiring architectural reasoning",
         confidence: 0.85,
         suggestedMaxTokens: 16_000,
+        ...signals,
       };
     }
 
-    const hasTier1 = TIER1_PATTERNS.some((p) => p.test(input));
-    const fileCount = countFileReferences(input);
-    const isMultiStep =
-      /\b(then|after that|next|also|and also)\b/i.test(input);
-    const tokenEstimate = estimateTokens(input);
-
-    if (hasTier1 && !isMultiStep && tokenEstimate < 1000) {
+    // Simple, self-contained read/explain/search → local.
+    if (hasTier1 && !isMultiStep && estimatedContextTokens < 1000) {
       return {
         tier: "tier1-local",
         reasoning: "Simple read/explain/search task",
         confidence: 0.9,
         suggestedMaxTokens: 4_000,
+        ...signals,
       };
     }
 
-    if (isMultiStep || fileCount >= 2 || tokenEstimate >= 2000) {
+    // Breadth/size signals → cloud.
+    if (
+      isMultiStep ||
+      fileCount >= 2 ||
+      estimatedContextTokens >= LARGE_CONTEXT_TOKENS ||
+      depth >= DEEP_CONVERSATION_THRESHOLD
+    ) {
       return {
         tier: "tier3-cloud",
-        reasoning: "Multi-step or multi-file task",
+        reasoning:
+          depth >= DEEP_CONVERSATION_THRESHOLD
+            ? "Deep multi-turn session — escalating to cloud"
+            : "Multi-step, multi-file, or large-context task",
         confidence: 0.75,
         suggestedMaxTokens: 8_000,
+        ...signals,
       };
     }
 
@@ -93,6 +165,7 @@ export class TaskClassifier {
         reasoning: "Edit/modification task",
         confidence: 0.7,
         suggestedMaxTokens: 8_000,
+        ...signals,
       };
     }
 
@@ -101,6 +174,7 @@ export class TaskClassifier {
       reasoning: "Default to local for fast response",
       confidence: 0.6,
       suggestedMaxTokens: 4_000,
+      ...signals,
     };
   }
 }
