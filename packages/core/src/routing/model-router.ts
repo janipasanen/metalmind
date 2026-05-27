@@ -1,5 +1,5 @@
 import type { ModelCapabilities } from "../agent/agent-runtime.js";
-import type { TaskTier, TaskClassification } from "./task-classifier.js";
+import type { TaskTier, TaskClassification, ClassificationContext } from "./task-classifier.js";
 import { TaskClassifier } from "./task-classifier.js";
 
 export interface RouteDecision {
@@ -9,6 +9,8 @@ export interface RouteDecision {
   reason: string;
   escalatedFrom?: TaskTier;
   escalatedReason?: string;
+  /** Set when the tier was bumped because the preferred model lacked a required capability. */
+  capabilityAdjusted?: boolean;
 }
 
 export interface RoutingConfig {
@@ -20,6 +22,25 @@ export interface RoutingConfig {
   tier3Provider: string;
   localFirst: boolean;
   escalationThreshold: number; // number of failures before escalation
+  /** Capabilities per `${provider}/${model}` — when present, routing filters by them. */
+  capabilities?: Record<string, ModelCapabilities>;
+}
+
+const TIER_ORDER: TaskTier[] = ["tier1-local", "tier2-medium", "tier3-cloud"];
+
+/** Whether a model with the given capabilities can satisfy a classified task. */
+export function modelSatisfies(
+  capabilities: ModelCapabilities | undefined,
+  classification: Pick<
+    TaskClassification,
+    "needsTools" | "needsVision" | "estimatedContextTokens"
+  >,
+): boolean {
+  if (!capabilities) return true; // unknown capabilities → assume eligible
+  if (classification.needsTools && !capabilities.supportsToolCalling) return false;
+  if (classification.needsVision && !capabilities.supportsVision) return false;
+  if (classification.estimatedContextTokens > capabilities.maximumContextTokens) return false;
+  return true;
 }
 
 const DEFAULT_CONFIG: RoutingConfig = {
@@ -46,12 +67,18 @@ export class ModelRouter {
   /**
    * Route a user request to the appropriate model.
    */
-  route(request: string, previousFailures = 0): RouteDecision {
-    const classification = this.classifier.classify(request);
+  route(
+    request: string,
+    previousFailures = 0,
+    context?: ClassificationContext,
+  ): RouteDecision {
+    const classification = this.classifier.classify(request, context);
+
+    let decision: RouteDecision;
 
     if (previousFailures >= this.config.escalationThreshold) {
       const escalatedTier = this.escalateTier(classification.tier);
-      return {
+      decision = {
         tier: escalatedTier,
         modelId: this.modelForTier(escalatedTier),
         provider: this.providerForTier(escalatedTier),
@@ -59,23 +86,55 @@ export class ModelRouter {
         escalatedFrom: classification.tier,
         escalatedReason: `Escalated after ${previousFailures} failures`,
       };
-    }
-
-    if (this.config.localFirst && classification.tier === "tier2-medium") {
-      return {
+    } else if (this.config.localFirst && classification.tier === "tier2-medium") {
+      decision = {
         tier: "tier1-local",
         modelId: this.config.tier1Model,
         provider: this.config.tier1Provider,
         reason: `${classification.reasoning} (local-first attempt)`,
       };
+    } else {
+      decision = {
+        tier: classification.tier,
+        modelId: this.modelForTier(classification.tier),
+        provider: this.providerForTier(classification.tier),
+        reason: classification.reasoning,
+      };
     }
 
-    return {
-      tier: classification.tier,
-      modelId: this.modelForTier(classification.tier),
-      provider: this.providerForTier(classification.tier),
-      reason: classification.reasoning,
-    };
+    return this.applyCapabilityFilter(decision, classification);
+  }
+
+  /**
+   * If the chosen tier's model can't satisfy the task's capability requirements
+   * (tools, vision, context size), bump up to the lowest eligible tier.
+   */
+  private applyCapabilityFilter(
+    decision: RouteDecision,
+    classification: TaskClassification,
+  ): RouteDecision {
+    if (!this.config.capabilities) return decision;
+
+    const startIdx = TIER_ORDER.indexOf(decision.tier);
+    for (let i = startIdx; i < TIER_ORDER.length; i++) {
+      const tier = TIER_ORDER[i];
+      const provider = this.providerForTier(tier);
+      const model = this.modelForTier(tier);
+      const caps = this.config.capabilities[`${provider}/${model}`];
+      if (modelSatisfies(caps, classification)) {
+        if (i === startIdx) return decision;
+        return {
+          ...decision,
+          tier,
+          modelId: model,
+          provider,
+          capabilityAdjusted: true,
+          reason: `${decision.reason} (bumped from ${decision.tier}: model lacked a required capability)`,
+        };
+      }
+    }
+
+    return decision; // nothing eligible — keep original rather than fail hard
   }
 
   /**

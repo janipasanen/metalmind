@@ -2,7 +2,7 @@ import { TaskClassifier } from "./task-classifier.js";
 import { ModelRouter } from "./model-router.js";
 
 export { TaskClassifier } from "./task-classifier.js";
-export { ModelRouter } from "./model-router.js";
+export { ModelRouter, modelSatisfies } from "./model-router.js";
 export { countFileReferences, hasStackTrace } from "./task-classifier.js";
 export type { TaskTier, TaskClassification, ClassificationContext } from "./task-classifier.js";
 export type { RouteDecision, RoutingConfig } from "./model-router.js";
