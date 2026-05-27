@@ -32,9 +32,51 @@ export class MlxProvider implements ModelProvider {
     this.config = config;
   }
 
-  async healthCheck(): Promise<{ status: string; modelLoaded: boolean; model: string | null }> {
+  async healthCheck(): Promise<{
+    status: string;
+    modelLoaded: boolean;
+    model: string | null;
+    platform: string | null;
+  }> {
     const res = await fetch(`${this.config.baseUrl}/health`);
-    return res.json() as Promise<{ status: string; modelLoaded: boolean; model: string | null }>;
+    const data = (await res.json()) as {
+      status?: string;
+      model_loaded?: boolean;
+      model?: string | null;
+      platform?: string | null;
+    };
+    return {
+      status: data.status ?? "unknown",
+      modelLoaded: data.model_loaded ?? false,
+      model: data.model ?? null,
+      platform: data.platform ?? null,
+    };
+  }
+
+  /**
+   * Probe the sidecar and return a human-readable GPU readiness status.
+   * Distinguishes: sidecar down, sidecar up but no model loaded, and ready.
+   */
+  async readiness(): Promise<{ ready: boolean; message: string }> {
+    try {
+      const health = await this.healthCheck();
+      if (!health.modelLoaded) {
+        return {
+          ready: false,
+          message: `MLX sidecar up (${health.platform ?? "unknown platform"}) but no model loaded — it will load "${this.config.model}" on first use`,
+        };
+      }
+      return {
+        ready: true,
+        message: `MLX GPU ready: ${health.model} (${health.platform ?? "unknown platform"})`,
+      };
+    } catch {
+      return {
+        ready: false,
+        message:
+          "MLX sidecar not reachable — start it with: python scripts/mlx-sidecar.py",
+      };
+    }
   }
 
   async loadModel(model?: string): Promise<void> {

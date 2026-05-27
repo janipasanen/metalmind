@@ -36,12 +36,62 @@ describe("MlxProvider", () => {
   });
 
   describe("healthCheck", () => {
-    it("returns health status", async () => {
-      vi.stubGlobal("fetch", mockFetch({ status: "ok", modelLoaded: true, model: "test" }));
+    it("maps the sidecar snake_case response (model_loaded, platform)", async () => {
+      // Matches scripts/mlx-sidecar.py /health: { status, model_loaded, model, platform }
+      vi.stubGlobal(
+        "fetch",
+        mockFetch({ status: "ok", model_loaded: true, model: "test", platform: "darwin" }),
+      );
       const p = new MlxProvider(defaultConfig);
       const health = await p.healthCheck();
       expect(health.status).toBe("ok");
       expect(health.modelLoaded).toBe(true);
+      expect(health.model).toBe("test");
+      expect(health.platform).toBe("darwin");
+    });
+
+    it("reports modelLoaded false when no model is loaded", async () => {
+      vi.stubGlobal(
+        "fetch",
+        mockFetch({ status: "ok", model_loaded: false, model: null, platform: "darwin" }),
+      );
+      const p = new MlxProvider(defaultConfig);
+      const health = await p.healthCheck();
+      expect(health.modelLoaded).toBe(false);
+      expect(health.model).toBeNull();
+    });
+  });
+
+  describe("readiness", () => {
+    it("reports ready when a model is loaded on the GPU", async () => {
+      vi.stubGlobal(
+        "fetch",
+        mockFetch({ status: "ok", model_loaded: true, model: "deepseek", platform: "darwin" }),
+      );
+      const p = new MlxProvider(defaultConfig);
+      const r = await p.readiness();
+      expect(r.ready).toBe(true);
+      expect(r.message).toContain("GPU ready");
+      expect(r.message).toContain("deepseek");
+    });
+
+    it("reports not ready (no model) when sidecar is up but empty", async () => {
+      vi.stubGlobal(
+        "fetch",
+        mockFetch({ status: "ok", model_loaded: false, model: null, platform: "darwin" }),
+      );
+      const p = new MlxProvider(defaultConfig);
+      const r = await p.readiness();
+      expect(r.ready).toBe(false);
+      expect(r.message).toContain("no model loaded");
+    });
+
+    it("reports not ready with a start hint when the sidecar is down", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+      const p = new MlxProvider(defaultConfig);
+      const r = await p.readiness();
+      expect(r.ready).toBe(false);
+      expect(r.message).toContain("mlx-sidecar.py");
     });
   });
 

@@ -46,8 +46,9 @@ describe("Phase 5 integration — MLX provider pipeline", () => {
   it("healthCheck returns model status", async () => {
     vi.stubGlobal("fetch", mockFetch({
       status: "ok",
-      modelLoaded: true,
+      model_loaded: true,
       model: mlxConfig.model,
+      platform: "darwin",
     }));
 
     const provider = new MlxProvider(mlxConfig);
