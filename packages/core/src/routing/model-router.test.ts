@@ -147,3 +147,56 @@ describe("ModelRouter capability-aware routing", () => {
     expect(decision.provider).toBe("mlx");
   });
 });
+
+describe("ModelRouter triage pass", () => {
+  it("invokes triage for a low-confidence task and uses its label", async () => {
+    const router = new ModelRouter(); // defaults: tier3 anthropic
+    let called = false;
+    const triage = async () => {
+      called = true;
+      return "COMPLEX" as const;
+    };
+    // "handle the widget thing" hits no keyword → default tier1, confidence 0.6 < 0.7
+    const decision = await router.routeWithTriage("handle the widget thing", 0, undefined, triage);
+    expect(called).toBe(true);
+    expect(decision.tier).toBe("tier3-cloud");
+    expect(decision.reason).toContain("triaged");
+  });
+
+  it("does NOT invoke triage for a high-confidence task", async () => {
+    const router = new ModelRouter();
+    let called = false;
+    const triage = async () => {
+      called = true;
+      return "COMPLEX" as const;
+    };
+    // "design the architecture" → tier3 keyword, confidence 0.85 ≥ 0.7
+    const decision = await router.routeWithTriage("design the architecture", 0, undefined, triage);
+    expect(called).toBe(false);
+    expect(decision.tier).toBe("tier3-cloud");
+  });
+
+  it("falls back to the heuristic when triage returns null", async () => {
+    const router = new ModelRouter();
+    const decision = await router.routeWithTriage("handle the widget thing", 0, undefined, async () => null);
+    expect(decision.tier).toBe("tier1-local"); // heuristic default
+  });
+
+  it("falls back to the heuristic when triage throws", async () => {
+    const router = new ModelRouter();
+    const decision = await router.routeWithTriage("handle the widget thing", 0, undefined, async () => {
+      throw new Error("local model down");
+    });
+    expect(decision.tier).toBe("tier1-local");
+  });
+
+  it("maps SIMPLE/MEDIUM/COMPLEX to the right tiers", async () => {
+    const router = new ModelRouter();
+    const simple = await router.routeWithTriage("handle the widget thing", 0, undefined, async () => "SIMPLE");
+    const medium = await router.routeWithTriage("handle the widget thing", 0, undefined, async () => "MEDIUM");
+    const complex = await router.routeWithTriage("handle the widget thing", 0, undefined, async () => "COMPLEX");
+    expect(simple.tier).toBe("tier1-local");
+    expect(medium.tier).toBe("tier2-medium");
+    expect(complex.tier).toBe("tier3-cloud");
+  });
+});

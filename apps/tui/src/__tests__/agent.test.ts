@@ -339,4 +339,35 @@ describe("AgentLoop quality gate + escalation", () => {
     const events = await collect(loop.run("explain recursion conceptually"));
     expect(events.at(-1)?.type).toBe("done");
   });
+
+  it("uses local-model triage to route an ambiguous low-confidence task", async () => {
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      if (model === "local-small") {
+        return {
+          providerName: "mlx",
+          supportedCapabilities: {} as never,
+          async *streamChatCompletion() {
+            yield { type: "done" };
+          },
+          // local triage call buckets the ambiguous task as COMPLEX
+          async completeChat() {
+            return { message: { role: "assistant" as const, content: "COMPLEX" } };
+          },
+        } as never;
+      }
+      return makeProvider([{ type: "text", text: "cloud answer" }, { type: "done" }]) as never;
+    });
+
+    const routes: RouteDecision[] = [];
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router: makeRouter(), onRoute: (d) => routes.push(d) },
+    );
+
+    // "handle the widget thing" hits no keyword → low confidence → triage runs.
+    const events = await collect(loop.run("handle the widget thing"));
+    expect(routes.at(-1)?.tier).toBe("tier3-cloud");
+    expect(routes.at(-1)?.provider).toBe("anthropic");
+    expect(text(events)).toContain("cloud answer");
+  });
 });

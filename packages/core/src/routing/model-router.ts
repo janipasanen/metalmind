@@ -24,9 +24,22 @@ export interface RoutingConfig {
   escalationThreshold: number; // number of failures before escalation
   /** Capabilities per `${provider}/${model}` — when present, routing filters by them. */
   capabilities?: Record<string, ModelCapabilities>;
+  /** Classifier confidence below this triggers a local-model triage pass (default 0.7). */
+  triageThreshold: number;
 }
 
 const TIER_ORDER: TaskTier[] = ["tier1-local", "tier2-medium", "tier3-cloud"];
+
+export type TriageLabel = "SIMPLE" | "MEDIUM" | "COMPLEX";
+
+/** Asks a (local) model to bucket a task; returns null if unavailable. */
+export type TriageFn = (request: string) => Promise<TriageLabel | null>;
+
+const TRIAGE_TIER: Record<TriageLabel, TaskTier> = {
+  SIMPLE: "tier1-local",
+  MEDIUM: "tier2-medium",
+  COMPLEX: "tier3-cloud",
+};
 
 /** Whether a model with the given capabilities can satisfy a classified task. */
 export function modelSatisfies(
@@ -52,6 +65,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
   tier3Provider: "anthropic",
   localFirst: true,
   escalationThreshold: 2,
+  triageThreshold: 0.7,
 };
 
 export class ModelRouter {
@@ -103,6 +117,41 @@ export class ModelRouter {
     }
 
     return this.applyCapabilityFilter(decision, classification);
+  }
+
+  /**
+   * Like {@link route}, but when the heuristic classifier is unsure
+   * (confidence < triageThreshold) it asks a local model to bucket the task.
+   * Falls back to the heuristic if triage is unavailable or throws.
+   */
+  async routeWithTriage(
+    request: string,
+    previousFailures = 0,
+    context?: ClassificationContext,
+    triage?: TriageFn,
+  ): Promise<RouteDecision> {
+    const classification = this.classifier.classify(request, context);
+
+    if (
+      triage &&
+      previousFailures < this.config.escalationThreshold &&
+      classification.confidence < this.config.triageThreshold
+    ) {
+      try {
+        const label = await triage(request);
+        if (label) {
+          const decision = this.decisionForTier(
+            TRIAGE_TIER[label],
+            `triaged as ${label} by local model`,
+          );
+          return this.applyCapabilityFilter(decision, classification);
+        }
+      } catch {
+        // fall through to heuristic routing
+      }
+    }
+
+    return this.route(request, previousFailures, context);
   }
 
   /**

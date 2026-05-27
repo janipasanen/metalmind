@@ -7,7 +7,7 @@ export { countFileReferences, hasStackTrace } from "./task-classifier.js";
 export type { TaskTier, TaskClassification, ClassificationContext } from "./task-classifier.js";
 export { evaluateQuality } from "./quality-gate.js";
 export type { AttemptResult, QualityVerdict } from "./quality-gate.js";
-export type { RouteDecision, RoutingConfig } from "./model-router.js";
+export type { RouteDecision, RoutingConfig, TriageLabel, TriageFn } from "./model-router.js";
 
 export class FallbackManager {
   private fallbackChain: string[];

@@ -1,7 +1,7 @@
 import { createProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
 import type { AgentMessage } from "@metalmind/schemas";
-import type { ModelProvider, RouteDecision } from "@metalmind/core";
+import type { ModelProvider, RouteDecision, TriageLabel } from "@metalmind/core";
 import { ModelRouter, estimateTokens, evaluateQuality } from "@metalmind/core";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
@@ -87,6 +87,32 @@ export class AgentLoop {
     }));
   }
 
+  /** A triage function that asks the local model to bucket an ambiguous task. */
+  private buildTriage() {
+    return async (request: string): Promise<TriageLabel | null> => {
+      try {
+        const local = this.getProvider(this.config.provider, this.config.model);
+        const res = await local.completeChat({
+          messages: [
+            {
+              role: "system",
+              content:
+                "Classify the developer task's complexity. Reply with exactly one word: SIMPLE, MEDIUM, or COMPLEX.",
+            },
+            { role: "user", content: request },
+          ],
+        });
+        const text = res.message.content.toUpperCase();
+        if (text.includes("COMPLEX")) return "COMPLEX";
+        if (text.includes("MEDIUM")) return "MEDIUM";
+        if (text.includes("SIMPLE")) return "SIMPLE";
+        return null;
+      } catch {
+        return null;
+      }
+    };
+  }
+
   /** Run a single model response fully into a buffer (no streaming to the user). */
   private async collectAttempt(provider: ModelProvider, toolDefs: unknown[]): Promise<BufferedAttempt> {
     const attempt: BufferedAttempt = { text: "", toolCalls: [], errored: false };
@@ -119,10 +145,12 @@ export class AgentLoop {
 
     // Routed: pick a tier, then quality-gate the first response and escalate on failure.
     const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-    let decision = this.router.route(userInput, 0, {
-      conversationDepth: this.turnCount,
-      historyTokens,
-    });
+    let decision = await this.router.routeWithTriage(
+      userInput,
+      0,
+      { conversationDepth: this.turnCount, historyTokens },
+      this.buildTriage(),
+    );
     this.onRoute?.(decision);
 
     let provider = this.getProvider(decision.provider, decision.modelId);

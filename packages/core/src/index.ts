@@ -10,7 +10,7 @@ export type {
   TokenCountResponse,
 } from "./agent/agent-runtime.js";
 export { TaskClassifier, ModelRouter, FallbackManager, countFileReferences, hasStackTrace } from "./routing/index.js";
-export type { TaskTier, TaskClassification, ClassificationContext, RouteDecision, RoutingConfig } from "./routing/index.js";
+export type { TaskTier, TaskClassification, ClassificationContext, RouteDecision, RoutingConfig, TriageLabel, TriageFn } from "./routing/index.js";
 export { evaluateQuality } from "./routing/quality-gate.js";
 export type { AttemptResult, QualityVerdict } from "./routing/quality-gate.js";
 export { CostTracker, LatencyTracker, estimateTokens } from "./routing/cost-tracker.js";
