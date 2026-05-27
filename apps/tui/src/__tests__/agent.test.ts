@@ -250,3 +250,93 @@ describe("AgentLoop routing", () => {
     expect(mlxBuilds).toHaveLength(1);
   });
 });
+
+describe("AgentLoop quality gate + escalation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeRouter() {
+    return new ModelRouter({
+      tier1Model: "local-small",
+      tier1Provider: "mlx",
+      tier2Model: "local-small",
+      tier2Provider: "mlx",
+      tier3Model: "claude",
+      tier3Provider: "anthropic",
+      localFirst: true,
+    });
+  }
+
+  function text(events: { type: string; text?: string }[]): string {
+    return events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+  }
+
+  it("escalates to cloud when the local model returns an empty response", async () => {
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      if (model === "local-small") return makeProvider([{ type: "done" }]) as never; // empty
+      return makeProvider([{ type: "text", text: "cloud answer" }, { type: "done" }]) as never;
+    });
+
+    const routes: RouteDecision[] = [];
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router: makeRouter(), onRoute: (d) => routes.push(d) },
+    );
+
+    const events = await collect(loop.run("explain recursion conceptually"));
+
+    expect(text(events)).toContain("cloud answer");
+    expect(text(events)).toContain("escalating");
+    expect(routes.at(-1)?.provider).toBe("anthropic");
+    expect(routes.at(-1)?.tier).toBe("tier3-cloud");
+  });
+
+  it("escalates when the local model refuses", async () => {
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      if (model === "local-small")
+        return makeProvider([{ type: "text", text: "I cannot do that." }, { type: "done" }]) as never;
+      return makeProvider([{ type: "text", text: "cloud handled it" }, { type: "done" }]) as never;
+    });
+
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router: makeRouter() },
+    );
+
+    const events = await collect(loop.run("explain recursion conceptually"));
+    expect(text(events)).toContain("cloud handled it");
+  });
+
+  it("does not escalate when the local model produces a good response", async () => {
+    const createdWith: Array<[string, string]> = [];
+    mockCreateProvider.mockImplementation((provider: string, model: string) => {
+      createdWith.push([provider, model]);
+      return makeProvider([{ type: "text", text: "a clear local answer" }, { type: "done" }]) as never;
+    });
+
+    const events = await collect(
+      new AgentLoop(
+        { provider: "mlx", model: "local-small", explicit: false },
+        { router: makeRouter() },
+      ).run("explain recursion conceptually"),
+    );
+
+    expect(text(events)).toBe("a clear local answer");
+    expect(text(events)).not.toContain("escalating");
+    expect(createdWith.some(([p]) => p === "anthropic")).toBe(false);
+  });
+
+  it("stops escalating at the cloud tier even if it also fails the gate", async () => {
+    // Every model returns empty — must not loop forever; ends after reaching tier3.
+    mockCreateProvider.mockImplementation(() => makeProvider([{ type: "done" }]) as never);
+
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router: makeRouter() },
+    );
+
+    const events = await collect(loop.run("explain recursion conceptually"));
+    expect(events.at(-1)?.type).toBe("done");
+  });
+});

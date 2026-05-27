@@ -2,9 +2,16 @@ import { createProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
 import type { AgentMessage } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision } from "@metalmind/core";
-import { ModelRouter, estimateTokens } from "@metalmind/core";
+import { ModelRouter, estimateTokens, evaluateQuality } from "@metalmind/core";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
+
+interface BufferedAttempt {
+  text: string;
+  toolCalls: Array<{ toolCallId: string; toolName: string; argumentsJson: string }>;
+  errored: boolean;
+  errorMessage?: string;
+}
 
 function buildRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
@@ -72,90 +79,145 @@ export class AgentLoop {
     return cached;
   }
 
-  /** Pick the provider/model for this turn, routing if a router is configured. */
-  private selectProvider(userInput: string): { provider: ModelProvider; label: string } {
-    if (this.router) {
-      const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-      const decision = this.router.route(userInput, 0, {
-        conversationDepth: this.turnCount,
-        historyTokens,
-      });
-      this.onRoute?.(decision);
-      return {
-        provider: this.getProvider(decision.provider, decision.modelId),
-        label: `${decision.provider}/${decision.modelId}`,
-      };
+  private toolDefs() {
+    return this.registry.list().map((t) => ({
+      name: t.toolName,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    }));
+  }
+
+  /** Run a single model response fully into a buffer (no streaming to the user). */
+  private async collectAttempt(provider: ModelProvider, toolDefs: unknown[]): Promise<BufferedAttempt> {
+    const attempt: BufferedAttempt = { text: "", toolCalls: [], errored: false };
+    try {
+      for await (const event of provider.streamChatCompletion({
+        messages: [...this.history],
+        tools: toolDefs,
+      })) {
+        if (event.type === "text") attempt.text += event.text;
+        else if (event.type === "tool-call") attempt.toolCalls.push(event.toolCall);
+        else if (event.type === "done") break;
+      }
+    } catch (err) {
+      attempt.errored = true;
+      attempt.errorMessage = err instanceof Error ? err.message : String(err);
     }
-    return {
-      provider: this.getProvider(this.config.provider, this.config.model),
-      label: this.providerLabel,
-    };
+    return attempt;
   }
 
   async *run(userInput: string): AsyncGenerator<ChatStreamEvent> {
     this.history.push({ role: "user", content: userInput });
     this.turnCount++;
+    const toolDefs = this.toolDefs();
 
-    const { provider } = this.selectProvider(userInput);
+    if (!this.router) {
+      // Manual override: stream directly from the pinned provider, no gate.
+      yield* this.agenticLoop(this.getProvider(this.config.provider, this.config.model), toolDefs);
+      return;
+    }
 
-    const toolDefs = this.registry.list().map((t) => ({
-      name: t.toolName,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    }));
+    // Routed: pick a tier, then quality-gate the first response and escalate on failure.
+    const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+    let decision = this.router.route(userInput, 0, {
+      conversationDepth: this.turnCount,
+      historyTokens,
+    });
+    this.onRoute?.(decision);
 
+    let provider = this.getProvider(decision.provider, decision.modelId);
+    let attempt = await this.collectAttempt(provider, toolDefs);
+    let verdict = evaluateQuality({
+      text: attempt.text,
+      toolCalls: attempt.toolCalls,
+      errored: attempt.errored,
+    });
+
+    while (!verdict.passed && decision.tier !== "tier3-cloud") {
+      const nextTier = this.router.escalateTier(decision.tier);
+      decision = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
+      this.onRoute?.(decision);
+      yield {
+        type: "text",
+        text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n`,
+      };
+      provider = this.getProvider(decision.provider, decision.modelId);
+      attempt = await this.collectAttempt(provider, toolDefs);
+      verdict = evaluateQuality({
+        text: attempt.text,
+        toolCalls: attempt.toolCalls,
+        errored: attempt.errored,
+      });
+    }
+
+    if (attempt.errored) {
+      yield { type: "error", message: attempt.errorMessage ?? "provider error" };
+      yield { type: "done" };
+      return;
+    }
+
+    yield* this.agenticLoop(provider, toolDefs, attempt);
+  }
+
+  /**
+   * Drive the agentic tool loop with a chosen provider. An optional `primed`
+   * first response (already collected + gated) is emitted before streaming resumes.
+   */
+  private async *agenticLoop(
+    provider: ModelProvider,
+    toolDefs: unknown[],
+    primed?: BufferedAttempt,
+  ): AsyncGenerator<ChatStreamEvent> {
     let iterations = 0;
     const maxIterations = 10;
+    let pending = primed;
 
     while (iterations < maxIterations) {
       iterations++;
       let assistantText = "";
       const pendingToolCalls: Array<{ toolCallId: string; toolName: string; argumentsJson: string }> = [];
 
-      try {
-        for await (const event of provider.streamChatCompletion({
-          messages: [...this.history],
-          tools: toolDefs,
-        })) {
-          if (event.type === "text") {
-            assistantText += event.text;
-            yield { type: "text", text: event.text };
-          } else if (event.type === "tool-call") {
-            pendingToolCalls.push(event.toolCall);
-            yield {
-              type: "tool-call",
-              toolCall: {
-                toolName: event.toolCall.toolName,
-                argumentsJson: event.toolCall.argumentsJson,
-              },
-            };
-          } else if (event.type === "done") {
-            break;
-          }
+      if (pending) {
+        assistantText = pending.text;
+        pendingToolCalls.push(...pending.toolCalls);
+        if (assistantText) yield { type: "text", text: assistantText };
+        for (const tc of pendingToolCalls) {
+          yield { type: "tool-call", toolCall: { toolName: tc.toolName, argumentsJson: tc.argumentsJson } };
         }
-      } catch (err) {
-        yield {
-          type: "error",
-          message: err instanceof Error ? err.message : String(err),
-        };
-        yield { type: "done" };
-        return;
+        pending = undefined;
+      } else {
+        try {
+          for await (const event of provider.streamChatCompletion({
+            messages: [...this.history],
+            tools: toolDefs,
+          })) {
+            if (event.type === "text") {
+              assistantText += event.text;
+              yield { type: "text", text: event.text };
+            } else if (event.type === "tool-call") {
+              pendingToolCalls.push(event.toolCall);
+              yield {
+                type: "tool-call",
+                toolCall: { toolName: event.toolCall.toolName, argumentsJson: event.toolCall.argumentsJson },
+              };
+            } else if (event.type === "done") {
+              break;
+            }
+          }
+        } catch (err) {
+          yield { type: "error", message: err instanceof Error ? err.message : String(err) };
+          yield { type: "done" };
+          return;
+        }
       }
 
       if (pendingToolCalls.length === 0) {
-        if (assistantText) {
-          this.history.push({ role: "assistant", content: assistantText });
-        }
+        if (assistantText) this.history.push({ role: "assistant", content: assistantText });
         yield { type: "done" };
         return;
       }
 
-      // execute tool calls and continue the loop
-      this.history.push({
-        role: "assistant",
-        content: assistantText,
-        toolCalls: pendingToolCalls,
-      });
+      this.history.push({ role: "assistant", content: assistantText, toolCalls: pendingToolCalls });
 
       for (const call of pendingToolCalls) {
         let output: string;

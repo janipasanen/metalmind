@@ -5,6 +5,8 @@ export { TaskClassifier } from "./task-classifier.js";
 export { ModelRouter, modelSatisfies } from "./model-router.js";
 export { countFileReferences, hasStackTrace } from "./task-classifier.js";
 export type { TaskTier, TaskClassification, ClassificationContext } from "./task-classifier.js";
+export { evaluateQuality } from "./quality-gate.js";
+export type { AttemptResult, QualityVerdict } from "./quality-gate.js";
 export type { RouteDecision, RoutingConfig } from "./model-router.js";
 
 export class FallbackManager {

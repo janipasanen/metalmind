@@ -147,6 +147,18 @@ export class ModelRouter {
   }
 
   /**
+   * Build a route decision targeting a specific tier (used for quality-gate escalation).
+   */
+  decisionForTier(tier: TaskTier, reason: string): RouteDecision {
+    return {
+      tier,
+      modelId: this.modelForTier(tier),
+      provider: this.providerForTier(tier),
+      reason,
+    };
+  }
+
+  /**
    * Get the escalated tier for a given tier.
    */
   escalateTier(tier: TaskTier): TaskTier {
