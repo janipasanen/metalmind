@@ -200,3 +200,82 @@ describe("ModelRouter triage pass", () => {
     expect(complex.tier).toBe("tier3-cloud");
   });
 });
+
+describe("ModelRouter budget-aware routing", () => {
+  function usage(costUsd: number): import("./cost-tracker.js").ProviderUsage {
+    return {
+      provider: "anthropic",
+      model: "claude",
+      inputTokens: 1000,
+      outputTokens: 1000,
+      costUsd,
+      latencyMs: 100,
+      timestamp: new Date().toISOString(),
+      success: true,
+    };
+  }
+
+  it("does not adjust when under budget", () => {
+    const router = new ModelRouter({ budgetUsd: 5, tier1Provider: "mlx", tier1Model: "local" });
+    router.recordUsage(usage(1));
+    const decision = router.route("design the architecture");
+    expect(decision.tier).toBe("tier3-cloud");
+    expect(decision.budgetAdjusted).toBeUndefined();
+  });
+
+  it("downgrades a cloud task to local once the budget is reached", () => {
+    const router = new ModelRouter({ budgetUsd: 1, tier1Provider: "mlx", tier1Model: "local" });
+    router.recordUsage(usage(2)); // over budget
+    const decision = router.route("design the architecture");
+    expect(decision.budgetAdjusted).toBe(true);
+    expect(decision.tier).toBe("tier1-local");
+    expect(decision.provider).toBe("mlx");
+  });
+
+  it("reports budget status", () => {
+    const router = new ModelRouter({ budgetUsd: 3 });
+    router.recordUsage(usage(1.5));
+    const status = router.budgetStatus();
+    expect(status.spentUsd).toBeCloseTo(1.5);
+    expect(status.budgetUsd).toBe(3);
+    expect(status.overBudget).toBe(false);
+  });
+
+  it("lets a real capability need override the budget downgrade (correctness wins)", () => {
+    const capabilities = {
+      "mlx/local": {
+        supportsStreaming: true,
+        supportsToolCalling: false,
+        supportsVision: false,
+        supportsReasoning: false,
+        supportsJsonMode: false,
+        maximumContextTokens: 32_768,
+      },
+      "anthropic/claude": {
+        supportsStreaming: true,
+        supportsToolCalling: true,
+        supportsVision: true,
+        supportsReasoning: true,
+        supportsJsonMode: false,
+        maximumContextTokens: 200_000,
+      },
+    };
+    const router = new ModelRouter({
+      budgetUsd: 1,
+      tier1Provider: "mlx",
+      tier1Model: "local",
+      tier2Provider: "mlx",
+      tier2Model: "local",
+      tier3Provider: "anthropic",
+      tier3Model: "claude",
+      capabilities,
+    });
+    router.recordUsage(usage(2)); // over budget
+
+    // refactor across 2 files → tier3 + needsTools; budget tries local, but MLX can't do tools.
+    const decision = router.route("refactor auth.ts and config.ts");
+    expect(decision.tier).toBe("tier3-cloud");
+    expect(decision.provider).toBe("anthropic");
+    expect(decision.capabilityAdjusted).toBe(true);
+  });
+});

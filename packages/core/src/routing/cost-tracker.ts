@@ -17,10 +17,13 @@ export interface UsageSummary {
   byProvider: Map<string, { calls: number; tokens: number; cost: number }>;
 }
 
-const COST_PER_1K_TOKENS: Record<string, Record<string, number>> = {
-  openai: { "gpt-4": 0.03, "gpt-4-turbo": 0.01, default: 0.01 },
-  anthropic: { "claude-sonnet-latest": 0.015, "claude-opus": 0.075, default: 0.015 },
+export type CostTable = Record<string, Record<string, number>>;
+
+const DEFAULT_COST_PER_1K_TOKENS: CostTable = {
+  openai: { "gpt-4": 0.03, "gpt-4-turbo": 0.01, "gpt-4o": 0.005, default: 0.01 },
+  anthropic: { "claude-sonnet-latest": 0.015, "claude-sonnet-4-6": 0.015, "claude-opus": 0.075, default: 0.015 },
   ollama: { default: 0 },
+  mlx: { default: 0 },
 };
 
 /** Shared rough token estimate (~4 characters per token). */
@@ -30,13 +33,19 @@ export function estimateTokens(text: string): number {
 
 export class CostTracker {
   private usageLog: ProviderUsage[] = [];
+  private rates: CostTable;
+
+  /** Optionally override per-provider/model rates (merged over the built-in defaults). */
+  constructor(rates?: CostTable) {
+    this.rates = { ...DEFAULT_COST_PER_1K_TOKENS, ...(rates ?? {}) };
+  }
 
   recordUsage(usage: ProviderUsage): void {
     this.usageLog.push(usage);
   }
 
   estimateCost(provider: string, model: string, inputTokens: number, outputTokens: number): number {
-    const providerRates = COST_PER_1K_TOKENS[provider] ?? {};
+    const providerRates = this.rates[provider] ?? {};
     const rate = providerRates[model] ?? providerRates["default"] ?? 0;
     return ((inputTokens + outputTokens) / 1000) * rate;
   }

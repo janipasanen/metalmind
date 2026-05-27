@@ -1,6 +1,7 @@
 import type { ModelCapabilities } from "../agent/agent-runtime.js";
 import type { TaskTier, TaskClassification, ClassificationContext } from "./task-classifier.js";
 import { TaskClassifier } from "./task-classifier.js";
+import { CostTracker, type ProviderUsage } from "./cost-tracker.js";
 
 export interface RouteDecision {
   tier: TaskTier;
@@ -11,6 +12,8 @@ export interface RouteDecision {
   escalatedReason?: string;
   /** Set when the tier was bumped because the preferred model lacked a required capability. */
   capabilityAdjusted?: boolean;
+  /** Set when the tier was downgraded to local because the session budget was reached. */
+  budgetAdjusted?: boolean;
 }
 
 export interface RoutingConfig {
@@ -26,6 +29,10 @@ export interface RoutingConfig {
   capabilities?: Record<string, ModelCapabilities>;
   /** Classifier confidence below this triggers a local-model triage pass (default 0.7). */
   triageThreshold: number;
+  /** Optional per-session USD budget; once reached, cloud tiers are biased to local. */
+  budgetUsd?: number;
+  /** Cost/latency tracker; defaults to a fresh CostTracker. */
+  costTracker?: CostTracker;
 }
 
 const TIER_ORDER: TaskTier[] = ["tier1-local", "tier2-medium", "tier3-cloud"];
@@ -72,10 +79,44 @@ export class ModelRouter {
   private config: RoutingConfig;
   private classifier: TaskClassifier;
   private escalationCount = new Map<string, number>();
+  private costTracker: CostTracker;
 
   constructor(config: Partial<RoutingConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.classifier = new TaskClassifier();
+    this.costTracker = config.costTracker ?? new CostTracker();
+  }
+
+  /** Record provider usage so budget-aware routing can react to spend. */
+  recordUsage(usage: ProviderUsage): void {
+    this.costTracker.recordUsage(usage);
+  }
+
+  /** Current session spend vs the configured budget. */
+  budgetStatus(): { spentUsd: number; budgetUsd?: number; overBudget: boolean } {
+    const spentUsd = this.costTracker.getSummary().totalCostUsd;
+    return {
+      spentUsd,
+      budgetUsd: this.config.budgetUsd,
+      overBudget: this.config.budgetUsd !== undefined && spentUsd >= this.config.budgetUsd,
+    };
+  }
+
+  /**
+   * Soft budget bias: once the session budget is reached, downgrade cloud tiers to
+   * local. Applied before capability filtering, so a genuine capability need can
+   * still bump it back up (correctness wins over cost).
+   */
+  private applyBudget(decision: RouteDecision): RouteDecision {
+    if (!this.budgetStatus().overBudget || decision.tier !== "tier3-cloud") return decision;
+    return {
+      ...decision,
+      tier: "tier1-local",
+      modelId: this.modelForTier("tier1-local"),
+      provider: this.providerForTier("tier1-local"),
+      budgetAdjusted: true,
+      reason: `${decision.reason} (budget $${this.config.budgetUsd} reached — preferring local)`,
+    };
   }
 
   /**
@@ -116,7 +157,7 @@ export class ModelRouter {
       };
     }
 
-    return this.applyCapabilityFilter(decision, classification);
+    return this.applyCapabilityFilter(this.applyBudget(decision), classification);
   }
 
   /**
@@ -144,7 +185,7 @@ export class ModelRouter {
             TRIAGE_TIER[label],
             `triaged as ${label} by local model`,
           );
-          return this.applyCapabilityFilter(decision, classification);
+          return this.applyCapabilityFilter(this.applyBudget(decision), classification);
         }
       } catch {
         // fall through to heuristic routing

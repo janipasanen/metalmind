@@ -15,6 +15,19 @@ describe("CostTracker", () => {
     expect(cost).toBe(0.03);
   });
 
+  it("accepts a custom rate table merged over defaults", () => {
+    const ct = new CostTracker({ gemini: { "gemini-2.5-pro": 0.02, default: 0.02 } });
+    // custom provider
+    expect(ct.estimateCost("gemini", "gemini-2.5-pro", 500, 500)).toBe(0.02);
+    // built-in defaults still present
+    expect(ct.estimateCost("ollama", "any", 1000, 1000)).toBe(0);
+  });
+
+  it("treats mlx as free (local GPU)", () => {
+    const ct = new CostTracker();
+    expect(ct.estimateCost("mlx", "deepseek", 1000, 1000)).toBe(0);
+  });
+
   it("returns zero cost for ollama", () => {
     const ct = new CostTracker();
     const cost = ct.estimateCost("ollama", "deepseek", 1000, 500);
