@@ -140,6 +140,29 @@ export class OpenAIProvider implements ModelProvider {
     const decoder = new TextDecoder();
     let buffer = "";
 
+    // Accumulate streamed tool-call fragments, keyed by their index.
+    const toolAccumulator = new Map<
+      number,
+      { id?: string; name?: string; args: string }
+    >();
+
+    const flushToolCalls = (): ModelStreamEvent[] => {
+      const events: ModelStreamEvent[] = [];
+      for (const [index, tc] of [...toolAccumulator.entries()].sort((a, b) => a[0] - b[0])) {
+        if (!tc.name) continue;
+        events.push({
+          type: "tool-call",
+          toolCall: {
+            toolCallId: tc.id ?? `openai-tc-${index}`,
+            toolName: tc.name,
+            argumentsJson: tc.args || "{}",
+          },
+        });
+      }
+      toolAccumulator.clear();
+      return events;
+    };
+
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -154,6 +177,7 @@ export class OpenAIProvider implements ModelProvider {
           if (!trimmed || !trimmed.startsWith("data: ")) continue;
           const jsonStr = trimmed.slice(6);
           if (jsonStr === "[DONE]") {
+            for (const event of flushToolCalls()) yield event;
             yield { type: "done" };
             return;
           }
@@ -176,6 +200,14 @@ export class OpenAIProvider implements ModelProvider {
             if (delta?.content) {
               yield { type: "text", text: delta.content };
             }
+            for (const tc of delta?.tool_calls ?? []) {
+              const index = tc.index ?? 0;
+              const existing = toolAccumulator.get(index) ?? { args: "" };
+              if (tc.id) existing.id = tc.id;
+              if (tc.function?.name) existing.name = tc.function.name;
+              if (tc.function?.arguments) existing.args += tc.function.arguments;
+              toolAccumulator.set(index, existing);
+            }
           } catch {
             continue;
           }
@@ -185,6 +217,7 @@ export class OpenAIProvider implements ModelProvider {
       reader.releaseLock();
     }
 
+    for (const event of flushToolCalls()) yield event;
     yield { type: "done" };
   }
 }

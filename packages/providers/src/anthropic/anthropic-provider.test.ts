@@ -191,5 +191,54 @@ describe("AnthropicProvider", () => {
       const textEvents = events.filter((e) => e.type === "text");
       expect(textEvents).toHaveLength(1);
     });
+
+    it("emits a tool-call event from a tool_use content block", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createAnthropicSSE(
+          { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "readFile" } },
+          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":' } },
+          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '"/a.ts"}' } },
+          { type: "content_block_stop", index: 0 },
+        ),
+      );
+
+      const p = new AnthropicProvider("claude", "sk-test");
+      const events: ModelStreamEvent[] = [];
+      for await (const e of p.streamChatCompletion({ messages: [] })) {
+        events.push(e);
+      }
+
+      const toolCalls = events.filter((e) => e.type === "tool-call");
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].toolCall.toolCallId).toBe("toolu_1");
+      expect(toolCalls[0].toolCall.toolName).toBe("readFile");
+      expect(toolCalls[0].toolCall.argumentsJson).toBe('{"path":"/a.ts"}');
+    });
+
+    it("interleaves text and tool_use blocks", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createAnthropicSSE(
+          { type: "content_block_start", index: 0, content_block: { type: "text" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Let me read it." } },
+          { type: "content_block_stop", index: 0 },
+          { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_2", name: "readFile" } },
+          { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"path":"/b.ts"}' } },
+          { type: "content_block_stop", index: 1 },
+        ),
+      );
+
+      const p = new AnthropicProvider("claude", "sk-test");
+      const events: ModelStreamEvent[] = [];
+      for await (const e of p.streamChatCompletion({ messages: [] })) {
+        events.push(e);
+      }
+
+      expect(events.filter((e) => e.type === "text").map((e) => e.text).join("")).toBe("Let me read it.");
+      const toolCalls = events.filter((e) => e.type === "tool-call");
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].toolCall.toolName).toBe("readFile");
+    });
   });
 });

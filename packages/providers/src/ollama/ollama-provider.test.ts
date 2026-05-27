@@ -297,4 +297,65 @@ describe("OllamaProvider streaming", () => {
     }
     expect(events.filter((e) => e.type === "done").length).toBe(1);
   });
+
+  it("emits a tool-call event from message.tool_calls", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createMockStream(
+        { message: { content: "", tool_calls: [{ function: { name: "readFile", arguments: { path: "/a.ts" } } }] } },
+        { done: true },
+      ),
+    );
+
+    const p = new OllamaProvider("test");
+    const events: ModelStreamEvent[] = [];
+    for await (const e of p.streamChatCompletion({ messages: [] })) {
+      events.push(e);
+    }
+
+    const toolCalls = events.filter((e) => e.type === "tool-call");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0].toolCall.toolName).toBe("readFile");
+    expect(JSON.parse(toolCalls[0].toolCall.argumentsJson)).toEqual({ path: "/a.ts" });
+    const tcIdx = events.findIndex((e) => e.type === "tool-call");
+    const doneIdx = events.findIndex((e) => e.type === "done");
+    expect(tcIdx).toBeLessThan(doneIdx);
+  });
+});
+
+describe("OllamaProvider message conversion", () => {
+  it("carries assistant toolCalls and tool results into the request body", async () => {
+    let requestBody: { messages: Array<Record<string, unknown>> } | null = null;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+      requestBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({ message: { role: "assistant", content: "OK" } }),
+      };
+    }));
+
+    const p = new OllamaProvider("test");
+    await p.completeChat({
+      messages: [
+        { role: "user", content: "read it" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ toolCallId: "tc1", toolName: "readFile", argumentsJson: '{"path":"/a.ts"}' }],
+        },
+        { role: "tool", content: "file contents" },
+      ],
+    });
+
+    const msgs = requestBody!.messages;
+    expect(msgs).toHaveLength(3);
+    const assistant = msgs[1] as { tool_calls?: Array<{ function: { name: string; arguments: unknown } }> };
+    expect(assistant.tool_calls).toHaveLength(1);
+    expect(assistant.tool_calls![0].function.name).toBe("readFile");
+    expect(assistant.tool_calls![0].function.arguments).toEqual({ path: "/a.ts" });
+    expect(msgs[2].role).toBe("tool");
+    expect(msgs[2].content).toBe("file contents");
+  });
 });

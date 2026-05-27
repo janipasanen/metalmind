@@ -17,6 +17,15 @@ interface OllamaMessage {
   }>;
 }
 
+function safeParseArgs(json: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
 interface OllamaChatRequest {
   model: string;
   messages: OllamaMessage[];
@@ -47,6 +56,7 @@ export class OllamaProvider implements ModelProvider {
   private baseUrl: string;
   private modelName: string;
   private apiKey?: string;
+  private toolCallCounter = 0;
 
   constructor(model: string, baseUrl = "http://127.0.0.1:11434", apiKey?: string) {
     this.modelName = model;
@@ -136,13 +146,24 @@ export class OllamaProvider implements ModelProvider {
           try {
             const data = JSON.parse(line) as OllamaChatResponse & { done?: boolean };
 
+            if (data.message?.content) {
+              yield { type: "text", text: data.message.content };
+            }
+
+            for (const tc of data.message?.tool_calls ?? []) {
+              yield {
+                type: "tool-call",
+                toolCall: {
+                  toolCallId: `ollama-tc-${this.toolCallCounter++}`,
+                  toolName: tc.function.name,
+                  argumentsJson: JSON.stringify(tc.function.arguments ?? {}),
+                },
+              };
+            }
+
             if (data.done) {
               yield { type: "done" };
               return;
-            }
-
-            if (data.message?.content) {
-              yield { type: "text", text: data.message.content };
             }
           } catch {
             continue;
@@ -155,6 +176,16 @@ export class OllamaProvider implements ModelProvider {
           const data = JSON.parse(buffer) as OllamaChatResponse & { done?: boolean };
           if (data.message?.content) {
             yield { type: "text", text: data.message.content };
+          }
+          for (const tc of data.message?.tool_calls ?? []) {
+            yield {
+              type: "tool-call",
+              toolCall: {
+                toolCallId: `ollama-tc-${this.toolCallCounter++}`,
+                toolName: tc.function.name,
+                argumentsJson: JSON.stringify(tc.function.arguments ?? {}),
+              },
+            };
           }
         } catch {
           // ignore partial buffer
@@ -172,9 +203,17 @@ export class OllamaProvider implements ModelProvider {
   }
 
   private convertMessages(messages: AgentMessage[]): OllamaMessage[] {
-    return messages.map((msg) => ({
-      role: msg.role,
-      content: msg.content,
-    }));
+    return messages.map((msg) => {
+      const out: OllamaMessage = { role: msg.role, content: msg.content };
+      if (msg.toolCalls?.length) {
+        out.tool_calls = msg.toolCalls.map((tc) => ({
+          function: {
+            name: tc.toolName,
+            arguments: safeParseArgs(tc.argumentsJson),
+          },
+        }));
+      }
+      return out;
+    });
   }
 }

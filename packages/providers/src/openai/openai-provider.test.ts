@@ -221,5 +221,52 @@ describe("OpenAIProvider", () => {
       expect(events.filter((e) => e.type === "done")).toHaveLength(1);
       expect(events.filter((e) => e.type === "text")).toHaveLength(0);
     });
+
+    it("accumulates streamed tool-call deltas into a tool-call event", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createSSEStream(
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "readFile" } }] } }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"path":' } }] } }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"/a.ts"}' } }] } }] },
+        ),
+      );
+
+      const p = new OpenAIProvider("gpt-4", "sk-test");
+      const events: ModelStreamEvent[] = [];
+      for await (const e of p.streamChatCompletion({ messages: [] })) {
+        events.push(e);
+      }
+
+      const toolCalls = events.filter((e) => e.type === "tool-call");
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].toolCall.toolCallId).toBe("call_1");
+      expect(toolCalls[0].toolCall.toolName).toBe("readFile");
+      expect(toolCalls[0].toolCall.argumentsJson).toBe('{"path":"/a.ts"}');
+      // tool-call must be emitted before done
+      const tcIdx = events.findIndex((e) => e.type === "tool-call");
+      const doneIdx = events.findIndex((e) => e.type === "done");
+      expect(tcIdx).toBeLessThan(doneIdx);
+    });
+
+    it("emits multiple tool calls keyed by index", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createSSEStream(
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: "a", function: { name: "readFile", arguments: "{}" } }] } }] },
+          { choices: [{ delta: { tool_calls: [{ index: 1, id: "b", function: { name: "gitStatus", arguments: "{}" } }] } }] },
+        ),
+      );
+
+      const p = new OpenAIProvider("gpt-4", "sk-test");
+      const events: ModelStreamEvent[] = [];
+      for await (const e of p.streamChatCompletion({ messages: [] })) {
+        events.push(e);
+      }
+
+      const toolCalls = events.filter((e) => e.type === "tool-call");
+      expect(toolCalls).toHaveLength(2);
+      expect(toolCalls.map((t) => t.toolCall.toolName)).toEqual(["readFile", "gitStatus"]);
+    });
   });
 });

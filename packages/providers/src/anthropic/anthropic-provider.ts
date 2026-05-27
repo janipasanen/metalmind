@@ -134,6 +134,10 @@ export class AnthropicProvider implements ModelProvider {
     const decoder = new TextDecoder();
     let buffer = "";
 
+    // Track tool_use content blocks by their stream index while their
+    // input JSON arrives incrementally as input_json_delta fragments.
+    const toolBlocks = new Map<number, { id: string; name: string; json: string }>();
+
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -151,13 +155,48 @@ export class AnthropicProvider implements ModelProvider {
           try {
             const chunk = JSON.parse(jsonStr) as {
               type: string;
-              delta?: AnthropicStreamDelta;
+              index?: number;
+              content_block?: { type: string; id?: string; name?: string };
+              delta?: AnthropicStreamDelta & { type?: string; partial_json?: string };
             };
 
-            const textChunk: string =
-              chunk.delta?.text ?? chunk.delta?.delta?.text ?? "";
-            if (chunk.type === "content_block_delta" && textChunk) {
-              yield { type: "text", text: textChunk };
+            if (
+              chunk.type === "content_block_start" &&
+              chunk.content_block?.type === "tool_use"
+            ) {
+              toolBlocks.set(chunk.index ?? 0, {
+                id: chunk.content_block.id ?? `anthropic-tc-${chunk.index ?? 0}`,
+                name: chunk.content_block.name ?? "",
+                json: "",
+              });
+              continue;
+            }
+
+            if (chunk.type === "content_block_delta") {
+              if (chunk.delta?.type === "input_json_delta") {
+                const block = toolBlocks.get(chunk.index ?? 0);
+                if (block) block.json += chunk.delta.partial_json ?? "";
+                continue;
+              }
+              const textChunk: string =
+                chunk.delta?.text ?? chunk.delta?.delta?.text ?? "";
+              if (textChunk) yield { type: "text", text: textChunk };
+              continue;
+            }
+
+            if (chunk.type === "content_block_stop") {
+              const block = toolBlocks.get(chunk.index ?? 0);
+              if (block && block.name) {
+                yield {
+                  type: "tool-call",
+                  toolCall: {
+                    toolCallId: block.id,
+                    toolName: block.name,
+                    argumentsJson: block.json || "{}",
+                  },
+                };
+                toolBlocks.delete(chunk.index ?? 0);
+              }
             }
           } catch {
             continue;
