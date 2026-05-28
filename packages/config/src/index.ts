@@ -89,12 +89,16 @@ export interface UserConfig {
 
 export interface McpServerConfig {
   name: string;
-  command: string;
+  enabled: boolean;
+  authType?: "none" | "oauth2" | "bearer";
+  // Stdio transport (command-based MCP server)
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
-  enabled: boolean;
-  authType?: "none" | "oauth2" | "bearer";
+  // HTTP/SSE transport (URL-based MCP server)
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 const DEFAULT_XDG_CONFIG: UserConfig = {

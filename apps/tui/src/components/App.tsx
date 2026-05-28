@@ -59,10 +59,13 @@ export default function App({ config }: AppProps) {
         const router = currentConfig.explicit ? undefined : await createDefaultRouter(currentConfig);
         if (cancelled) return;
         if (agentRef.current) agentRef.current.clearHistory();
-        agentRef.current = new AgentLoop(currentConfig, {
+        const agent = new AgentLoop(currentConfig, {
           router,
           onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
         });
+        await agent.initMcp();
+        if (cancelled) return;
+        agentRef.current = agent;
         setAgentError(null);
       } catch (err) {
         if (!cancelled) setAgentError(err instanceof Error ? err.message : String(err));
@@ -81,10 +84,13 @@ export default function App({ config }: AppProps) {
       try {
         const router = config.explicit ? undefined : await createDefaultRouter(config);
         if (cancelled) return;
-        agentRef.current = new AgentLoop(config, {
+        const agent = new AgentLoop(config, {
           router,
           onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
         });
+        await agent.initMcp();
+        if (cancelled) return;
+        agentRef.current = agent;
       } catch (err) {
         if (!cancelled) setAgentError(err instanceof Error ? err.message : String(err));
       }

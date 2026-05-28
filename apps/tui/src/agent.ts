@@ -1,6 +1,8 @@
 import { createProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig } from "@metalmind/config";
+import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
+import { zodToJsonSchema } from "./zod-to-json.js";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities } from "@metalmind/core";
 import { ModelRouter, estimateTokens, evaluateQuality } from "@metalmind/core";
@@ -175,6 +177,7 @@ export class AgentLoop {
   private projectRoot: string;
   private turnCount = 0;
   private providerCache = new Map<string, ModelProvider>();
+  private mcpTools = new Map<string, { client: McpHttpClient; def: McpToolDef }>();
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
@@ -182,6 +185,24 @@ export class AgentLoop {
     this.onRoute = options.onRoute;
     this.registry = buildRegistry();
     this.projectRoot = process.cwd();
+  }
+
+  /** Connect to all enabled HTTP MCP servers and discover their tools. */
+  async initMcp(): Promise<void> {
+    const userConfig = loadXdgConfig();
+    for (const [id, srv] of Object.entries(userConfig.mcpServers || {})) {
+      if (!srv.enabled || !srv.url) continue;
+      try {
+        const client = new McpHttpClient(srv.url, srv.headers ?? {});
+        await client.initialize();
+        const tools = await client.listTools();
+        for (const tool of tools) {
+          this.mcpTools.set(tool.name, { client, def: tool });
+        }
+      } catch (err) {
+        console.error(`MCP server "${id}" init failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   get providerLabel(): string {
@@ -203,11 +224,17 @@ export class AgentLoop {
   }
 
   private toolDefs() {
-    return this.registry.list().map((t) => ({
+    const builtIn = this.registry.list().map((t) => ({
       name: t.toolName,
       description: t.description,
-      inputSchema: t.inputSchema,
+      inputSchema: zodToJsonSchema(t.inputSchema),
     }));
+    const mcp = [...this.mcpTools.values()].map(({ def }) => ({
+      name: def.name,
+      description: def.description,
+      inputSchema: def.inputSchema,
+    }));
+    return [...builtIn, ...mcp];
   }
 
   /** A triage function that asks the local model to bucket an ambiguous task. */
@@ -377,10 +404,15 @@ export class AgentLoop {
         let output: string;
         try {
           const input = JSON.parse(call.argumentsJson) as unknown;
-          const result = await this.registry.execute(call.toolName, input, {
-            projectRoot: this.projectRoot,
-          });
-          output = typeof result === "string" ? result : JSON.stringify(result);
+          const mcpEntry = this.mcpTools.get(call.toolName);
+          if (mcpEntry) {
+            output = await mcpEntry.client.callTool(call.toolName, input);
+          } else {
+            const result = await this.registry.execute(call.toolName, input, {
+              projectRoot: this.projectRoot,
+            });
+            output = typeof result === "string" ? result : JSON.stringify(result);
+          }
         } catch (err) {
           output = `Error: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -403,9 +435,15 @@ export class AgentLoop {
     const userConfig = loadXdgConfig();
     const mcpEntries = Object.entries(userConfig.mcpServers || {});
     const mcpList = mcpEntries.length
-      ? mcpEntries.map(([id, s]) => `  - ${id}: ${s.command} ${(s.args || []).join(" ")}`.trimEnd()).join("\n")
+      ? mcpEntries.map(([id, s]) => {
+          const transport = s.url ? `URL: ${s.url}` : `command: ${s.command ?? ""} ${(s.args || []).join(" ")}`.trimEnd();
+          const tools = [...this.mcpTools.entries()].filter(([, v]) => v.client).length;
+          return `  - ${id} (${transport})`;
+        }).join("\n")
       : "  (none configured)";
-    const toolNames = this.registry.list().map((t) => t.toolName).join(", ");
+    const builtInNames = this.registry.list().map((t) => t.toolName).join(", ");
+    const mcpToolNames = [...this.mcpTools.keys()].join(", ");
+    const toolNames = [builtInNames, mcpToolNames].filter(Boolean).join(", ");
 
     return [
       "You are MetalMind, an agentic AI assistant running in a terminal UI (TUI).",

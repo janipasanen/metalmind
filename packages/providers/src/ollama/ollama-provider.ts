@@ -114,6 +114,14 @@ export class OllamaProvider implements ModelProvider {
       stream: true,
     };
 
+    if (request.tools && request.tools.length > 0) {
+      type ToolDef = { name: string; description: string; inputSchema: Record<string, unknown> };
+      body.tools = (request.tools as ToolDef[]).map((t) => ({
+        type: "function",
+        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      }));
+    }
+
     const res = await fetch(`${this.baseUrl}/api/chat`, {
       method: "POST",
       headers: this.headers(),
