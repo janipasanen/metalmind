@@ -1,30 +1,41 @@
 {
-  "name": "@metalmind/tui",
-  "version": "0.0.0",
-  "private": true,
+  "name": "metalmind",
+  "version": "0.1.0",
+  "description": "Agentic AI assistant for the terminal with three-tier routing (MLX → local Ollama → cloud)",
   "type": "module",
-  "main": "./src/index.tsx",
   "bin": {
     "metalmind": "./bin/metalmind.js"
   },
+  "files": [
+    "bin/",
+    "dist/",
+    "scripts/"
+  ],
   "scripts": {
     "dev": "tsx --tsconfig ../../tsconfig.json src/index.tsx",
+    "build": "tsup",
     "start": "node bin/metalmind.js",
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-typescript": "^0.23.2"
+  },
+  "devDependencies": {
     "@metalmind/config": "*",
     "@metalmind/core": "*",
     "@metalmind/providers": "*",
     "@metalmind/schemas": "*",
     "@metalmind/tools": "*",
+    "@types/react": "^19.0.0",
     "ink": "^5.0.0",
     "ink-text-input": "^6.0.0",
     "react": "^18.3.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.3",
     "zod": "^3.24.0"
   },
-  "devDependencies": {
-    "@types/react": "^19.0.0",
-    "tsx": "^4.22.3"
+  "engines": {
+    "node": ">=18"
   }
 }

@@ -22,7 +22,6 @@ function portOpen(port) {
 
 /**
  * Find the python3 binary that has mlx_lm installed.
- * Checks (in order):
  *   1. ~/.local/share/metalmind/.venv  — created by postinstall
  *   2. system python3                  — covers manual pip installs
  */
@@ -37,12 +36,10 @@ function findMlxPython() {
 }
 
 // On Apple Silicon, ensure the MLX sidecar is running for GPU-local inference.
-// The sidecar script ships inside the package under scripts/.
 if (process.platform === "darwin" && process.arch === "arm64") {
   const already = await portOpen(8742);
   if (!already) {
     const python = findMlxPython();
-    // The sidecar lives alongside postinstall.js in the package's scripts/ dir.
     const sidecar = resolve(__dirname, "../scripts/mlx-sidecar.py");
     if (python && existsSync(sidecar)) {
       spawn(python, [sidecar], {
@@ -54,17 +51,28 @@ if (process.platform === "darwin" && process.arch === "arm64") {
   }
 }
 
-// Resolve tsx/esm relative to this script, not CWD, so `metalmind` works from any directory.
-const tsxEsmPath = require.resolve("tsx/esm");
-const entry = resolve(__dirname, "../src/index.tsx");
+// Prefer the compiled bundle (dist/index.js) — present in published packages and after `npm run build`.
+// Fall back to tsx for local development from source (no build step required).
+const distEntry = resolve(__dirname, "../dist/index.js");
+const srcEntry = resolve(__dirname, "../src/index.tsx");
 
-const result = spawnSync(
-  process.execPath,
-  ["--import", pathToFileURL(tsxEsmPath).href, entry, ...process.argv.slice(2)],
-  {
+let result;
+if (existsSync(distEntry)) {
+  result = spawnSync(process.execPath, [distEntry, ...process.argv.slice(2)], {
     stdio: "inherit",
-    env: { ...process.env, TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json") },
-  },
-);
+    env: { ...process.env },
+  });
+} else {
+  // Dev mode: run TypeScript source directly via tsx.
+  const tsxEsmPath = require.resolve("tsx/esm");
+  result = spawnSync(
+    process.execPath,
+    ["--import", pathToFileURL(tsxEsmPath).href, srcEntry, ...process.argv.slice(2)],
+    {
+      stdio: "inherit",
+      env: { ...process.env, TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json") },
+    },
+  );
+}
 
 process.exit(result.status ?? 1);

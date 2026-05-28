@@ -4,17 +4,47 @@ An agentic AI assistant for the terminal with intelligent three-tier routing: si
 
 ## Install
 
+### From npm (recommended)
+
+```bash
+npm install -g metalmind
+metalmind
+```
+
+On Apple Silicon, `postinstall` automatically creates a Python `.venv` at
+`~/.local/share/metalmind/.venv` and installs `mlx-lm` so the MLX sidecar
+is ready for GPU inference with no extra steps. Requires Python 3 and
+Xcode Command Line Tools (`xcode-select --install`).
+
+### From source (development)
+
 ```bash
 git clone https://github.com/janipasanen/metalmind
 cd metalmind
-npm install
-npm run build
-npm link -w @metalmind/tui
+npm install        # installs all workspace packages
+npm run build      # type-checks + bundles apps/tui → dist/index.js
+npm link -w metalmind   # registers the `metalmind` command globally
 ```
 
 ```bash
-metalmind            # run from any directory
+metalmind          # run from any directory
 ```
+
+### Publishing a new release
+
+```bash
+# 1. Bump the version in apps/tui/package.json
+# 2. Build the bundle
+npm run build
+
+# 3. Publish (only the apps/tui package — all @metalmind/* deps are bundled in)
+npm publish --workspace apps/tui
+```
+
+The published package contains only `dist/`, `bin/`, and `scripts/`. All
+`@metalmind/*` internal packages are bundled into `dist/index.js` at build
+time. The only runtime npm dependency is `tree-sitter` (native addon, compiled
+on install by node-gyp — requires Xcode CLT on macOS).
 
 ## Providers
 
@@ -183,4 +213,4 @@ If the sidecar is not reachable at startup, the local tier falls back to Ollama 
 
 **Model not found** — Check your API key is set in `~/.config/metalmind/config.json` or as an env var. For local Ollama, ensure `ollama serve` is running.
 
-**Command not found after install** — Re-run `npm link -w @metalmind/tui` from the repo root, or check that your Node bin directory is in `$PATH`.
+**Command not found after install** — Check that your Node global bin directory is in `$PATH` (`npm bin -g`). For source installs, re-run `npm link -w metalmind` from the repo root.
