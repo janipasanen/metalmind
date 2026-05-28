@@ -123,7 +123,20 @@ function ensureConfigDir(): void {
   }
 }
 
+/** Strip an accidental "provider/" prefix from a model name. */
+export function normalizeModelName(provider: string, model: string): string {
+  const prefix = provider + "/";
+  return model.startsWith(prefix) ? model.slice(prefix.length) : model;
+}
+
 const LOCAL_ONLY_MODELS = new Set(["deepseek-coder:1.3b", "deepseek-coder:6.7b"]);
+const KNOWN_PROVIDERS = ["ollama", "openai", "anthropic", "mlx"];
+
+/** True when a model name looks corrupted (contains multiple slashes or is very long). */
+function isCorruptedModel(model: string): boolean {
+  const slashCount = (model.match(/\//g) ?? []).length;
+  return slashCount > 1 || model.length > 120;
+}
 
 export function loadXdgConfig(): UserConfig {
   ensureConfigDir();
@@ -138,19 +151,43 @@ export function loadXdgConfig(): UserConfig {
     const parsed = JSON.parse(raw);
     const config: UserConfig = { ...DEFAULT_XDG_CONFIG, ...parsed };
 
-    // Migrate: if the saved Ollama model is a local-only model but an Ollama
-    // Cloud API key is present, switch to the cloud default.
+    let dirty = false;
+
+    // Normalize activeModel: strip accidental "provider/" prefix.
+    const normalizedActive = normalizeModelName(config.activeProvider, config.activeModel);
+    if (normalizedActive !== config.activeModel) {
+      config.activeModel = normalizedActive;
+      dirty = true;
+    }
+
+    // Migrate: local-only Ollama model while cloud key is present.
     if (
       config.activeProvider === "ollama" &&
       LOCAL_ONLY_MODELS.has(config.activeModel) &&
       config.apiKeys?.["ollama"]
     ) {
       config.activeModel = DEFAULT_XDG_CONFIG.activeModel;
-      config.defaultModel = DEFAULT_XDG_CONFIG.defaultModel;
-      config.models = { ...DEFAULT_XDG_CONFIG.models, ...parsed.models };
-      saveXdgConfig(config);
+      dirty = true;
     }
 
+    // Normalize and de-duplicate each provider's models list.
+    for (const provider of KNOWN_PROVIDERS) {
+      const list = config.models[provider];
+      if (!Array.isArray(list)) continue;
+      const cleaned = Array.from(
+        new Set(
+          list
+            .map((m: string) => normalizeModelName(provider, m))
+            .filter((m: string) => !isCorruptedModel(m) && m.length > 0),
+        ),
+      );
+      if (cleaned.length !== list.length || cleaned.some((m, i) => m !== list[i])) {
+        config.models = { ...config.models, [provider]: cleaned };
+        dirty = true;
+      }
+    }
+
+    if (dirty) saveXdgConfig(config);
     return config;
   } catch {
     return DEFAULT_XDG_CONFIG;

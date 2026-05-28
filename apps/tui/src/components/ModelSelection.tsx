@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { loadXdgConfig, saveXdgConfig } from "@metalmind/config";
+import { loadXdgConfig, saveXdgConfig, normalizeModelName } from "@metalmind/config";
 
 export interface ModelSelectionProps {
   providerId: string;
@@ -26,18 +26,19 @@ export default function ModelSelection({ providerId, onSelect, onCancel }: Model
 
     if (isCustom) {
       if (key.return) {
-        if (customModel.trim()) {
+        const raw = customModel.trim();
+        if (raw) {
+          const model = normalizeModelName(providerId, raw);
           const currentConfig = loadXdgConfig();
           saveXdgConfig({
             ...currentConfig,
-            activeModel: customModel.trim(),
-            // Optionally add to available models if not there
+            activeModel: model,
             models: {
               ...currentConfig.models,
-              [providerId]: Array.from(new Set([...(currentConfig.models[providerId] || []), customModel.trim()]))
-            }
+              [providerId]: Array.from(new Set([...(currentConfig.models[providerId] || []), model])),
+            },
           });
-          onSelect(customModel.trim());
+          onSelect(model);
         }
         return;
       }
@@ -67,13 +68,10 @@ export default function ModelSelection({ providerId, onSelect, onCancel }: Model
         setIsCustom(true);
         return;
       }
-      
+      const model = normalizeModelName(providerId, selection);
       const currentConfig = loadXdgConfig();
-      saveXdgConfig({
-        ...currentConfig,
-        activeModel: selection,
-      });
-      onSelect(selection);
+      saveXdgConfig({ ...currentConfig, activeModel: model });
+      onSelect(model);
       return;
     }
   });
