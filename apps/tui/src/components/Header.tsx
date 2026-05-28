@@ -8,14 +8,23 @@ interface HeaderProps {
 }
 
 export default function Header({ projectName, modelName, accent = "cyan" }: HeaderProps) {
+  const displayModel = modelName.includes("/") && modelName.includes("models")
+    ? modelName.split("/").pop() || modelName
+    : modelName;
+
   return (
-    <Box borderStyle="round" borderColor={accent} paddingX={1} marginBottom={1}>
-      <Text bold color={accent}>
-        Project:{" "}
-      </Text>
-      <Text>{truncate(projectName, 40)}</Text>
-      <Text dimColor> │ Model: </Text>
-      <Text color="yellow">{truncate(modelName, 30)}</Text>
+    <Box borderStyle="round" borderColor={accent} paddingX={1} marginBottom={1} width="100%">
+      <Box flexShrink={0}>
+        <Text bold color={accent}>
+          Project:{" "}
+        </Text>
+        <Text>{truncate(projectName, 30)}</Text>
+      </Box>
+      <Text dimColor> │ </Text>
+      <Box flexGrow={1}>
+        <Text dimColor>Model: </Text>
+        <Text color="yellow">{truncate(displayModel, 120)}</Text>
+      </Box>
     </Box>
   );
 }
