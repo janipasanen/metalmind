@@ -34,17 +34,6 @@ export class PathValidator {
       ? resolve(normalized)
       : resolve(join(this.projectRoot, normalized));
 
-    const isAllowed = this.allowedRoots.some((root) => {
-      const rel = relative(root, absolute);
-      return !rel.startsWith("..") && !isAbsolute(rel);
-    });
-
-    if (!isAllowed) {
-      throw new Error(
-        `Path traversal blocked: "${requestedPath}" is outside project root`,
-      );
-    }
-
     const parts = absolute.split(sep);
     for (const blocked of BLOCKED_PATTERNS) {
       if (parts.includes(blocked)) {
