@@ -115,7 +115,10 @@ export function resolveConfig(
     }
   }
 
-  const model = explicitModel || (explicitProvider || autoDetected ? PROVIDER_DEFAULTS[provider] : (mergedConfig.activeModel || PROVIDER_DEFAULTS[provider]));
+  const rawModel = explicitModel || (explicitProvider || autoDetected ? PROVIDER_DEFAULTS[provider] : (mergedConfig.activeModel || PROVIDER_DEFAULTS[provider]));
+  // Strip any accidental "provider/" prefix from the model name.
+  const prefix = provider + "/";
+  const model = rawModel.startsWith(prefix) ? rawModel.slice(prefix.length) : rawModel;
   const apiKey = envApiKey(provider) ?? mergedConfig.apiKeys[provider];
   const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey ?? mergedConfig.apiKeys[provider]);
 

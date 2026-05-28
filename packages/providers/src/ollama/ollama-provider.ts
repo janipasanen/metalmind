@@ -59,7 +59,8 @@ export class OllamaProvider implements ModelProvider {
   private toolCallCounter = 0;
 
   constructor(model: string, baseUrl = "http://127.0.0.1:11434", apiKey?: string) {
-    this.modelName = model;
+    // Strip accidental "ollama/" namespace prefix — Ollama API expects bare model names.
+    this.modelName = model.startsWith("ollama/") ? model.slice(7) : model;
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
   }
