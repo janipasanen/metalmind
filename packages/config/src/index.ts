@@ -1,9 +1,12 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { MetalmindConfigSchema, type MetalmindConfig } from "@metalmind/schemas";
 
 export const CONFIG_FILE = "metalmind.yaml";
+export const XDG_CONFIG_DIR = join(homedir(), ".config", "metalmind");
+export const XDG_CONFIG_FILE = join(XDG_CONFIG_DIR, "config.json");
 
 export const defaultConfig: MetalmindConfig = {
   models: {},
@@ -67,3 +70,84 @@ export function validateConfig(raw: unknown): {
     ),
   };
 }
+
+export interface UserConfig {
+  activeProvider: string;
+  activeModel: string;
+  defaultProvider: string;
+  defaultModel: string;
+  apiKeys: Record<string, string>;
+  models: Record<string, string[]>;
+  mcpServers: Record<string, McpServerConfig>;
+  uiTheme: "light" | "dark" | "system";
+  recentModels: { provider: string; model: string; timestamp: number }[];
+  permissions: {
+    autoApprove: boolean;
+  };
+}
+
+export interface McpServerConfig {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  enabled: boolean;
+}
+
+const DEFAULT_XDG_CONFIG: UserConfig = {
+  activeProvider: "openai",
+  activeModel: "gpt-4o",
+  defaultProvider: "openai",
+  defaultModel: "gpt-4o",
+  apiKeys: {},
+  models: {
+    openai: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+    anthropic: ["claude-sonnet-4-6", "claude-3-5-sonnet"],
+    ollama: ["deepseek-coder:1.3b", "deepseek-coder:6.7b"],
+    mlx: ["mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit"],
+  },
+  mcpServers: {},
+  uiTheme: "system",
+  recentModels: [],
+  permissions: {
+    autoApprove: false,
+  },
+};
+
+function ensureConfigDir(): void {
+  if (!existsSync(XDG_CONFIG_DIR)) {
+    mkdirSync(XDG_CONFIG_DIR, { recursive: true });
+  }
+}
+
+export function loadXdgConfig(): UserConfig {
+  ensureConfigDir();
+  
+  if (!existsSync(XDG_CONFIG_FILE)) {
+    saveXdgConfig(DEFAULT_XDG_CONFIG);
+    return DEFAULT_XDG_CONFIG;
+  }
+  
+  try {
+    const raw = readFileSync(XDG_CONFIG_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    return { ...DEFAULT_XDG_CONFIG, ...parsed };
+  } catch {
+    return DEFAULT_XDG_CONFIG;
+  }
+}
+
+export function saveXdgConfig(config: UserConfig): void {
+  ensureConfigDir();
+  writeFileSync(XDG_CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+}
+
+export function updateXdgConfig(updates: Partial<UserConfig>): void {
+  const current = loadXdgConfig();
+   saveXdgConfig({ ...current, ...updates });
+}
+
+export { themes, THEME_DIR, THEME_FILE } from "./themes.js";
+export type { Theme } from "./themes.js";
+
