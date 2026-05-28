@@ -4,12 +4,13 @@ import { Text, Box } from "ink";
 interface HeaderProps {
   projectName: string;
   modelName: string;
+  accent?: string;
 }
 
-export default function Header({ projectName, modelName }: HeaderProps) {
+export default function Header({ projectName, modelName, accent = "cyan" }: HeaderProps) {
   return (
-    <Box borderStyle="round" borderColor="cyan" paddingX={1} marginBottom={1}>
-      <Text bold color="cyan">
+    <Box borderStyle="round" borderColor={accent} paddingX={1} marginBottom={1}>
+      <Text bold color={accent}>
         Project:{" "}
       </Text>
       <Text>{truncate(projectName, 40)}</Text>

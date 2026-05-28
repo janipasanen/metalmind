@@ -6,9 +6,10 @@ interface ThemeSelectionProps {
   currentTheme: string;
   onSelect: (id: string) => void;
   onCancel: () => void;
+  accent?: string;
 }
 
-export default function ThemeSelection({ currentTheme, onSelect, onCancel }: ThemeSelectionProps) {
+export default function ThemeSelection({ currentTheme, onSelect, onCancel, accent = "cyan" }: ThemeSelectionProps) {
   const [selectedIndex, setSelectedIndex] = useState(themes.findIndex(t => t.id === currentTheme));
 
   useInput((input, key) => {
@@ -28,13 +29,13 @@ export default function ThemeSelection({ currentTheme, onSelect, onCancel }: The
   });
 
   return (
-    <Box flexDirection="column" borderColor="cyan" paddingX={1} paddingY={1} width="60%">
-      <Text bold color="cyan">Select Theme</Text>
+    <Box flexDirection="column" borderColor={accent} paddingX={1} paddingY={1} width="60%">
+      <Text bold color={accent}>Select Theme</Text>
       <Box flexDirection="column" paddingY={1}>
         {themes.map((theme, i) => (
           <Box key={theme.id} flexDirection="row" marginRight={1}>
             <Box width={3}>
-              <Text color={i === selectedIndex ? "cyan" : "gray"}>
+              <Text color={i === selectedIndex ? accent : "gray"}>
                 {i === selectedIndex ? ">" : " "}
               </Text>
             </Box>

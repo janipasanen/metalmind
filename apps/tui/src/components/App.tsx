@@ -45,6 +45,7 @@ export default function App({ config }: AppProps) {
   const [showModelSelection, setShowModelSelection] = useState(false);
   const [showMcpConfig, setShowMcpConfig] = useState(false);
   const [showThemeSelection, setShowThemeSelection] = useState(false);
+  const [theme, setTheme] = useState(() => loadTheme());
 
   const agentRef = useRef<AgentLoop | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
@@ -150,13 +151,13 @@ export default function App({ config }: AppProps) {
 
   return (
     <Box flexDirection="column" padding={1} height="100%">
-      <Header projectName={projectName} modelName={getActiveModel()} />
-      <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} />
+      <Header projectName={projectName} modelName={getActiveModel()} accent={theme.colors.accent} />
+      <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} />
       <InputBar onSubmit={handleSend} disabled={isStreaming} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} />
-      
+
       {showCommandPalette && (
-        <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} 
+        <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} accent={theme.colors.accent}
           commands={[
             { id: "provider", title: "Remote Provider", description: "Cloud provider for complex tasks", action: () => setShowProviderSelection(true) },
             { id: "model", title: "Remote Model", description: "Model used for complex tasks", action: () => setShowModelSelection(true) },
@@ -172,24 +173,24 @@ export default function App({ config }: AppProps) {
           const newCfg = resolveConfig();
           setActiveModel(`${newCfg.provider}/${newCfg.model}`);
           await reloadAgent();
-        }} onCancel={() => setShowProviderSelection(false)} />
+        }} onCancel={() => setShowProviderSelection(false)} accent={theme.colors.accent} />
       )}
       {showModelSelection && (
         <ModelSelection providerId={activeProvider} onSelect={async (modelId) => {
           setShowModelSelection(false);
           setActiveModel(`${activeProvider}/${modelId}`);
           await reloadAgent();
-        }} onCancel={() => setShowModelSelection(false)} />
+        }} onCancel={() => setShowModelSelection(false)} accent={theme.colors.accent} />
       )}
-      {showMcpConfig && <McpConfig onDone={() => setShowMcpConfig(false)} />}
+      {showMcpConfig && <McpConfig onDone={() => setShowMcpConfig(false)} accent={theme.colors.accent} />}
       {showThemeSelection && (
-        <ThemeSelection currentTheme={loadTheme().id} onSelect={async (themeId) => {
-          switchTheme(themeId);
+        <ThemeSelection currentTheme={theme.id} onSelect={async (themeId) => {
+          const newTheme = switchTheme(themeId);
+          setTheme(newTheme);
           setShowThemeSelection(false);
           const currentConfig = loadXdgConfig();
           saveXdgConfig({ ...currentConfig, uiTheme: themeId as "light" | "dark" | "system" });
-          await reloadAgent();
-        }} onCancel={() => setShowThemeSelection(false)} />
+        }} onCancel={() => setShowThemeSelection(false)} accent={theme.colors.accent} />
       )}
     </Box>
   );

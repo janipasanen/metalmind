@@ -12,9 +12,10 @@ interface CommandPaletteProps {
   isOpen: boolean;
   onClose: () => void;
   commands: Command[];
+  accent?: string;
 }
 
-export default function CommandPalette({ isOpen, onClose, commands }: CommandPaletteProps) {
+export default function CommandPalette({ isOpen, onClose, commands, accent = "cyan" }: CommandPaletteProps) {
   const [filter, setFilter] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
 
@@ -64,7 +65,7 @@ export default function CommandPalette({ isOpen, onClose, commands }: CommandPal
   return (
     <Box
       flexDirection="column"
-      borderColor="cyan"
+      borderColor={accent}
       paddingX={1}
       paddingY={1}
       width="80%"
@@ -78,7 +79,7 @@ export default function CommandPalette({ isOpen, onClose, commands }: CommandPal
           filteredCommands.map((cmd, i) => (
             <Box key={cmd.id} flexDirection="row" marginRight={1}>
               <Box width={3}>
-                <Text color={i === selectedIndex ? "cyan" : "gray"}>{i === selectedIndex ? ">" : " "}</Text>
+                <Text color={i === selectedIndex ? accent : "gray"}>{i === selectedIndex ? ">" : " "}</Text>
               </Box>
               <Text>{cmd.title}</Text>
               <Box flexGrow={1} />

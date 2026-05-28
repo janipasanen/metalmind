@@ -14,12 +14,13 @@ export interface Provider {
 export interface ProviderSelectionProps {
   onSelect: (providerId: string) => void;
   onCancel: () => void;
+  accent?: string;
 }
 
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4o",
-  ollama: "deepseek-coder:1.3b",
+  ollama: "gemini-3-flash-preview:cloud",
   mlx: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
 };
 
@@ -30,7 +31,7 @@ const providers: Provider[] = [
   { id: "mlx", name: "MLX (Local)", description: "Local Apple Silicon GPU models", needsApiKey: false },
 ];
 
-export default function ProviderSelection({ onSelect, onCancel }: ProviderSelectionProps) {
+export default function ProviderSelection({ onSelect, onCancel, accent = "cyan" }: ProviderSelectionProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showingApiKeyInput, setShowingApiKeyInput] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
@@ -95,8 +96,8 @@ export default function ProviderSelection({ onSelect, onCancel }: ProviderSelect
   });
 
   return (
-    <Box flexDirection="column" borderColor="cyan" paddingX={1} paddingY={1} width="60%">
-      <Text bold color="cyan">Select Remote/Cloud Provider</Text>
+    <Box flexDirection="column" borderColor={accent} paddingX={1} paddingY={1} width="60%">
+      <Text bold color={accent}>Select Remote/Cloud Provider</Text>
       <Text dimColor>Used for complex tasks — local M1/GPU handles simple ones</Text>
       {showingApiKeyInput ? (
         <Box flexDirection="column" paddingY={1}>
@@ -115,7 +116,7 @@ export default function ProviderSelection({ onSelect, onCancel }: ProviderSelect
           {providers.map((provider, i) => (
             <Box key={provider.id} flexDirection="row" marginRight={1}>
               <Box width={3}>
-                <Text color={i === selectedIndex ? "cyan" : "gray"}>
+                <Text color={i === selectedIndex ? accent : "gray"}>
                   {i === selectedIndex ? ">" : " "}
                 </Text>
               </Box>

@@ -6,9 +6,10 @@ export interface ModelSelectionProps {
   providerId: string;
   onSelect: (modelId: string) => void;
   onCancel: () => void;
+  accent?: string;
 }
 
-export default function ModelSelection({ providerId, onSelect, onCancel }: ModelSelectionProps) {
+export default function ModelSelection({ providerId, onSelect, onCancel, accent = "cyan" }: ModelSelectionProps) {
   const config = loadXdgConfig();
   const availableModels = config.models[providerId] || [];
   
@@ -77,8 +78,8 @@ export default function ModelSelection({ providerId, onSelect, onCancel }: Model
   });
 
   return (
-    <Box flexDirection="column" borderColor="cyan" paddingX={1} paddingY={1} width="60%">
-      <Text bold color="cyan">Select Model for {providerId}</Text>
+    <Box flexDirection="column" borderColor={accent} paddingX={1} paddingY={1} width="60%">
+      <Text bold color={accent}>Select Model for {providerId}</Text>
       {isCustom ? (
         <Box flexDirection="column" paddingY={1}>
           <Text color="yellow">Enter custom model name:</Text>
@@ -92,7 +93,7 @@ export default function ModelSelection({ providerId, onSelect, onCancel }: Model
           {allOptions.map((model, i) => (
             <Box key={model} flexDirection="row" marginRight={1}>
               <Box width={3}>
-                <Text color={i === selectedIndex ? "cyan" : "gray"}>
+                <Text color={i === selectedIndex ? accent : "gray"}>
                   {i === selectedIndex ? ">" : " "}
                 </Text>
               </Box>

@@ -14,6 +14,7 @@ interface McpServer {
 
 interface McpConfigProps {
   onDone: () => void;
+  accent?: string;
 }
 
 type FormField = "name" | "command" | "args" | "authType";
@@ -27,7 +28,7 @@ interface AddForm {
   authType: "none" | "oauth2" | "bearer";
 }
 
-export default function McpConfig({ onDone }: McpConfigProps) {
+export default function McpConfig({ onDone, accent = "cyan" }: McpConfigProps) {
   const [servers, setServers] = useState<McpServer[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [formField, setFormField] = useState<FormField>("name");
@@ -140,8 +141,8 @@ export default function McpConfig({ onDone }: McpConfigProps) {
   };
 
   return (
-    <Box flexDirection="column" borderColor="cyan" paddingX={1} paddingY={1} width="70%">
-      <Text bold color="cyan">MCP Servers</Text>
+    <Box flexDirection="column" borderColor={accent} paddingX={1} paddingY={1} width="70%">
+      <Text bold color={accent}>MCP Servers</Text>
 
       {showAddForm ? (
         <Box flexDirection="column" paddingY={1}>
@@ -151,7 +152,7 @@ export default function McpConfig({ onDone }: McpConfigProps) {
             if (field === "authType") {
               return (
                 <Box key={field} flexDirection="row" marginTop={0}>
-                  <Text color={isActive ? "cyan" : "gray"}>{fieldLabel(field)}: </Text>
+                  <Text color={isActive ? accent : "gray"}>{fieldLabel(field)}: </Text>
                   <Text color={isActive ? "green" : "white"}>{form.authType}</Text>
                   {isActive && <Text dimColor>  ← → to cycle</Text>}
                 </Box>
@@ -160,7 +161,7 @@ export default function McpConfig({ onDone }: McpConfigProps) {
             const val = form[field] as string;
             return (
               <Box key={field} flexDirection="row">
-                <Text color={isActive ? "cyan" : "gray"}>{fieldLabel(field)}: </Text>
+                <Text color={isActive ? accent : "gray"}>{fieldLabel(field)}: </Text>
                 <Text color={isActive ? "green" : "white"}>{val}{isActive ? "_" : ""}</Text>
               </Box>
             );
@@ -182,7 +183,7 @@ export default function McpConfig({ onDone }: McpConfigProps) {
             servers.map((server, i) => (
               <Box key={server.id} flexDirection="row" marginRight={1}>
                 <Box width={3}>
-                  <Text color={i === selectedIndex ? "cyan" : "gray"}>{i === selectedIndex ? ">" : " "}</Text>
+                  <Text color={i === selectedIndex ? accent : "gray"}>{i === selectedIndex ? ">" : " "}</Text>
                 </Box>
                 <Text>{server.name}</Text>
                 <Box flexGrow={1} />
