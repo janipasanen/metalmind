@@ -1,6 +1,10 @@
 routing:
   defaultLocalModel: local-mlx
+  defaultReasoningModel: cloud-reasoning
 models:
   local-mlx:
     provider: mlx
     model: /Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-4b-it-qat-4bit
+  cloud-reasoning:
+    provider: ollama
+    model: gemma4:31b-cloud
