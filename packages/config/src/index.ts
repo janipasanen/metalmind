@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { MetalmindConfigSchema, type MetalmindConfig } from "@metalmind/schemas";
+import { loadMergedConfig, saveGlobalConfig } from "./merged-config.js";
 
 export const CONFIG_FILE = "metalmind.yaml";
 export const XDG_CONFIG_DIR = join(homedir(), ".config", "metalmind");
@@ -93,13 +94,14 @@ export interface McpServerConfig {
   env?: Record<string, string>;
   cwd?: string;
   enabled: boolean;
+  authType?: "none" | "oauth2" | "bearer";
 }
 
 const DEFAULT_XDG_CONFIG: UserConfig = {
-  activeProvider: "openai",
-  activeModel: "gpt-4o",
-  defaultProvider: "openai",
-  defaultModel: "gpt-4o",
+  activeProvider: "ollama",
+  activeModel: "deepseek-coder:1.3b",
+  defaultProvider: "ollama",
+  defaultModel: "deepseek-coder:1.3b",
   apiKeys: {},
   models: {
     openai: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
@@ -145,9 +147,9 @@ export function saveXdgConfig(config: UserConfig): void {
 
 export function updateXdgConfig(updates: Partial<UserConfig>): void {
   const current = loadXdgConfig();
-   saveXdgConfig({ ...current, ...updates });
+  saveXdgConfig({ ...current, ...updates });
 }
 
-export { themes, THEME_DIR, THEME_FILE } from "./themes.js";
+export { themes, THEME_DIR, THEME_FILE, switchTheme, loadTheme } from "./themes.js";
 export type { Theme } from "./themes.js";
-
+export { loadMergedConfig, saveGlobalConfig } from "./merged-config.js";

@@ -1,4 +1,4 @@
-import { loadConfigFromFile } from "@metalmind/config";
+import { loadConfigFromFile, loadMergedConfig } from "@metalmind/config";
 import type { MetalmindConfig } from "@metalmind/schemas";
 
 export interface TuiConfig {
@@ -13,7 +13,9 @@ export interface TuiConfig {
 /** Resolve credentials/base URL for a provider from the environment. */
 export function providerCredentials(provider: string): { apiKey?: string; baseUrl?: string } {
   const apiKey = envApiKey(provider);
-  return { apiKey, baseUrl: process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey) };
+  const mergedConfig = loadMergedConfig();
+  const apiKeyFromConfig = mergedConfig.apiKeys[provider] || undefined;
+  return { apiKey: apiKeyFromConfig ?? apiKey, baseUrl: process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKeyFromConfig ?? apiKey) };
 }
 
 const PROVIDER_DEFAULTS: Record<string, string> = {
@@ -30,6 +32,7 @@ function envApiKey(provider: string): string | undefined {
   if (provider === "anthropic") return process.env.ANTHROPIC_API_KEY;
   if (provider === "openai") return process.env.OPENAI_API_KEY;
   if (provider === "ollama") return process.env.OLLAMA_API_KEY;
+  if (provider === "mlx") return process.env.MLX_API_KEY;
   return undefined;
 }
 
@@ -41,7 +44,7 @@ function defaultBaseUrl(provider: string, apiKey?: string): string | undefined {
 
 /**
  * Resolve the active provider/model with precedence:
- * CLI flags > env vars > metalmind.yaml (named model / routing.defaultLocalModel) > built-in defaults.
+ * CLI flags > env vars > project metalmind.yaml > merged global config > built-in defaults.
  *
  * `fileConfig` is injectable for testing; in production it loads metalmind.yaml from cwd upward.
  */
@@ -60,8 +63,9 @@ export function resolveConfig(
 
   const explicitProvider = cliProvider || process.env.METALMIND_PROVIDER || "";
   const explicitModel = cliModel || process.env.METALMIND_MODEL || "";
-  const explicit = Boolean(explicitProvider || explicitModel);
 
+  const mergedConfig = loadMergedConfig();
+  const explicit = Boolean(explicitProvider || explicitModel);
   const models = fileConfig.models ?? {};
 
   // A named-model reference resolves to a metalmind.yaml `models` entry.
@@ -85,16 +89,35 @@ export function resolveConfig(
   }
 
   // Built-in resolution (no named model).
-  let provider = explicitProvider;
-  if (!provider) {
-    if (process.env.ANTHROPIC_API_KEY) provider = "anthropic";
-    else if (process.env.OPENAI_API_KEY) provider = "openai";
-    else provider = "ollama";
+  // Priority: CLI/env > global config > auto-detect from env vars > built-in defaults
+  let provider: string;
+  let autoDetected = false;
+  
+  if (explicitProvider) {
+    // CLI/env explicitly chose a provider
+    provider = explicitProvider;
+  } else if (mergedConfig.activeProvider) {
+    // Global config has a saved preference
+    provider = mergedConfig.activeProvider;
+  } else {
+    // Auto-detect from env vars first: Ollama > Anthropic > OpenAI
+    if (process.env.OLLAMA_API_KEY) {
+      provider = "ollama";
+      autoDetected = true;
+    } else if (process.env.ANTHROPIC_API_KEY) {
+      provider = "anthropic";
+      autoDetected = true;
+    } else if (process.env.OPENAI_API_KEY) {
+      provider = "openai";
+      autoDetected = true;
+    } else {
+      provider = "ollama";
+    }
   }
 
-  const model = explicitModel || PROVIDER_DEFAULTS[provider] || "default";
-  const apiKey = envApiKey(provider);
-  const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey);
+  const model = explicitModel || (explicitProvider || autoDetected ? PROVIDER_DEFAULTS[provider] : (mergedConfig.activeModel || PROVIDER_DEFAULTS[provider]));
+  const apiKey = envApiKey(provider) ?? mergedConfig.apiKeys[provider];
+  const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey ?? mergedConfig.apiKeys[provider]);
 
   return { provider, model, apiKey, baseUrl, explicit };
 }

@@ -17,13 +17,14 @@ npm run build
 Make the `metalmind` command available from any terminal:
 
 ```bash
-npm install -g ./apps/tui
+npm run build
+npm link --workspace=@metalmind/tui
 ```
 
 Or use `npm link` for local development:
 
 ```bash
-npm link ./apps/tui
+npm link --workspace=@metalmind/tui
 ```
 
 ### 3. Run from anywhere
@@ -181,3 +182,104 @@ npm test
 
 # Type check
 npm run typecheck
+### Command Palette (Ctrl+P)
+
+MetalMind includes a command palette for quick navigation and provider/model selection:
+
+- **Ctrl+P** - Open command palette
+- Type to search through available commands and providers
+- Use Arrow keys to navigate
+- **Return** to select a command or provider
+- **Esc** to cancel
+
+The command palette allows you to:
+- Switch between providers (Ollama, OpenAI, Anthropic, MLX)
+- Select different models for each provider
+- Access provider configuration
+
+## Provider and Model Selection
+
+When the app starts, it automatically selects a provider based on available API keys:
+1. Anthropic (if `ANTHROPIC_API_KEY` is set)
+2. OpenAI (if `OPENAI_API_KEY` is set)
+3. Ollama (default, uses `deepseek-coder:1.3b`)
+
+You can change the provider/model at any time using:
+- **Ctrl+P** - Open command palette and select
+- Environment variable: `export METALMIND_PROVIDER=anthropic`
+- Command line: `metalmind --provider=anthropic --model=claude-sonnet-4-6`
+
+## MCP Configuration
+
+MetalMind supports Model Context Protocol (MCP) servers with multiple authentication types.
+
+### Adding MCP Servers
+
+Use **Ctrl+P** → **MCP** to open the MCP configuration panel. From there you can:
+
+- **Add a new server** - Press 'A' to add a server with your preferred authentication
+- **Navigate** - Use Up/Down arrows to move between servers
+- **Delete a server** - Select a server and press 'D' to confirm deletion
+
+### Authentication Types
+
+Configure the auth type when adding a server:
+
+- **`oauth2`** (default) - OAuth2 session authentication, like Codex/OpenCode
+  - Login via: `codex mcp login ServerName` or `opencode mcp auth ServerName`
+  - Uses interactive browser-based OAuth flow
+
+- **`bearer`** - Direct Bearer token authentication
+  - No login needed, just provide your API token
+  - For services requiring direct token access
+
+- **`none`** - No authentication required
+  - For local MCP servers without auth
+
+### Manual Configuration
+
+Edit `~/.config/metalmind/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "git": {
+      "name": "Git",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-git"],
+      "authType": "oauth2",
+      "enabled": true
+    },
+    "memory": {
+      "name": "Memory",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "authType": "oauth2",
+      "enabled": true
+    },
+    "custom": {
+      "name": "Custom Server",
+      "command": "node",
+      "args": ["server.js"],
+      "authType": "bearer",
+      "enabled": true
+    }
+  }
+}
+```
+
+Or use `metalmind.yaml` in your project directory:
+
+```yaml
+mcpServers:
+  git:
+    name: Git
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-git"
+    authType: oauth2
+    enabled: true
+```
+
+After adding servers, restart MetalMind and they'll be available as MCP tools.

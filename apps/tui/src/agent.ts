@@ -132,11 +132,11 @@ export function createDefaultRouter(
     const routing = fileConfig.routing;
 
     const local = await resolveLocalTier(fileConfig);
+    // Use the config's own provider/model as the reasoning tier fallback so
+    // we never escalate to a provider the user hasn't configured.
+    const defaultReasoning = { provider: config.provider, model: config.model };
     const reasoning =
-      resolveNamedTier(routing?.defaultReasoningModel, models) ?? {
-        provider: "anthropic",
-        model: "claude-sonnet-4-6",
-      };
+      resolveNamedTier(routing?.defaultReasoningModel, models) ?? defaultReasoning;
 
     return new ModelRouter({
       tier1Provider: local.provider,
