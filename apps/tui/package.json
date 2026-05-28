@@ -9,7 +9,8 @@
   },
   "scripts": {
     "dev": "tsx --tsconfig ../../tsconfig.json src/index.tsx",
-    "start": "node bin/metalmind.js"
+    "start": "node bin/metalmind.js",
+    "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
     "@metalmind/config": "*",
