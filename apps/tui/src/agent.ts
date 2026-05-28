@@ -98,13 +98,13 @@ function tierCapabilities(targets: TierTarget[]): Record<string, ModelCapabiliti
 }
 
 async function mlxSidecarReady(target: TierTarget): Promise<boolean> {
-  const provider = createProvider("mlx", target.model, { baseUrl: target.baseUrl });
-  const readiness = (provider as { readiness?: () => Promise<{ ready: boolean }> }).readiness;
-  if (!readiness) return true;
-
+  // Treat the sidecar as usable as long as it responds — even if the model is
+  // still loading. A 503 on the first chat request will cause the quality gate
+  // to escalate to the cloud tier for that turn while the model warms up.
+  const baseUrl = target.baseUrl ?? "http://127.0.0.1:8742";
   try {
-    const status = await readiness.call(provider);
-    return status.ready;
+    const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(2000) });
+    return res.ok;
   } catch {
     return false;
   }

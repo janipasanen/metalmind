@@ -10,6 +10,7 @@ import sys
 import time
 import os
 import argparse
+import threading
 from typing import Optional, AsyncGenerator
 
 try:
@@ -64,7 +65,7 @@ def load_model(model_path: str, trust_remote_code: bool = False):
     try:
         from mlx_lm import load
 
-        loaded_model, loaded_tokenizer = load(model_path, trust_remote_code=trust_remote_code)
+        loaded_model, loaded_tokenizer = load(model_path)
         model_name = model_path
         return {"status": "loaded", "model": model_path}
     except Exception as e:
@@ -248,11 +249,16 @@ def main():
     args = parser.parse_args()
 
     if args.model:
-        print(f"Loading model: {args.model}")
-        load_model(args.model)
+        # Load model in background so the HTTP server starts immediately.
+        # Chat requests return 503 while loading; the agent escalates to cloud in that window.
+        def _load():
+            print(f"[MLX] Loading {args.model} in background…")
+            load_model(args.model)
+            print(f"[MLX] Model ready")
+        threading.Thread(target=_load, daemon=True).start()
 
-    print(f"MLX sidecar starting on {args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    print(f"[MLX] Sidecar listening on {args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

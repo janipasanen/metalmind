@@ -42,7 +42,11 @@ if (process.platform === "darwin" && process.arch === "arm64") {
     const python = findMlxPython();
     const sidecar = resolve(__dirname, "../scripts/mlx-sidecar.py");
     if (python && existsSync(sidecar)) {
-      spawn(python, [sidecar], {
+      // Pass --model so the sidecar starts loading the model in the background
+      // immediately. The HTTP server starts right away; model_loaded becomes true
+      // once the weights are in memory (a few seconds if cached, longer on first run).
+      const defaultMlxModel = "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit";
+      spawn(python, [sidecar, "--model", defaultMlxModel], {
         detached: true,
         stdio: "ignore",
         env: { ...process.env },
