@@ -114,7 +114,12 @@ export default function App({ config }: AppProps) {
       }
 
       if (input.startsWith("/model ")) {
-        const newModel = input.slice(7).trim();
+        // Strip optional "provider/" prefix so "/model ollama/foo" and "/model foo" both work.
+        let newModel = input.slice(7).trim();
+        const slash = newModel.indexOf("/");
+        if (slash !== -1 && newModel.slice(0, slash) === activeProvider) {
+          newModel = newModel.slice(slash + 1);
+        }
         const cfg = loadXdgConfig();
         saveXdgConfig({ ...cfg, activeModel: newModel });
         setActiveModel(`${activeProvider}/${newModel}`);

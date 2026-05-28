@@ -99,14 +99,14 @@ export interface McpServerConfig {
 
 const DEFAULT_XDG_CONFIG: UserConfig = {
   activeProvider: "ollama",
-  activeModel: "deepseek-coder:1.3b",
+  activeModel: "gemini-3-flash-preview:cloud",
   defaultProvider: "ollama",
-  defaultModel: "deepseek-coder:1.3b",
+  defaultModel: "gemini-3-flash-preview:cloud",
   apiKeys: {},
   models: {
     openai: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
     anthropic: ["claude-sonnet-4-6", "claude-3-5-sonnet"],
-    ollama: ["deepseek-coder:1.3b", "deepseek-coder:6.7b"],
+    ollama: ["gemini-3-flash-preview:cloud", "gemma3:27b", "llama3.3:70b"],
     mlx: ["mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit"],
   },
   mcpServers: {},
@@ -123,18 +123,35 @@ function ensureConfigDir(): void {
   }
 }
 
+const LOCAL_ONLY_MODELS = new Set(["deepseek-coder:1.3b", "deepseek-coder:6.7b"]);
+
 export function loadXdgConfig(): UserConfig {
   ensureConfigDir();
-  
+
   if (!existsSync(XDG_CONFIG_FILE)) {
     saveXdgConfig(DEFAULT_XDG_CONFIG);
     return DEFAULT_XDG_CONFIG;
   }
-  
+
   try {
     const raw = readFileSync(XDG_CONFIG_FILE, "utf-8");
     const parsed = JSON.parse(raw);
-    return { ...DEFAULT_XDG_CONFIG, ...parsed };
+    const config: UserConfig = { ...DEFAULT_XDG_CONFIG, ...parsed };
+
+    // Migrate: if the saved Ollama model is a local-only model but an Ollama
+    // Cloud API key is present, switch to the cloud default.
+    if (
+      config.activeProvider === "ollama" &&
+      LOCAL_ONLY_MODELS.has(config.activeModel) &&
+      config.apiKeys?.["ollama"]
+    ) {
+      config.activeModel = DEFAULT_XDG_CONFIG.activeModel;
+      config.defaultModel = DEFAULT_XDG_CONFIG.defaultModel;
+      config.models = { ...DEFAULT_XDG_CONFIG.models, ...parsed.models };
+      saveXdgConfig(config);
+    }
+
+    return config;
   } catch {
     return DEFAULT_XDG_CONFIG;
   }
