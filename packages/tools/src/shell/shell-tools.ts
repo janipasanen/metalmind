@@ -12,12 +12,13 @@ interface RunResult {
 
 export const runCommandSchema = z.object({
   command: z.string().min(1),
+  cwd: z.string().optional(),
   timeout: z.number().int().min(1000).max(300_000).default(120_000),
 });
 
 export const runCommandTool: AgentTool<z.input<typeof runCommandSchema>, string> = createTool({
   toolName: "runCommand",
-  description: "Run a shell command in the project root. Returns stdout, stderr, exit code, and duration.",
+  description: "Run a shell command. Supports any CLI tool: gh, git, npm, brew, etc. Use `cwd` to run in a specific directory (defaults to project root). Returns stdout, stderr, and exit code.",
   inputSchema: runCommandSchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof runCommandSchema>, ctx: ToolExecutionContext): Promise<string> {
@@ -30,10 +31,11 @@ export const runCommandTool: AgentTool<z.input<typeof runCommandSchema>, string>
       }
     }
 
+    const workDir = input.cwd ?? ctx.projectRoot;
     const start = Date.now();
     try {
       const result = execSync(input.command, {
-        cwd: ctx.projectRoot,
+        cwd: workDir,
         encoding: "utf-8",
         timeout: input.timeout,
         maxBuffer: 10 * 1024 * 1024,

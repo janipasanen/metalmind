@@ -1,5 +1,5 @@
 import { createProvider } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
@@ -19,7 +19,9 @@ interface BufferedAttempt {
 function buildRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   for (const tool of allReadOnlyTools) registry.register(tool);
+  for (const tool of allWriteTools) registry.register(tool);
   for (const tool of allGitTools) registry.register(tool);
+  for (const tool of runShellTools) registry.register(tool);
   return registry;
 }
 
