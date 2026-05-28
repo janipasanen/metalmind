@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { ChatMessage } from "./App.js";
+import MarkdownText from "./MarkdownText.js";
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -49,7 +50,9 @@ export default function ChatView({
               </Text>
             </Box>
             <Box flexGrow={1}>
-              <Text color={msg.role === "system" ? "gray" : undefined}>{msg.content}</Text>
+              {msg.role === "assistant"
+                ? <MarkdownText text={msg.content} accent={accent} />
+                : <Text color={msg.role === "system" ? "gray" : undefined}>{msg.content}</Text>}
             </Box>
           </Box>
           {msg.toolCalls?.length ? (
@@ -78,8 +81,8 @@ export default function ChatView({
           <Box width={8} flexShrink={0}>
             <Text color={accent} bold>AI</Text>
           </Box>
-          <Box flexGrow={1}>
-            <Text color={accent}>{streamingContent}</Text>
+          <Box flexGrow={1} flexDirection="column">
+            <MarkdownText text={streamingContent} accent={accent} />
             <Text color="yellow" dimColor>▌</Text>
           </Box>
         </Box>
