@@ -3,12 +3,12 @@ import { createRequire } from "module";
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, resolve, join } from "path";
 import { existsSync } from "fs";
-import { homedir } from "os";
 import { spawn, spawnSync } from "child_process";
 import { createConnection } from "net";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
+const repoRoot = resolve(__dirname, "../../..");
 
 /** Returns true if something is listening on the given port (400ms timeout). */
 function portOpen(port) {
@@ -22,11 +22,11 @@ function portOpen(port) {
 
 /**
  * Find the python3 binary that has mlx_lm installed.
- * Prefers the private venv created by postinstall; falls back to system
+ * Prefers the repo-local .venv created by postinstall; falls back to system
  * python3 when the user installed mlx-lm directly (no venv).
  */
 function findMlxPython() {
-  const venvPy = join(homedir(), ".local", "share", "metalmind", "venv", "bin", "python3");
+  const venvPy = join(repoRoot, ".venv", "bin", "python3");
   if (existsSync(venvPy)) return venvPy;
 
   // Check system python3 — covers manual `pip3 install mlx-lm` installs.
@@ -41,7 +41,7 @@ if (process.platform === "darwin" && process.arch === "arm64") {
   const already = await portOpen(8742);
   if (!already) {
     const python = findMlxPython();
-    const sidecar = resolve(__dirname, "../../../scripts/mlx-sidecar.py");
+    const sidecar = join(repoRoot, "scripts", "mlx-sidecar.py");
     if (python && existsSync(sidecar)) {
       spawn(python, [sidecar], {
         detached: true,

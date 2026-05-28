@@ -1,25 +1,25 @@
 #!/usr/bin/env node
 /**
  * Runs after `npm install`. On Apple Silicon, installs the MLX sidecar
- * dependencies (mlx-lm, fastapi, uvicorn) so local GPU inference works
- * without any manual setup.
+ * dependencies (mlx-lm, fastapi, uvicorn) into a .venv at the repo root
+ * so local GPU inference works without any manual setup.
  *
- * Uses a private venv at ~/.local/share/metalmind/venv so it doesn't
- * pollute the system Python. If mlx-lm is already importable (user
- * installed it manually), the venv step is skipped.
+ * If mlx-lm is already importable from the system Python (user installed
+ * it manually), the .venv step is skipped.
  */
 import { execFileSync } from "child_process";
-import { existsSync, mkdirSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { existsSync } from "fs";
+import { join, resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(__dirname, "../../..");
+const venvDir = join(repoRoot, ".venv");
+const venvPython = join(venvDir, "bin", "python3");
 
 if (process.platform !== "darwin" || process.arch !== "arm64") {
   process.exit(0);
 }
-
-const dataDir = join(homedir(), ".local", "share", "metalmind");
-const venvDir = join(dataDir, "venv");
-const venvPython = join(venvDir, "bin", "python3");
 
 function findSystemPython() {
   for (const candidate of ["python3", "/usr/bin/python3"]) {
@@ -48,21 +48,18 @@ if (!systemPy) {
 }
 
 try {
-  // If the venv already exists, just ensure deps are up to date.
   if (!existsSync(venvPython)) {
-    // mlx-lm already installed directly? No venv needed.
+    // mlx-lm already installed in system Python? No .venv needed.
     if (mlxImportable(systemPy)) {
-      console.log("metalmind: mlx-lm already installed — skipping venv setup.");
+      console.log("metalmind: mlx-lm already installed — skipping .venv setup.");
       process.exit(0);
     }
 
-    mkdirSync(dataDir, { recursive: true });
-    console.log("metalmind: creating Python venv for MLX GPU inference...");
+    console.log(`metalmind: creating .venv at ${venvDir} for MLX GPU inference...`);
     execFileSync(systemPy, ["-m", "venv", venvDir], { stdio: "inherit" });
   }
 
   console.log("metalmind: installing MLX dependencies (mlx-lm, fastapi, uvicorn)...");
-  // Use `python3 -m pip` — avoids macOS pip/pip3 PATH issues.
   execFileSync(venvPython, ["-m", "pip", "install", "--quiet", "--upgrade",
     "mlx-lm", "fastapi", "uvicorn"], { stdio: "inherit" });
 
