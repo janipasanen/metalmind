@@ -1,0 +1,6 @@
+routing:
+  defaultLocalModel: local-mlx
+models:
+  local-mlx:
+    provider: mlx
+    model: /Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-4b-it-qat-4bit
