@@ -16,15 +16,17 @@ export const BLOCKED_PATTERNS = [
 
 export class PathValidator {
   readonly projectRoot: string;
+  private readonly allowedRoots: string[];
 
-  constructor(projectRoot: string) {
+  constructor(projectRoot: string, extraRoots: string[] = []) {
     this.projectRoot = resolve(projectRoot);
+    this.allowedRoots = [this.projectRoot, ...extraRoots.map((r) => resolve(r))];
   }
 
   /**
    * Validates that a path is safe for filesystem operations.
    * Returns the resolved absolute path on success.
-   * Throws on path traversal, blocked paths, or paths outside root.
+   * Throws on blocked patterns or paths outside all allowed roots.
    */
   resolveSafePath(requestedPath: string): string {
     const normalized = normalize(requestedPath);
@@ -32,9 +34,12 @@ export class PathValidator {
       ? resolve(normalized)
       : resolve(join(this.projectRoot, normalized));
 
-    const rel = relative(this.projectRoot, absolute);
+    const isAllowed = this.allowedRoots.some((root) => {
+      const rel = relative(root, absolute);
+      return !rel.startsWith("..") && !isAbsolute(rel);
+    });
 
-    if (rel.startsWith("..") || isAbsolute(rel)) {
+    if (!isAllowed) {
       throw new Error(
         `Path traversal blocked: "${requestedPath}" is outside project root`,
       );
@@ -52,16 +57,15 @@ export class PathValidator {
     return absolute;
   }
 
-  /**
-   * Returns the path relative to project root for display purposes.
-   */
+  /** Returns the path relative to the nearest allowed root. */
   toRelative(absolutePath: string): string {
+    for (const root of this.allowedRoots) {
+      const rel = relative(root, absolutePath);
+      if (!rel.startsWith("..") && !isAbsolute(rel)) return rel;
+    }
     return relative(this.projectRoot, absolutePath);
   }
 
-  /**
-   * Checks if a path exists and is within project root.
-   */
   isValidPath(requestedPath: string): boolean {
     try {
       this.resolveSafePath(requestedPath);
@@ -71,9 +75,6 @@ export class PathValidator {
     }
   }
 
-  /**
-   * Checks if a file exists and returns its stats if so.
-   */
   fileExists(requestedPath: string): boolean {
     try {
       const safe = this.resolveSafePath(requestedPath);
@@ -83,9 +84,6 @@ export class PathValidator {
     }
   }
 
-  /**
-   * Checks if a directory exists and returns true if so.
-   */
   directoryExists(requestedPath: string): boolean {
     try {
       const safe = this.resolveSafePath(requestedPath);

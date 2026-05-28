@@ -55,7 +55,7 @@ export const gitDiffFileTool: AgentTool<z.input<typeof gitDiffFileSchema>, strin
   inputSchema: gitDiffFileSchema,
   requiresConfirmation: false,
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
-    const v = new PathValidator(ctx.projectRoot);
+    const v = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     v.resolveSafePath(input.path);
     const flag = input.staged ? "--cached " : "";
     return gitCmd(`diff ${flag}--unified=3 -- "${input.path}"`, ctx.projectRoot);
@@ -72,7 +72,7 @@ export const gitAddTool: AgentTool<z.input<typeof gitAddSchema>, string> = creat
   inputSchema: gitAddSchema,
   requiresConfirmation: true,
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
-    const v = new PathValidator(ctx.projectRoot);
+    const v = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     for (const p of input.paths) v.resolveSafePath(p);
     const files = input.paths.map((p) => `"${p}"`).join(" ");
     return gitCmd(`add -- ${files}`, ctx.projectRoot);
@@ -103,7 +103,7 @@ export const gitRestoreTool: AgentTool<z.input<typeof gitRestoreSchema>, string>
   inputSchema: gitRestoreSchema,
   requiresConfirmation: true,
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
-    const v = new PathValidator(ctx.projectRoot);
+    const v = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     for (const p of input.paths) v.resolveSafePath(p);
     const files = input.paths.map((p) => `"${p}"`).join(" ");
     return gitCmd(`restore -- ${files}`, ctx.projectRoot);

@@ -20,7 +20,7 @@ export const readFileTool: AgentTool<ReadFileInput, string> = createTool({
   inputSchema: readFileSchema,
   requiresConfirmation: false,
   async execute(input: ReadFileInput, context: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(context.projectRoot);
+    const validator = new PathValidator(context.projectRoot, context.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
 
     if (!statSync(safePath).isFile()) {
@@ -49,7 +49,7 @@ export const listDirectoryTool: AgentTool<z.input<typeof listDirectorySchema>, s
   inputSchema: listDirectorySchema,
   requiresConfirmation: false,
   async execute(input: ListDirectoryOutput, context: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(context.projectRoot);
+    const validator = new PathValidator(context.projectRoot, context.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
 
     if (!statSync(safePath).isDirectory()) {
@@ -101,7 +101,7 @@ export const findFilesTool: AgentTool<z.input<typeof findFilesSchema>, string> =
   inputSchema: findFilesSchema,
   requiresConfirmation: false,
   async execute(input: FindFilesOutput, context: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(context.projectRoot);
+    const validator = new PathValidator(context.projectRoot, context.workspaceRoots);
     const searchDir = validator.resolveSafePath(input.path);
 
     if (!existsSync(searchDir)) return "";
@@ -136,7 +136,7 @@ export const searchInFilesTool: AgentTool<z.input<typeof searchInFilesSchema>, s
   inputSchema: searchInFilesSchema,
   requiresConfirmation: false,
   async execute(input: SearchInFilesOutput, context: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(context.projectRoot);
+    const validator = new PathValidator(context.projectRoot, context.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
 
     const args: string[] = ["--heading", "--line-number", "--color=never", "--max-count=100", "-e", input.pattern];

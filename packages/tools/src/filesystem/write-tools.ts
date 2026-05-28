@@ -24,7 +24,7 @@ export const writeFileTool: AgentTool<z.input<typeof writeFileSchema>, string> =
   inputSchema: writeFileSchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof writeFileSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(ctx.projectRoot);
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
     mkdirSync(dirname(safePath), { recursive: true });
     writeFileSync(safePath, input.content, "utf-8");
@@ -43,7 +43,7 @@ export const createFileTool: AgentTool<z.input<typeof createFileSchema>, string>
   inputSchema: createFileSchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof createFileSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(ctx.projectRoot);
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
     if (existsSync(safePath)) throw new Error(`File already exists: ${input.path}`);
     mkdirSync(dirname(safePath), { recursive: true });
@@ -66,7 +66,7 @@ export const editFileTool: AgentTool<z.input<typeof editFileSchema>, string> = c
   inputSchema: editFileSchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof editFileSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(ctx.projectRoot);
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
     if (!existsSync(safePath) || !statSync(safePath).isFile()) throw new Error(`File not found: ${input.path}`);
     const original = readFileSync(safePath, "utf-8");
@@ -113,7 +113,7 @@ export const deleteFileTool: AgentTool<z.input<typeof deleteFileSchema>, string>
   inputSchema: deleteFileSchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof deleteFileSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(ctx.projectRoot);
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
     if (!existsSync(safePath)) throw new Error(`File not found: ${input.path}`);
     if (!statSync(safePath).isFile()) throw new Error(`Not a file: ${input.path}`);
@@ -133,7 +133,7 @@ export const moveFileTool: AgentTool<z.input<typeof moveFileSchema>, string> = c
   inputSchema: moveFileSchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof moveFileSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(ctx.projectRoot);
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     const safeSource = validator.resolveSafePath(input.source);
     const safeDest = validator.resolveSafePath(input.destination);
     if (!existsSync(safeSource)) throw new Error(`Source not found: ${input.source}`);
@@ -153,7 +153,7 @@ export const createDirectoryTool: AgentTool<z.input<typeof createDirectorySchema
   inputSchema: createDirectorySchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof createDirectorySchema>, ctx: ToolExecutionContext): Promise<string> {
-    const validator = new PathValidator(ctx.projectRoot);
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
     if (existsSync(safePath)) throw new Error(`Path already exists: ${input.path}`);
     mkdirSync(safePath, { recursive: true });

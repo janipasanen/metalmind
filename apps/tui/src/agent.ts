@@ -1,6 +1,6 @@
 import { createProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
-import { loadConfigFromFile, loadXdgConfig } from "@metalmind/config";
+import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
@@ -178,6 +178,7 @@ export class AgentLoop {
   private turnCount = 0;
   private providerCache = new Map<string, ModelProvider>();
   private mcpTools = new Map<string, { client: McpHttpClient; def: McpToolDef }>();
+  private workspaceRoots: string[] = [];
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
@@ -185,6 +186,18 @@ export class AgentLoop {
     this.onRoute = options.onRoute;
     this.registry = buildRegistry();
     this.projectRoot = process.cwd();
+    this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
+  }
+
+  addWorkspaceRoot(path: string): void {
+    if (!this.workspaceRoots.includes(path)) {
+      this.workspaceRoots = [...this.workspaceRoots, path];
+      const cfg = loadXdgConfig();
+      const existing = cfg.workspacePaths ?? [];
+      if (!existing.includes(path)) {
+        saveXdgConfig({ ...cfg, workspacePaths: [...existing, path] });
+      }
+    }
   }
 
   /** Connect to all enabled HTTP MCP servers and discover their tools. */
@@ -410,6 +423,7 @@ export class AgentLoop {
           } else {
             const result = await this.registry.execute(call.toolName, input, {
               projectRoot: this.projectRoot,
+              workspaceRoots: this.workspaceRoots,
             });
             output = typeof result === "string" ? result : JSON.stringify(result);
           }
@@ -445,16 +459,23 @@ export class AgentLoop {
     const mcpToolNames = [...this.mcpTools.keys()].join(", ");
     const toolNames = [builtInNames, mcpToolNames].filter(Boolean).join(", ");
 
+    const workspaceList = this.workspaceRoots.length
+      ? this.workspaceRoots.map((p) => `  - ${p}`).join("\n")
+      : "  (none — only project directory accessible)";
+
     return [
       "You are MetalMind, an agentic AI assistant running in a terminal UI (TUI).",
       `Project directory: ${this.projectRoot}`,
       `Active provider: ${this.config.provider}  Active model: ${this.config.model}`,
+      "",
+      `Additional workspace paths (you can read files from these too):\n${workspaceList}`,
       "",
       `Configured MCP servers:\n${mcpList}`,
       "",
       `Available tools: ${toolNames}`,
       "",
       "Use your tools to read files, search code, and answer questions about the project.",
+      "You have full read access to the project directory AND all workspace paths listed above.",
       "When asked about MetalMind configuration, read ~/.config/metalmind/config.json with your file tools.",
     ].join("\n");
   }

@@ -80,6 +80,7 @@ export interface UserConfig {
   apiKeys: Record<string, string>;
   models: Record<string, string[]>;
   mcpServers: Record<string, McpServerConfig>;
+  workspacePaths: string[];
   uiTheme: "light" | "dark" | "system";
   recentModels: { provider: string; model: string; timestamp: number }[];
   permissions: {
@@ -114,6 +115,7 @@ const DEFAULT_XDG_CONFIG: UserConfig = {
     mlx: ["mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit"],
   },
   mcpServers: {},
+  workspacePaths: [],
   uiTheme: "system",
   recentModels: [],
   permissions: {

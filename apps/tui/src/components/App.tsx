@@ -104,7 +104,7 @@ export default function App({ config }: AppProps) {
   const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls } = useChat({
     generateResponse: async function* (input: string) {
       if (input === "/help") {
-        yield { type: "text", text: "Available commands:\n  /help        - Show this help\n  /model <name> - Switch model (e.g. /model gemma3:27b)\n  /apikey <key> - Update API key for current provider\n  /clear       - Clear chat history\n  /quit        - Exit" } as const;
+        yield { type: "text", text: "Available commands:\n  /help             - Show this help\n  /model <name>     - Switch model (e.g. /model gemma3:27b)\n  /apikey <key>     - Update API key for current provider\n  /workspace <path> - Allow AI to access an additional directory\n  /clear            - Clear chat history\n  /quit             - Exit" } as const;
         yield { type: "done" } as const;
         return;
       }
@@ -116,6 +116,19 @@ export default function App({ config }: AppProps) {
 
       if (input === "/clear") {
         agentRef.current?.clearHistory();
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input.startsWith("/workspace ")) {
+        const wsPath = input.slice(11).trim();
+        if (!wsPath) {
+          yield { type: "text", text: "Usage: /workspace <absolute-path>" } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+        agentRef.current?.addWorkspaceRoot(wsPath);
+        yield { type: "text", text: `Workspace added: ${wsPath}\nThe AI can now read files from that directory.` } as const;
         yield { type: "done" } as const;
         return;
       }

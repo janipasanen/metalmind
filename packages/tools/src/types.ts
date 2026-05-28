@@ -2,6 +2,8 @@ import { z, type ZodSchema } from "zod";
 
 export interface ToolExecutionContext {
   projectRoot: string;
+  /** Additional directories the agent is allowed to read/write. */
+  workspaceRoots?: string[];
   auditLog?: (entry: ToolAuditEntry) => void;
 }
 
