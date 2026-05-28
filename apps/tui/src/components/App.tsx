@@ -115,8 +115,11 @@ export default function App({ config }: AppProps) {
 
       if (input.startsWith("/model ")) {
         const newModel = input.slice(7).trim();
-        setActiveModel(newModel);
-        yield { type: "text", text: `Switched to model: ${newModel}` } as const;
+        const cfg = loadXdgConfig();
+        saveXdgConfig({ ...cfg, activeModel: newModel });
+        setActiveModel(`${activeProvider}/${newModel}`);
+        reloadAgent();
+        yield { type: "text", text: `Switched to model: ${activeProvider}/${newModel}` } as const;
         yield { type: "done" } as const;
         return;
       }

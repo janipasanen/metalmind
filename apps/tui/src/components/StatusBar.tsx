@@ -27,7 +27,7 @@ export default function StatusBar({
         <Text dimColor>
           {isStreaming
             ? "Streaming | Esc: cancel | "
-            : "Tab: switch panels | Ctrl+C: quit | "}
+            : "Ctrl+P: commands | Tab: panels | Ctrl+C: quit | "}
           {focusPanel === "input" ? "Input" : "Chat"} active
         </Text>
       </Box>

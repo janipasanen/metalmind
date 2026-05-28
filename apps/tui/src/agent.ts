@@ -131,9 +131,17 @@ export function createDefaultRouter(
     const models = fileConfig.models ?? {};
     const routing = fileConfig.routing;
 
-    const local = await resolveLocalTier(fileConfig);
-    // Use the config's own provider/model as the reasoning tier fallback so
-    // we never escalate to a provider the user hasn't configured.
+    const rawLocal = await resolveLocalTier(fileConfig);
+
+    // When the resolved local-tier provider is the same as the user's configured
+    // provider AND the user has cloud credentials (API key), the local-default model
+    // (e.g. deepseek-coder:1.3b) would be sent to the cloud endpoint where it likely
+    // doesn't exist → 404.  Use the user's configured model for all tiers instead.
+    const local =
+      rawLocal.provider === config.provider && !!config.apiKey
+        ? { provider: config.provider, model: config.model }
+        : rawLocal;
+
     const defaultReasoning = { provider: config.provider, model: config.model };
     const reasoning =
       resolveNamedTier(routing?.defaultReasoningModel, models) ?? defaultReasoning;
