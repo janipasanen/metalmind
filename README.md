@@ -1,285 +1,186 @@
-# MetalMind TUI
+# MetalMind
 
-MetalMind is an AI-powered terminal-based development assistant with intelligent routing across local and cloud models.
+An agentic AI assistant for the terminal with intelligent three-tier routing: simple tasks run on-device (Apple Silicon MLX or local Ollama), complex tasks escalate to your configured cloud model automatically.
 
-## Build & Install
-
-### 1. Build the project
+## Install
 
 ```bash
-cd /Users/janipasanen/Documents/Developer/JMPasanenIT/AI/metalmind
+git clone https://github.com/janipasanen/metalmind
+cd metalmind
 npm install
 npm run build
+npm link -w @metalmind/tui
 ```
-
-### 2. Install globally
-
-Make the `metalmind` command available from any terminal:
 
 ```bash
-npm run build
-npm link --workspace=@metalmind/tui
+metalmind            # run from any directory
 ```
 
-Or use `npm link` for local development:
+## Providers
 
-```bash
-npm link --workspace=@metalmind/tui
-```
+| Provider | Description | Default model |
+|---|---|---|
+| **Ollama Cloud** | Cloud-hosted Ollama models (API key required) | `gemini-3-flash-preview:cloud` |
+| **Ollama (local)** | Self-hosted Ollama, no key needed | `gemini-3-flash-preview:cloud` |
+| **Anthropic** | Claude models | `claude-sonnet-4-6` |
+| **OpenAI** | GPT-4 and others | `gpt-4o` |
+| **MLX** | Apple Silicon GPU (M1–M4), runs entirely on-device | `mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit` |
 
-### 3. Run from anywhere
+Provider priority on startup: **saved config** → **env var auto-detect** (Ollama key → Anthropic key → OpenAI key) → Ollama default.
 
-```bash
-metalmind
-```
+## Three-tier routing
+
+When no provider is forced explicitly, MetalMind routes each turn automatically:
+
+- **Tier 1 / 2** — local model (MLX on Apple Silicon, or local Ollama). Handles simple and medium tasks with zero latency and no API cost.
+- **Tier 3** — your configured cloud provider/model. Used for complex tasks or when the local response fails quality gating.
+
+The active tier is shown in the header after each response.
 
 ## Configuration
 
-### Choose a Provider
+Settings persist to `~/.config/metalmind/config.json`. Use the in-app UI (Ctrl+P) or edit directly:
 
-MetalMind supports multiple AI providers. The default provider is selected automatically based on available API keys:
-
-- **OpenAI** - if `OPENAI_API_KEY` is set
-- **Anthropic** - if `ANTHROPIC_API_KEY` is set
-- **Ollama** (local) - otherwise
-
-To force a specific provider, use one of these methods:
-
-**Environment variables:**
-```bash
-export METALMIND_PROVIDER=openai    # or: anthropic, ollama, mlx
+```json
+{
+  "activeProvider": "ollama",
+  "activeModel": "gemini-3-flash-preview:cloud",
+  "apiKeys": {
+    "ollama": "your-ollama-cloud-key",
+    "anthropic": "sk-ant-..."
+  },
+  "uiTheme": "dracula",
+  "mcpServers": {}
+}
 ```
 
-**Command line:**
+### Environment variables
+
 ```bash
-metalmind --provider=openai
-metalmind --provider=anthropic
-```
-
-### Select a Model
-
-Each provider has default models:
-
-- **OpenAI**: `gpt-4o`
-- **Anthropic**: `claude-sonnet-4-6`
-- **Ollama**: `deepseek-coder:1.3b`
-- **MLX** (macOS only): `mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit`
-
-To use a specific model:
-
-**Environment variables:**
-```bash
-export METALMIND_MODEL=gpt-4o
+export METALMIND_PROVIDER=anthropic
 export METALMIND_MODEL=claude-sonnet-4-6
-export METALMIND_MODEL=deepseek-coder:1.3b
+export METALMIND_BASE_URL=http://localhost:11434   # custom endpoint
+
+# API keys (alternative to storing in config.json)
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
+export OLLAMA_API_KEY=...                          # Ollama Cloud key
 ```
 
-**Command line:**
+### CLI flags
+
 ```bash
-metalmind --model=gpt-4o
-metalmind --model=claude-sonnet-4-6
+metalmind --provider=anthropic --model=claude-sonnet-4-6
+metalmind --provider=openai    --model=gpt-4o
+metalmind --provider=ollama    --model=gemma3:27b
 ```
 
-### Configure Custom Base URL (Ollama, MLX, etc.)
+CLI flags override env vars, which override saved config.
 
-Set a custom base URL for self-hosted services:
+### Named models (`metalmind.yaml`)
 
-**Environment variables:**
-```bash
-export METALMIND_BASE_URL=http://localhost:11434  # Ollama default
-export METALMIND_BASE_URL=http://127.0.0.1:8742   # MLX default
-```
-
-### Named Models in Configuration File
-
-Create a `metalmind.yaml` file in your project directory or home directory:
+Place a `metalmind.yaml` in your project directory or home directory to define named model references and routing:
 
 ```yaml
 models:
   local:
     provider: ollama
-    model: deepseek-coder:6.7b
+    model: gemma3:27b
     baseUrl: http://localhost:11434
   cloud:
-    provider: openai
-    model: gpt-4o
-    apiKey: sk-...
-  mlx:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    apiKey: sk-ant-...
+  gpu:
     provider: mlx
     model: mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit
     baseUrl: http://127.0.0.1:8742
 
 routing:
-  defaultLocalModel: local
+  defaultLocalModel: gpu
   defaultReasoningModel: cloud
 ```
 
-Then reference by name:
 ```bash
 metalmind --model local
 metalmind --model cloud
 ```
 
-## Using the TUI
+## Keyboard shortcuts
 
-### Keyboard Shortcuts
+| Key | Action |
+|---|---|
+| **Ctrl+P** | Open command palette |
+| **Tab** | Switch focus between chat and input |
+| **Ctrl+C** | Quit |
 
-- **Tab** - Switch focus between chat panel and input bar
-- **Ctrl+C** - Quit the application
+## Command palette (Ctrl+P)
 
-### Commands (type in the input bar)
+Type to filter, arrow keys to navigate, Return to select, Esc to close.
 
-- `/help` - Show this help message
-- `/quit` - Exit the application
-- `/clear` - Clear chat history
-- `/model <name>` - Switch to a different model (e.g., `/model gpt-4o`)
+| Command | Description |
+|---|---|
+| **Remote Provider** | Switch the cloud provider (Ollama, Anthropic, OpenAI, MLX) |
+| **Remote Model** | Switch the model for the current provider |
+| **MCP** | Add, remove, or view MCP servers |
+| **Theme** | Switch the color theme |
 
-### API Keys
+Provider selection will prompt for an API key. For Ollama, the key is optional — press Return without one to use a local endpoint instead.
 
-Set your API keys as environment variables in your shell profile (e.g., `~/.zshrc`, `~/.bashrc`):
+## Slash commands
 
-```bash
-# OpenAI
-export OPENAI_API_KEY=sk-...
+Type in the input bar:
 
-# Anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
+| Command | Description |
+|---|---|
+| `/help` | Show available commands |
+| `/model <name>` | Switch model (e.g. `/model gemma3:27b`) |
+| `/clear` | Clear conversation history |
+| `/quit` | Exit |
 
-# Ollama Cloud
-export OLLAMA_API_KEY=...
-```
+## Themes
 
-## Troubleshooting
+Themes are saved to `~/.config/metalmind/theme.json` and applied immediately on switch.
 
-### Ink Raw Mode Error
+Available themes: **dracula**, **dark**, **light**, **nord**, **solarized-dark**, **gruvbox**, **one-dark**, **tokyo-night**, **catppuccin**.
 
-If you see: "Raw mode is not supported on the current process.stdin"
+Change via Ctrl+P → Theme.
 
-This can happen in some terminal environments (like certain SSH sessions or IDE terminals). The TUI requires an interactive terminal with raw mode support. Try:
+## MCP servers
 
-1. Use a standard terminal (Terminal.app, iTerm2, VS Code integrated terminal)
-2. Don't run inside non-interactive shells
-3. For SSH: use `ssh -t` flag
-
-### Model Not Loading
-
-Check that:
-1. Your API key is set correctly
-2. For Ollama: `ollama serve` is running locally
-3. For MLX: The MLX sidecar is running at `http://127.0.0.1:8742`
-
-## Build from Source
-
-```bash
-# Install dependencies
-npm install
-
-# Build TypeScript
-npm run build
-
-# Test
-npm test
-
-# Type check
-npm run typecheck
-### Command Palette (Ctrl+P)
-
-MetalMind includes a command palette for quick navigation and provider/model selection:
-
-- **Ctrl+P** - Open command palette
-- Type to search through available commands and providers
-- Use Arrow keys to navigate
-- **Return** to select a command or provider
-- **Esc** to cancel
-
-The command palette allows you to:
-- Switch between providers (Ollama, OpenAI, Anthropic, MLX)
-- Select different models for each provider
-- Access provider configuration
-
-## Provider and Model Selection
-
-When the app starts, it automatically selects a provider based on available API keys:
-1. Anthropic (if `ANTHROPIC_API_KEY` is set)
-2. OpenAI (if `OPENAI_API_KEY` is set)
-3. Ollama (default, uses `deepseek-coder:1.3b`)
-
-You can change the provider/model at any time using:
-- **Ctrl+P** - Open command palette and select
-- Environment variable: `export METALMIND_PROVIDER=anthropic`
-- Command line: `metalmind --provider=anthropic --model=claude-sonnet-4-6`
-
-## MCP Configuration
-
-MetalMind supports Model Context Protocol (MCP) servers with multiple authentication types.
-
-### Adding MCP Servers
-
-Use **Ctrl+P** → **MCP** to open the MCP configuration panel. From there you can:
-
-- **Add a new server** - Press 'A' to add a server with your preferred authentication
-- **Navigate** - Use Up/Down arrows to move between servers
-- **Delete a server** - Select a server and press 'D' to confirm deletion
-
-### Authentication Types
-
-Configure the auth type when adding a server:
-
-- **`oauth2`** (default) - OAuth2 session authentication, like Codex/OpenCode
-  - Login via: `codex mcp login ServerName` or `opencode mcp auth ServerName`
-  - Uses interactive browser-based OAuth flow
-
-- **`bearer`** - Direct Bearer token authentication
-  - No login needed, just provide your API token
-  - For services requiring direct token access
-
-- **`none`** - No authentication required
-  - For local MCP servers without auth
-
-### Manual Configuration
-
-Edit `~/.config/metalmind/config.json`:
+MetalMind supports [Model Context Protocol](https://modelcontextprotocol.io) servers. Configure them via Ctrl+P → MCP or edit `~/.config/metalmind/config.json` directly:
 
 ```json
 {
   "mcpServers": {
-    "git": {
-      "name": "Git",
+    "filesystem": {
+      "name": "Filesystem",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-git"],
-      "authType": "oauth2",
-      "enabled": true
-    },
-    "memory": {
-      "name": "Memory",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-memory"],
-      "authType": "oauth2",
-      "enabled": true
-    },
-    "custom": {
-      "name": "Custom Server",
-      "command": "node",
-      "args": ["server.js"],
-      "authType": "bearer",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allow"],
+      "authType": "none",
       "enabled": true
     }
   }
 }
 ```
 
-Or use `metalmind.yaml` in your project directory:
+Authentication types: `none` (local servers), `bearer` (token-based), `oauth2` (browser-based flow).
 
-```yaml
-mcpServers:
-  git:
-    name: Git
-    command: npx
-    args:
-      - "-y"
-      - "@modelcontextprotocol/server-git"
-    authType: oauth2
-    enabled: true
+## Apple Silicon (MLX)
+
+On M1–M4 Macs, MetalMind will use the MLX sidecar for on-device inference if it is running:
+
+```bash
+# Start the MLX sidecar (default port 8742)
+mlx-server --model mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit
 ```
 
-After adding servers, restart MetalMind and they'll be available as MCP tools.
+If the sidecar is not reachable at startup, the local tier falls back to Ollama automatically.
+
+## Troubleshooting
+
+**Raw mode error** — The TUI requires an interactive terminal. Use Terminal.app, iTerm2, or a standard VS Code terminal. For SSH: `ssh -t user@host`.
+
+**Model not found** — Check your API key is set in `~/.config/metalmind/config.json` or as an env var. For local Ollama, ensure `ollama serve` is running.
+
+**Command not found after install** — Re-run `npm link -w @metalmind/tui` from the repo root, or check that your Node bin directory is in `$PATH`.
