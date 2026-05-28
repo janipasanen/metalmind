@@ -1,6 +1,6 @@
 import { createProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allGitTools } from "@metalmind/tools";
-import { loadConfigFromFile } from "@metalmind/config";
+import { loadConfigFromFile, loadXdgConfig } from "@metalmind/config";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities } from "@metalmind/core";
 import { ModelRouter, estimateTokens, evaluateQuality } from "@metalmind/core";
@@ -256,6 +256,9 @@ export class AgentLoop {
   }
 
   async *run(userInput: string): AsyncGenerator<ChatStreamEvent> {
+    if (this.history.length === 0) {
+      this.history.push({ role: "system", content: this.buildSystemPrompt() });
+    }
     this.history.push({ role: "user", content: userInput });
     this.turnCount++;
     const toolDefs = this.toolDefs();
@@ -394,6 +397,28 @@ export class AgentLoop {
 
     yield { type: "error", message: "Agent reached maximum iterations." };
     yield { type: "done" };
+  }
+
+  private buildSystemPrompt(): string {
+    const userConfig = loadXdgConfig();
+    const mcpEntries = Object.entries(userConfig.mcpServers || {});
+    const mcpList = mcpEntries.length
+      ? mcpEntries.map(([id, s]) => `  - ${id}: ${s.command} ${(s.args || []).join(" ")}`.trimEnd()).join("\n")
+      : "  (none configured)";
+    const toolNames = this.registry.list().map((t) => t.toolName).join(", ");
+
+    return [
+      "You are MetalMind, an agentic AI assistant running in a terminal UI (TUI).",
+      `Project directory: ${this.projectRoot}`,
+      `Active provider: ${this.config.provider}  Active model: ${this.config.model}`,
+      "",
+      `Configured MCP servers:\n${mcpList}`,
+      "",
+      `Available tools: ${toolNames}`,
+      "",
+      "Use your tools to read files, search code, and answer questions about the project.",
+      "When asked about MetalMind configuration, read ~/.config/metalmind/config.json with your file tools.",
+    ].join("\n");
   }
 
   clearHistory(): void {
