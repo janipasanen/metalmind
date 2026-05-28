@@ -98,7 +98,7 @@ export default function App({ config }: AppProps) {
   const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls } = useChat({
     generateResponse: async function* (input: string) {
       if (input === "/help") {
-        yield { type: "text", text: "Available commands:\n  /help - Show this help\n  /model <name> - Switch model\n  /clear - Clear chat\n  /quit - Exit" } as const;
+        yield { type: "text", text: "Available commands:\n  /help        - Show this help\n  /model <name> - Switch model (e.g. /model gemma3:27b)\n  /apikey <key> - Update API key for current provider\n  /clear       - Clear chat history\n  /quit        - Exit" } as const;
         yield { type: "done" } as const;
         return;
       }
@@ -110,6 +110,21 @@ export default function App({ config }: AppProps) {
 
       if (input === "/clear") {
         agentRef.current?.clearHistory();
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input.startsWith("/apikey ")) {
+        const newKey = input.slice(8).trim();
+        if (!newKey) {
+          yield { type: "text", text: "Usage: /apikey <key>" } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+        const cfg = loadXdgConfig();
+        saveXdgConfig({ ...cfg, apiKeys: { ...cfg.apiKeys, [activeProvider]: newKey } });
+        reloadAgent();
+        yield { type: "text", text: `API key updated for ${activeProvider} (${newKey.slice(0, 8)}...)` } as const;
         yield { type: "done" } as const;
         return;
       }

@@ -119,8 +119,10 @@ export function resolveConfig(
   // Strip any accidental "provider/" prefix from the model name.
   const prefix = provider + "/";
   const model = rawModel.startsWith(prefix) ? rawModel.slice(prefix.length) : rawModel;
-  const apiKey = envApiKey(provider) ?? mergedConfig.apiKeys[provider];
-  const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey ?? mergedConfig.apiKeys[provider]);
+  // Config-file key wins over env var (user explicitly set it via UI).
+  // Use || not ?? so that empty-string env vars (e.g. ANTHROPIC_API_KEY=) don't shadow the config.
+  const apiKey = mergedConfig.apiKeys[provider] || envApiKey(provider) || undefined;
+  const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey);
 
   return { provider, model, apiKey, baseUrl, explicit };
 }

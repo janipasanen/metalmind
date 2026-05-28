@@ -37,6 +37,8 @@ export default function ProviderSelection({ onSelect, onCancel, accent = "cyan" 
   const [apiKeyInput, setApiKeyInput] = useState("");
 
   const selectedProvider = providers[selectedIndex];
+  const savedKey = loadXdgConfig().apiKeys?.[selectedProvider?.id];
+  const maskedSaved = savedKey ? `${savedKey.slice(0, 8)}${"*".repeat(Math.min(12, savedKey.length - 8))}` : null;
 
   const commitSelection = (apiKey?: string) => {
     const currentConfig = loadXdgConfig();
@@ -104,11 +106,14 @@ export default function ProviderSelection({ onSelect, onCancel, accent = "cyan" 
           <Text color="yellow">
             {selectedProvider.name} — {selectedProvider.apiKeyHint ?? "API key"}:
           </Text>
-          <Text color="green">{apiKeyInput}<Text color="gray">_</Text></Text>
+          {maskedSaved && !apiKeyInput && (
+            <Text dimColor>Current: {maskedSaved}</Text>
+          )}
+          <Text color="green">{"*".repeat(apiKeyInput.length)}<Text color="gray">_</Text></Text>
           <Text dimColor>
             {selectedProvider.apiKeyOptional
-              ? "Enter key or press Return to skip (uses local endpoint)"
-              : "Enter API key, Return to confirm, Esc to go back"}
+              ? "Type new key + Return, or Return to keep current / use local endpoint"
+              : "Type new key + Return to confirm, Esc to go back"}
           </Text>
         </Box>
       ) : (
