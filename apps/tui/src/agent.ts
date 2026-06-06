@@ -108,13 +108,15 @@ function tierCapabilities(targets: TierTarget[]): Record<string, ModelCapabiliti
 }
 
 async function mlxSidecarReady(target: TierTarget): Promise<boolean> {
-  // Treat the sidecar as usable as long as it responds — even if the model is
-  // still loading. A 503 on the first chat request will cause the quality gate
-  // to escalate to the cloud tier for that turn while the model warms up.
   const baseUrl = target.baseUrl ?? "http://127.0.0.1:8742";
   try {
     const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(2000) });
-    return res.ok;
+    if (!res.ok) return false;
+    // If the sidecar is up but no model is loaded yet, don't treat it as
+    // ready — skip to tier 2 instead of returning a 503 to the user.
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+    if (body.model_loaded === false) return false;
+    return true;
   } catch {
     return false;
   }
@@ -390,9 +392,25 @@ export class AgentLoop {
     return [...builtIn, ...mcp];
   }
 
-  /** A triage function that asks the local model to bucket an ambiguous task. */
+  /** A triage function that buckets a request by complexity.
+   *
+   * Short conversational messages are classified locally without calling any
+   * model (saves a full round-trip).  Longer or code-heavy requests fall
+   * through to a local-model triage call. */
   private buildTriage() {
     return async (request: string): Promise<TriageLabel | null> => {
+      const words = request.trim().split(/\s+/).length;
+      const lower = request.toLowerCase();
+
+      // Fast-path: very short questions are almost always SIMPLE.
+      const simplePatterns = /^(what|who|when|where|how|why|is|are|was|were|vad|vem|när|var|hur|varför)\b/i;
+      if (words <= 8 && simplePatterns.test(lower) && !lower.includes("file") && !lower.includes("code")) {
+        return "SIMPLE";
+      }
+
+      // Fast-path: greetings / single words.
+      if (words <= 3) return "SIMPLE";
+
       try {
         const local = this.getProvider(this.config.provider, this.config.model);
         const res = await local.completeChat({

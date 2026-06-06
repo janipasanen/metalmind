@@ -48,9 +48,10 @@ function envApiKey(provider: string): string | undefined {
   return undefined;
 }
 
-function defaultBaseUrl(provider: string, apiKey?: string): string | undefined {
+function defaultBaseUrl(provider: string, _apiKey?: string): string | undefined {
+  // ollama-cloud = remote Ollama API (api.ollama.com)
+  // ollama       = local Ollama daemon (localhost:11434) — NEVER route to cloud
   if (provider === "ollama-cloud") return OLLAMA_CLOUD_BASE_URL;
-  if (provider === "ollama" && apiKey) return OLLAMA_CLOUD_BASE_URL;
   if (provider === "mlx") return DEFAULT_MLX_BASE_URL;
   return undefined;
 }
