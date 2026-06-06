@@ -199,6 +199,8 @@ export function createDefaultRouter(
   })();
 }
 
+export type ForcedTier = 1 | 2 | 3 | null;
+
 export interface AgentLoopOptions {
   /** When provided, the loop routes each turn via the router instead of a fixed provider. */
   router?: ModelRouter;
@@ -228,6 +230,7 @@ export class AgentLoop {
   private workspaceRoots: string[] = [];
   private coordinator: Coordinator | null = null;
   private safetyValidator: SafetyValidator;
+  private _forcedTier: ForcedTier = null;
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
@@ -244,6 +247,16 @@ export class AgentLoop {
 
   get coordinatorInstance(): Coordinator | null {
     return this.coordinator;
+  }
+
+  /** Force every subsequent turn to use a specific tier (1=MLX, 2=local Ollama, 3=cloud).
+   *  Pass null to restore automatic routing. */
+  setForcedTier(tier: ForcedTier): void {
+    this._forcedTier = tier;
+  }
+
+  get forcedTier(): ForcedTier {
+    return this._forcedTier;
   }
 
   get safety(): SafetyValidator {
@@ -420,6 +433,19 @@ export class AgentLoop {
 
     if (!this.router) {
       yield* this.agenticLoop(this.getProvider(this.config.provider, this.config.model), toolDefs);
+      return;
+    }
+
+    // If the user has locked a specific tier, bypass triage and route directly.
+    if (this._forcedTier !== null) {
+      const tierKey =
+        this._forcedTier === 1 ? "tier1-local"
+        : this._forcedTier === 2 ? "tier2-medium"
+        : "tier3-cloud";
+      const decision = this.router.decisionForTier(tierKey, `forced tier ${this._forcedTier}`);
+      this.onRoute?.(decision);
+      const provider = this.getProvider(decision.provider, decision.modelId);
+      yield* this.agenticLoop(provider, toolDefs);
       return;
     }
 

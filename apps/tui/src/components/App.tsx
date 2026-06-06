@@ -6,7 +6,7 @@ import InputBar from "./InputBar.js";
 import StatusBar from "./StatusBar.js";
 import MultiAgentStatus from "./MultiAgentStatus.js";
 import { useChat } from "../hooks/useChat.js";
-import { AgentLoop, createDefaultRouter } from "../agent.js";
+import { AgentLoop, createDefaultRouter, type ForcedTier } from "../agent.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -51,6 +51,12 @@ export default function App({ config }: AppProps) {
   const [showMcpConfig, setShowMcpConfig] = useState(false);
   const [showThemeSelection, setShowThemeSelection] = useState(false);
   const [theme, setTheme] = useState(() => loadTheme());
+  const [forcedTier, setForcedTierState] = useState<ForcedTier>(null);
+
+  const applyForcedTier = useCallback((tier: ForcedTier) => {
+    setForcedTierState(tier);
+    agentRef.current?.setForcedTier(tier);
+  }, []);
 
   const agentRef = useRef<AgentLoop | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
@@ -143,7 +149,22 @@ export default function App({ config }: AppProps) {
   const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls } = useChat({
     generateResponse: async function* (input: string) {
       if (input === "/help") {
-        yield { type: "text", text: "Available commands:\n  /help             - Show this help\n  /model <name>     - Switch model (e.g. /model gemma3:27b)\n  /apikey <key>     - Update API key for current provider\n  /workspace <path> - Allow AI to access an additional directory\n  /clear            - Clear chat history\n  /quit             - Exit" } as const;
+        yield { type: "text", text: [
+          "Available commands:",
+          "  /help             - Show this help",
+          "  /tier 1|2|3|auto  - Force a model tier (or restore auto-routing)",
+          "                      1 = MLX GPU (fastest local)",
+          "                      2 = local Ollama (offline fallback)",
+          "                      3 = Ollama Cloud (big model, needs API key)",
+          "                      auto = let the router decide",
+          "  /model <name>     - Switch model (e.g. /model gemma3:27b)",
+          "  /apikey <key>     - Update API key for current provider",
+          "  /workspace <path> - Allow AI to access an additional directory",
+          "  /clear            - Clear chat history",
+          "  /quit             - Exit",
+          "",
+          "Ctrl+P            - Open command palette (tier, provider, model, theme, MCP)",
+        ].join("\n") } as const;
         yield { type: "done" } as const;
         return;
       }
@@ -168,6 +189,25 @@ export default function App({ config }: AppProps) {
         }
         agentRef.current?.addWorkspaceRoot(wsPath);
         yield { type: "text", text: `Workspace added: ${wsPath}\nThe AI can now read files from that directory.` } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input.startsWith("/tier")) {
+        const arg = input.slice(5).trim().toLowerCase();
+        const tierLabels: Record<string, string> = {
+          "1": "Tier 1 — MLX GPU (forced)",
+          "2": "Tier 2 — local Ollama / gemma4:e2b-mlx (forced)",
+          "3": "Tier 3 — Ollama Cloud / big model (forced)",
+          "auto": "Auto-routing restored",
+        };
+        const tierMap: Record<string, ForcedTier> = { "1": 1, "2": 2, "3": 3, "auto": null };
+        if (arg in tierMap) {
+          applyForcedTier(tierMap[arg]);
+          yield { type: "text", text: `✓ ${tierLabels[arg]}` } as const;
+        } else {
+          yield { type: "text", text: "Usage: /tier 1 | 2 | 3 | auto" } as const;
+        }
         yield { type: "done" } as const;
         return;
       }
@@ -220,7 +260,15 @@ export default function App({ config }: AppProps) {
     if (key.ctrl && input === "p") setShowCommandPalette(prev => !prev);
   });
 
-  const getActiveModel = () => activeModel;
+  const getActiveModel = () => {
+    if (forcedTier !== null) {
+      const tierSuffix = forcedTier === 1 ? " [tier1 locked]"
+        : forcedTier === 2 ? " [tier2 locked]"
+        : " [tier3 locked]";
+      return activeModel + tierSuffix;
+    }
+    return activeModel;
+  };
 
   return (
     <Box flexDirection="column" padding={1} height="100%">
@@ -242,6 +290,10 @@ export default function App({ config }: AppProps) {
       {showCommandPalette && (
         <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} accent={theme.colors.accent}
           commands={[
+            { id: "tier-auto", title: "Tier: Auto", description: "Let router pick tier per request", action: () => applyForcedTier(null) },
+            { id: "tier-1", title: "Tier 1: MLX GPU", description: "Force fastest local model (Apple Silicon)", action: () => applyForcedTier(1) },
+            { id: "tier-2", title: "Tier 2: Local Ollama", description: "Force gemma4:e2b-mlx offline model", action: () => applyForcedTier(2) },
+            { id: "tier-3", title: "Tier 3: Cloud brain", description: "Force Ollama Cloud — big model for planning", action: () => applyForcedTier(3) },
             { id: "provider", title: "Remote Provider", description: "Cloud provider for complex tasks", action: () => setShowProviderSelection(true) },
             { id: "model", title: "Remote Model", description: "Model used for complex tasks", action: () => setShowModelSelection(true) },
             { id: "mcp", title: "MCP", description: "Configure MCP servers", action: () => setShowMcpConfig(true) },
