@@ -6,21 +6,25 @@ export const ClassifyUserIntentInputSchema = z.object({
 });
 
 export const ClassifyUserIntentOutputSchema = z.object({
-  intent: z.enum([
-    "question",
-    "code_change",
-    "debug",
-    "explain",
-    "search",
-    "refactor",
-    "test",
-    "deploy",
-    "greeting",
-    "other",
-  ]),
-  confidence: z.number().min(0).max(1),
-  suggestedTier: z.enum(["local-worker", "cloud-main", "direct-tool"]),
-  reason: z.string().min(1),
+  intent: z
+    .enum([
+      "question",
+      "code_change",
+      "debug",
+      "explain",
+      "search",
+      "refactor",
+      "test",
+      "deploy",
+      "greeting",
+      "other",
+    ])
+    .catch("other"), // local models sometimes hallucinate; default to "other"
+  confidence: z.number().min(0).max(1).catch(0.5),
+  suggestedTier: z
+    .enum(["local-worker", "cloud-main", "direct-tool"])
+    .catch("cloud-main"), // unexpected values → escalate to cloud safely
+  reason: z.string().min(1).catch("unspecified"),
 });
 export type ClassifyUserIntentInput = z.infer<typeof ClassifyUserIntentInputSchema>;
 export type ClassifyUserIntentOutput = z.infer<typeof ClassifyUserIntentOutputSchema>;

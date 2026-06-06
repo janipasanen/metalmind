@@ -15,12 +15,18 @@ export interface TuiConfig {
   routing?: UserConfig["routing"];
 }
 
-/** Resolve credentials/base URL for a provider from the environment. */
+/** Resolve credentials/base URL for a provider from the environment.
+ *  For ollama-cloud, also falls back to the "ollama" key in XDG config
+ *  because users typically set their Ollama API key via the "ollama" provider UI. */
 export function providerCredentials(provider: string): { apiKey?: string; baseUrl?: string } {
-  const apiKey = envApiKey(provider);
   const mergedConfig = loadMergedConfig();
-  const apiKeyFromConfig = mergedConfig.apiKeys[provider] || undefined;
-  return { apiKey: apiKeyFromConfig ?? apiKey, baseUrl: process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKeyFromConfig ?? apiKey) };
+  // For ollama-cloud, check both "ollama-cloud" and "ollama" keys (user may have set either).
+  const apiKeyFromConfig =
+    mergedConfig.apiKeys[provider] ||
+    (provider === "ollama-cloud" ? mergedConfig.apiKeys["ollama"] : undefined) ||
+    undefined;
+  const apiKey = apiKeyFromConfig ?? envApiKey(provider);
+  return { apiKey, baseUrl: process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey) };
 }
 
 const PROVIDER_DEFAULTS: Record<string, string> = {
@@ -32,7 +38,7 @@ const PROVIDER_DEFAULTS: Record<string, string> = {
 };
 
 const DEFAULT_MLX_BASE_URL = "http://127.0.0.1:8742";
-const OLLAMA_CLOUD_BASE_URL = "https://ollama.com";
+const OLLAMA_CLOUD_BASE_URL = "https://api.ollama.com";
 
 function envApiKey(provider: string): string | undefined {
   if (provider === "anthropic") return process.env.ANTHROPIC_API_KEY;

@@ -130,22 +130,23 @@ async function resolveLocalTier(fileConfig: MetalmindConfig, userConfig: TuiConf
     if (namedLocal.provider !== "mlx" || await mlxSidecarReady(namedLocal)) return namedLocal;
   }
 
-  // 2. Try global config.json routing
+  // 2. Try global config.json routing — only search LOCAL providers (mlx, ollama).
+  //    Never resolve a local tier from cloud providers like openai/anthropic/ollama-cloud,
+  //    even if the user's XDG config lists the same model name there (e.g. from LM Studio).
+  const LOCAL_PROVIDERS = new Set(["mlx", "ollama"]);
   const globalRouting = userConfig.routing;
   if (globalRouting?.defaultLocalModel) {
-    // Check if the model exists in the global models list
-    // For simplicity, we assume the user names the model appropriately
-    // Since config.json models is Record<string, string[]>, we need to find which provider has it.
     for (const [provider, modelList] of Object.entries(userConfig.models || {})) {
-      if (modelList.includes(globalRouting.defaultLocalModel)) {
+      if (!LOCAL_PROVIDERS.has(provider)) continue; // skip openai, anthropic, ollama-cloud, etc.
+      if ((modelList as string[]).includes(globalRouting.defaultLocalModel)) {
         const globalNamed = { provider, model: globalRouting.defaultLocalModel };
         if (globalNamed.provider !== "mlx" || await mlxSidecarReady(globalNamed)) return globalNamed;
       }
     }
-    // Also check if the "model" string itself is a path
+    // If the model string is an absolute path, treat it as an MLX model.
     if (globalRouting.defaultLocalModel.startsWith("/")) {
-       const globalNamed = { provider: "mlx", model: globalRouting.defaultLocalModel };
-       if (await mlxSidecarReady(globalNamed)) return globalNamed;
+      const globalNamed = { provider: "mlx", model: globalRouting.defaultLocalModel };
+      if (await mlxSidecarReady(globalNamed)) return globalNamed;
     }
   }
 
@@ -540,7 +541,15 @@ export class AgentLoop {
       yield { type: "text", text: `\n[local worker failed: ${localResult.error} — falling back to cloud]\n` };
     }
 
-    const cloudProvider = this.getProvider(this.config.provider, this.config.model);
+    // Always use the tier-3 cloud model for the coordinator's cloud fallback —
+    // NOT this.config (which is tier 1 / the startup model).
+    const cloudDecision = this.router
+      ? this.router.decisionForTier("tier3-cloud", "coordinator cloud fallback")
+      : null;
+    const cloudProvider = cloudDecision
+      ? this.getProvider(cloudDecision.provider, cloudDecision.modelId)
+      : this.getProvider(this.config.provider, this.config.model);
+    if (cloudDecision) this.onRoute?.(cloudDecision);
     yield* this.agenticLoop(cloudProvider, toolDefs);
   }
 
