@@ -26,17 +26,15 @@ export class PathValidator {
   /**
    * Validates that a path is safe for filesystem operations.
    * Returns the resolved absolute path on success.
-   * Throws on blocked patterns or paths outside all allowed roots.
+   * Throws only on blocked sensitive patterns (e.g. .ssh, .aws, .env).
+   * Absolute paths and paths outside the project root are allowed — the AI
+   * needs to be able to work on any directory the user points it at.
    */
   resolveSafePath(requestedPath: string): string {
-    const normalized = normalize(requestedPath);
-    if (normalized.startsWith("..") || isAbsolute(normalized)) {
-      throw new Error(
-        `Access denied: path "${requestedPath}" is outside project root`,
-      );
-    }
-
-    const absolute = resolve(join(this.projectRoot, normalized));
+    // Resolve to absolute; relative paths are resolved from projectRoot
+    const absolute = isAbsolute(requestedPath)
+      ? resolve(requestedPath)
+      : resolve(join(this.projectRoot, requestedPath));
 
     const parts = absolute.split(sep);
     for (const blocked of BLOCKED_PATTERNS) {
@@ -45,13 +43,6 @@ export class PathValidator {
           `Access to blocked path denied: "${blocked}" detected in "${requestedPath}"`,
         );
       }
-    }
-
-    const rel = relative(this.projectRoot, absolute);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
-      throw new Error(
-        `Access denied: path "${requestedPath}" resolves outside project root`,
-      );
     }
 
     return absolute;

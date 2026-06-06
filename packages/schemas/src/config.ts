@@ -8,8 +8,9 @@ export const ModelConfigSchema = z.object({
 });
 
 export const RoutingConfigSchema = z.object({
-  defaultLocalModel: z.string(),
-  defaultReasoningModel: z.string(),
+  defaultLocalModel: z.string(),        // tier 1 — fastest local (MLX GPU)
+  defaultFallbackModel: z.string().optional(), // tier 2 — local Ollama fallback
+  defaultReasoningModel: z.string(),    // tier 3 — cloud for complex tasks
   fallbackReasoningModel: z.string().optional(),
 });
 

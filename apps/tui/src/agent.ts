@@ -157,54 +157,44 @@ async function resolveLocalTier(fileConfig: MetalmindConfig, userConfig: TuiConf
 }
 
 /**
- * Build a router from metalmind.yaml routing (named models) when present, defaulting
- * the local tier to MLX on Apple Silicon and the reasoning tier to Anthropic. If the
- * MLX sidecar is down at runtime, the quality gate escalates to the cloud tier.
+ * Build a three-tier router:
+ *   Tier 1 — MLX (Apple Silicon GPU, HuggingFace model via sidecar)
+ *   Tier 2 — Local Ollama (CPU/GPU fallback, no API key needed)
+ *   Tier 3 — Ollama Cloud (large remote models, API key required)
+ *
+ * All tiers are configurable via metalmind.yaml. If the MLX sidecar is
+ * unreachable the quality gate escalates to the next tier automatically.
  */
 export function createDefaultRouter(
   config: TuiConfig,
   fileConfig: MetalmindConfig = loadConfigFromFile(),
 ): Promise<ModelRouter> {
   return (async () => {
-    const models = { ...config.models as any, ...fileConfig.models };
+    const models = { ...(fileConfig.models ?? {}) };
     const routing = fileConfig.routing;
 
-    const rawLocal = await resolveLocalTier(fileConfig, config);
+    // Tier 1: MLX on Apple Silicon, or local Ollama on other hardware.
+    const tier1 = await resolveLocalTier(fileConfig, config);
 
-    // When the resolved local-tier provider is the same as the user's configured
-    // provider AND the user has cloud credentials (API key), the local-default model
-    // (e.g. deepseek-coder:1.3b) would be sent to the cloud endpoint where it likely
-    // doesn't exist → 404.  Use the user's configured model for all tiers instead.
-    const local =
-      rawLocal.provider === config.provider && !!config.apiKey
-        ? { provider: config.provider, model: config.model }
-        : rawLocal;
+    // Tier 2: local Ollama fallback (named via defaultFallbackModel in yaml,
+    // or a sensible built-in default).
+    const tier2 = routing?.defaultFallbackModel
+      ? (resolveNamedTier(routing.defaultFallbackModel, models) ?? { provider: "ollama", model: "gemma3:4b" })
+      : { provider: "ollama", model: "gemma3:4b" };
 
+    // Tier 3: cloud model for complex tasks.
     const defaultReasoning = { provider: config.provider, model: config.model };
-    
-    let reasoning = resolveNamedTier(routing?.defaultReasoningModel, models);
-    
-    if (!reasoning && config.routing?.defaultReasoningModel) {
-      const target = config.routing.defaultReasoningModel;
-      for (const [p, list] of Object.entries(config.models || {})) {
-        if (list.includes(target)) {
-          reasoning = { provider: p, model: target };
-          break;
-        }
-      }
-    }
-    
-    if (!reasoning) reasoning = defaultReasoning;
+    const tier3 = resolveNamedTier(routing?.defaultReasoningModel, models) ?? defaultReasoning;
 
     return new ModelRouter({
-      tier1Provider: local.provider,
-      tier1Model: local.model,
-      tier2Provider: local.provider,
-      tier2Model: local.model,
-      tier3Provider: reasoning.provider,
-      tier3Model: reasoning.model,
+      tier1Provider: tier1.provider,
+      tier1Model: tier1.model,
+      tier2Provider: tier2.provider,
+      tier2Model: tier2.model,
+      tier3Provider: tier3.provider,
+      tier3Model: tier3.model,
       localFirst: true,
-      capabilities: tierCapabilities([local, reasoning]),
+      capabilities: tierCapabilities([tier1, tier2, tier3]),
     });
   })();
 }
