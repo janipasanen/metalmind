@@ -516,7 +516,12 @@ export class AgentLoop {
     yield* this.agenticLoop(provider, toolDefs, attempt);
   }
 
-  /** Run a turn through the multi-agent Coordinator. */
+  /** Run a turn through the multi-agent Coordinator.
+   *
+   * The coordinator's local worker runs intent classification only —
+   * the result is routing metadata, never a user-facing response.
+   * After classification the real work always goes to the appropriate tier.
+   */
   private async *runWithCoordinator(userInput: string, toolDefs: unknown[]): AsyncGenerator<ChatStreamEvent> {
     const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const { decision, localResult } = await this.coordinator!.processRequest(userInput, {
@@ -526,31 +531,25 @@ export class AgentLoop {
 
     this.onCoordinatorRouting?.(decision);
 
+    // Use the classification to pick a tier, but never return the raw
+    // classification JSON as the user's answer — that's just routing metadata.
+    let targetTierKey: "tier1-local" | "tier2-medium" | "tier3-cloud" = "tier3-cloud";
     if (localResult?.success) {
-      yield { type: "text", text: `\n[local worker: ${decision.taskType ?? "unknown"} → completed in ${localResult.durationMs}ms]\n` };
-      const localOutput = typeof localResult.output === "string"
-        ? localResult.output
-        : JSON.stringify(localResult.output, null, 2);
-      this.history.push({ role: "assistant", content: localOutput });
-      yield { type: "text", text: localOutput };
-      yield { type: "done" };
-      return;
+      const out = localResult.output as { suggestedTier?: string } | undefined;
+      if (out?.suggestedTier === "local-worker") targetTierKey = "tier1-local";
+      else if (out?.suggestedTier === "direct-tool") targetTierKey = "tier2-medium";
+      // cloud-main → tier3-cloud (default)
     }
+    // If classification failed, log it silently and fall back to cloud.
 
-    if (localResult && !localResult.success && decision.target !== "cloud-main") {
-      yield { type: "text", text: `\n[local worker failed: ${localResult.error} — falling back to cloud]\n` };
-    }
-
-    // Always use the tier-3 cloud model for the coordinator's cloud fallback —
-    // NOT this.config (which is tier 1 / the startup model).
-    const cloudDecision = this.router
-      ? this.router.decisionForTier("tier3-cloud", "coordinator cloud fallback")
+    const tieredDecision = this.router
+      ? this.router.decisionForTier(targetTierKey, `coordinator classified: ${targetTierKey}`)
       : null;
-    const cloudProvider = cloudDecision
-      ? this.getProvider(cloudDecision.provider, cloudDecision.modelId)
+    const provider = tieredDecision
+      ? this.getProvider(tieredDecision.provider, tieredDecision.modelId)
       : this.getProvider(this.config.provider, this.config.model);
-    if (cloudDecision) this.onRoute?.(cloudDecision);
-    yield* this.agenticLoop(cloudProvider, toolDefs);
+    if (tieredDecision) this.onRoute?.(tieredDecision);
+    yield* this.agenticLoop(provider, toolDefs);
   }
 
   /**
