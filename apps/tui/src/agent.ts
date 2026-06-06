@@ -231,6 +231,7 @@ export class AgentLoop {
   private coordinator: Coordinator | null = null;
   private safetyValidator: SafetyValidator;
   private _forcedTier: ForcedTier = null;
+  private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
@@ -257,6 +258,16 @@ export class AgentLoop {
 
   get forcedTier(): ForcedTier {
     return this._forcedTier;
+  }
+
+  /** Override the provider/model used when a specific tier is active.
+   *  Useful for switching the cloud model (tier 3) without editing metalmind.yaml. */
+  setTierModel(tier: 1 | 2 | 3, provider: string, model: string): void {
+    this.tierOverrides.set(tier, { provider, model });
+  }
+
+  getTierModel(tier: 1 | 2 | 3): { provider: string; model: string } | undefined {
+    return this.tierOverrides.get(tier);
   }
 
   get safety(): SafetyValidator {
@@ -442,7 +453,13 @@ export class AgentLoop {
         this._forcedTier === 1 ? "tier1-local"
         : this._forcedTier === 2 ? "tier2-medium"
         : "tier3-cloud";
-      const decision = this.router.decisionForTier(tierKey, `forced tier ${this._forcedTier}`);
+
+      // Check if the user has also overridden the model for this tier.
+      const override = this.tierOverrides.get(this._forcedTier);
+      const decision: RouteDecision = override
+        ? { tier: tierKey as import("@metalmind/core").TaskTier, modelId: override.model, provider: override.provider, reason: `forced tier ${this._forcedTier} (model override)` }
+        : this.router.decisionForTier(tierKey, `forced tier ${this._forcedTier}`);
+
       this.onRoute?.(decision);
       const provider = this.getProvider(decision.provider, decision.modelId);
       yield* this.agenticLoop(provider, toolDefs);
