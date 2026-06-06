@@ -30,9 +30,13 @@ export class PathValidator {
    */
   resolveSafePath(requestedPath: string): string {
     const normalized = normalize(requestedPath);
-    const absolute = isAbsolute(normalized)
-      ? resolve(normalized)
-      : resolve(join(this.projectRoot, normalized));
+    if (normalized.startsWith("..") || isAbsolute(normalized)) {
+      throw new Error(
+        `Access denied: path "${requestedPath}" is outside project root`,
+      );
+    }
+
+    const absolute = resolve(join(this.projectRoot, normalized));
 
     const parts = absolute.split(sep);
     for (const blocked of BLOCKED_PATTERNS) {
@@ -41,6 +45,13 @@ export class PathValidator {
           `Access to blocked path denied: "${blocked}" detected in "${requestedPath}"`,
         );
       }
+    }
+
+    const rel = relative(this.projectRoot, absolute);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(
+        `Access denied: path "${requestedPath}" resolves outside project root`,
+      );
     }
 
     return absolute;

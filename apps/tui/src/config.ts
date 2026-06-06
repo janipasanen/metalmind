@@ -1,6 +1,8 @@
 import { loadConfigFromFile, loadMergedConfig } from "@metalmind/config";
 import type { MetalmindConfig } from "@metalmind/schemas";
 
+import type { UserConfig } from "@metalmind/config";
+
 export interface TuiConfig {
   provider: string;
   model: string;
@@ -8,6 +10,9 @@ export interface TuiConfig {
   baseUrl?: string;
   /** True when the user explicitly chose a provider/model (CLI flag or env) → bypass auto-routing. */
   explicit: boolean;
+  /** Global models and routing from config.json */
+  models?: Record<string, string[]>;
+  routing?: UserConfig["routing"];
 }
 
 /** Resolve credentials/base URL for a provider from the environment. */
@@ -21,7 +26,8 @@ export function providerCredentials(provider: string): { apiKey?: string; baseUr
 const PROVIDER_DEFAULTS: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4o",
-  ollama: "gemini-3-flash-preview:cloud",
+  ollama: "deepseek-coder:1.3b",
+  "ollama-cloud": "gemini-3-flash-preview:cloud",
   mlx: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
 };
 
@@ -31,12 +37,13 @@ const OLLAMA_CLOUD_BASE_URL = "https://ollama.com";
 function envApiKey(provider: string): string | undefined {
   if (provider === "anthropic") return process.env.ANTHROPIC_API_KEY;
   if (provider === "openai") return process.env.OPENAI_API_KEY;
-  if (provider === "ollama") return process.env.OLLAMA_API_KEY;
+  if (provider === "ollama" || provider === "ollama-cloud") return process.env.OLLAMA_API_KEY;
   if (provider === "mlx") return process.env.MLX_API_KEY;
   return undefined;
 }
 
 function defaultBaseUrl(provider: string, apiKey?: string): string | undefined {
+  if (provider === "ollama-cloud") return OLLAMA_CLOUD_BASE_URL;
   if (provider === "ollama" && apiKey) return OLLAMA_CLOUD_BASE_URL;
   if (provider === "mlx") return DEFAULT_MLX_BASE_URL;
   return undefined;
@@ -100,9 +107,9 @@ export function resolveConfig(
     // Global config has a saved preference
     provider = mergedConfig.activeProvider;
   } else {
-    // Auto-detect from env vars first: Ollama > Anthropic > OpenAI
+    // Auto-detect from env vars first: Ollama Cloud > Anthropic > OpenAI > local Ollama
     if (process.env.OLLAMA_API_KEY) {
-      provider = "ollama";
+      provider = "ollama-cloud";
       autoDetected = true;
     } else if (process.env.ANTHROPIC_API_KEY) {
       provider = "anthropic";
@@ -124,5 +131,13 @@ export function resolveConfig(
   const apiKey = mergedConfig.apiKeys[provider] || envApiKey(provider) || undefined;
   const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey);
 
-  return { provider, model, apiKey, baseUrl, explicit };
+  return { 
+    provider, 
+    model, 
+    apiKey, 
+    baseUrl, 
+    explicit,
+    models: mergedConfig.models,
+    routing: mergedConfig.routing
+  };
 }

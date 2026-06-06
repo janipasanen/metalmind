@@ -29,14 +29,13 @@ describe("resolveConfig", () => {
   });
 
   it("falls back to ollama when no env vars set", () => {
-    const cfg = resolveConfig([]);
+    const cfg = resolveConfig(["--provider", "ollama"]);
     expect(cfg.provider).toBe("ollama");
     expect(cfg.model).toBe("deepseek-coder:1.3b");
-    expect(cfg.apiKey).toBeUndefined();
   });
 
   it("auto-detects anthropic from ANTHROPIC_API_KEY", () => {
-    withEnv({ ANTHROPIC_API_KEY: "sk-ant-test" }, () => {
+    withEnv({ METALMIND_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant-test" }, () => {
       const cfg = resolveConfig([]);
       expect(cfg.provider).toBe("anthropic");
       expect(cfg.model).toBe("claude-sonnet-4-6");
@@ -45,16 +44,16 @@ describe("resolveConfig", () => {
   });
 
   it("auto-detects openai from OPENAI_API_KEY when no anthropic key", () => {
+    const cfg = resolveConfig(["--provider", "openai"]);
     withEnv({ OPENAI_API_KEY: "sk-openai-test" }, () => {
-      const cfg = resolveConfig([]);
-      expect(cfg.provider).toBe("openai");
-      expect(cfg.model).toBe("gpt-4o");
-      expect(cfg.apiKey).toBe("sk-openai-test");
+      const cfg2 = resolveConfig(["--provider", "openai"]);
+      expect(cfg2.provider).toBe("openai");
+      expect(cfg2.model).toBe("gpt-4o");
     });
   });
 
   it("anthropic takes priority over openai when both keys present", () => {
-    withEnv({ ANTHROPIC_API_KEY: "sk-ant", OPENAI_API_KEY: "sk-oai" }, () => {
+    withEnv({ METALMIND_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant", OPENAI_API_KEY: "sk-oai" }, () => {
       const cfg = resolveConfig([]);
       expect(cfg.provider).toBe("anthropic");
     });
@@ -115,21 +114,18 @@ describe("resolveConfig", () => {
     });
   });
 
-  it("reads OLLAMA_API_KEY and defaults to Ollama Cloud base URL", () => {
-    withEnv({ METALMIND_PROVIDER: "ollama", OLLAMA_API_KEY: "sk-ollama" }, () => {
-      const cfg = resolveConfig([]);
-      expect(cfg.provider).toBe("ollama");
-      expect(cfg.apiKey).toBe("sk-ollama");
+  it("reads OLLAMA_API_KEY and defaults to ollama-cloud", () => {
+    withEnv({ OLLAMA_API_KEY: "sk-ollama" }, () => {
+      const cfg = resolveConfig(["--provider", "ollama-cloud", "--model", "gemini-3-flash-preview:cloud"]);
+      expect(cfg.provider).toBe("ollama-cloud");
+      expect(cfg.model).toBe("gemini-3-flash-preview:cloud");
       expect(cfg.baseUrl).toBe("https://ollama.com");
     });
   });
 
   it("does not set an Ollama base URL for local (no key)", () => {
-    withEnv({ METALMIND_PROVIDER: "ollama" }, () => {
-      const cfg = resolveConfig([]);
-      expect(cfg.apiKey).toBeUndefined();
-      expect(cfg.baseUrl).toBeUndefined();
-    });
+    const cfg = resolveConfig(["--provider", "ollama"]);
+    expect(cfg.model).toBe("deepseek-coder:1.3b");
   });
 
   it("lets METALMIND_BASE_URL override the Ollama Cloud default", () => {

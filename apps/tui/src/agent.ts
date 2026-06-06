@@ -1,11 +1,13 @@
-import { createProvider } from "@metalmind/providers";
+import { createProvider, OllamaWorkerProvider } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities } from "@metalmind/core";
-import { ModelRouter, estimateTokens, evaluateQuality } from "@metalmind/core";
+import { ModelRouter, estimateTokens, evaluateQuality, Coordinator, SafetyValidator } from "@metalmind/core";
+import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
+import type { ModelRoutingDecision } from "@metalmind/schemas";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
 
@@ -46,6 +48,14 @@ const PROVIDER_CAPABILITIES: Record<string, ModelCapabilities> = {
     supportsToolCalling: true,
     supportsVision: false,
     supportsReasoning: false,
+    supportsJsonMode: true,
+    maximumContextTokens: 128_000,
+  },
+  "ollama-cloud": {
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: true,
     supportsJsonMode: true,
     maximumContextTokens: 128_000,
   },
@@ -110,14 +120,38 @@ async function mlxSidecarReady(target: TierTarget): Promise<boolean> {
   }
 }
 
-async function resolveLocalTier(fileConfig: MetalmindConfig): Promise<TierTarget> {
+async function resolveLocalTier(fileConfig: MetalmindConfig, userConfig: TuiConfig): Promise<TierTarget> {
   const models = fileConfig.models ?? {};
   const routing = fileConfig.routing;
-  const namedLocal =
-    resolveNamedTier(routing?.defaultLocalModel, models) ?? defaultLocalTier(isAppleSilicon());
+  
+  // 1. Try project-local metalmind.yaml
+  const namedLocal = resolveNamedTier(routing?.defaultLocalModel, models);
+  if (namedLocal) {
+    if (namedLocal.provider !== "mlx" || await mlxSidecarReady(namedLocal)) return namedLocal;
+  }
 
-  if (namedLocal.provider !== "mlx") return namedLocal;
-  if (await mlxSidecarReady(namedLocal)) return namedLocal;
+  // 2. Try global config.json routing
+  const globalRouting = userConfig.routing;
+  if (globalRouting?.defaultLocalModel) {
+    // Check if the model exists in the global models list
+    // For simplicity, we assume the user names the model appropriately
+    // Since config.json models is Record<string, string[]>, we need to find which provider has it.
+    for (const [provider, modelList] of Object.entries(userConfig.models || {})) {
+      if (modelList.includes(globalRouting.defaultLocalModel)) {
+        const globalNamed = { provider, model: globalRouting.defaultLocalModel };
+        if (globalNamed.provider !== "mlx" || await mlxSidecarReady(globalNamed)) return globalNamed;
+      }
+    }
+    // Also check if the "model" string itself is a path
+    if (globalRouting.defaultLocalModel.startsWith("/")) {
+       const globalNamed = { provider: "mlx", model: globalRouting.defaultLocalModel };
+       if (await mlxSidecarReady(globalNamed)) return globalNamed;
+    }
+  }
+
+  // 3. Fallback to hardcoded defaults
+  const fallback = defaultLocalTier(isAppleSilicon());
+  if (fallback.provider !== "mlx" || await mlxSidecarReady(fallback)) return fallback;
 
   return defaultLocalTier(false);
 }
@@ -132,10 +166,10 @@ export function createDefaultRouter(
   fileConfig: MetalmindConfig = loadConfigFromFile(),
 ): Promise<ModelRouter> {
   return (async () => {
-    const models = fileConfig.models ?? {};
+    const models = { ...config.models as any, ...fileConfig.models };
     const routing = fileConfig.routing;
 
-    const rawLocal = await resolveLocalTier(fileConfig);
+    const rawLocal = await resolveLocalTier(fileConfig, config);
 
     // When the resolved local-tier provider is the same as the user's configured
     // provider AND the user has cloud credentials (API key), the local-default model
@@ -147,8 +181,20 @@ export function createDefaultRouter(
         : rawLocal;
 
     const defaultReasoning = { provider: config.provider, model: config.model };
-    const reasoning =
-      resolveNamedTier(routing?.defaultReasoningModel, models) ?? defaultReasoning;
+    
+    let reasoning = resolveNamedTier(routing?.defaultReasoningModel, models);
+    
+    if (!reasoning && config.routing?.defaultReasoningModel) {
+      const target = config.routing.defaultReasoningModel;
+      for (const [p, list] of Object.entries(config.models || {})) {
+        if (list.includes(target)) {
+          reasoning = { provider: p, model: target };
+          break;
+        }
+      }
+    }
+    
+    if (!reasoning) reasoning = defaultReasoning;
 
     return new ModelRouter({
       tier1Provider: local.provider,
@@ -168,12 +214,21 @@ export interface AgentLoopOptions {
   router?: ModelRouter;
   /** Called whenever a turn is routed, so the UI can show the active tier/model. */
   onRoute?: (decision: RouteDecision) => void;
+  /** Called when the coordinator phase changes. */
+  onCoordinatorPhase?: (phase: CoordinatorPhase) => void;
+  /** Called when the coordinator makes a routing decision. */
+  onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
+  /** Called when the coordinator plan changes. */
+  onCoordinatorPlan?: (steps: PlanStep[]) => void;
 }
 
 export class AgentLoop {
   private config: TuiConfig;
   private router?: ModelRouter;
   private onRoute?: (decision: RouteDecision) => void;
+  private onCoordinatorPhase?: (phase: CoordinatorPhase) => void;
+  private onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
+  private onCoordinatorPlan?: (steps: PlanStep[]) => void;
   private registry: ToolRegistry;
   private history: AgentMessage[] = [];
   private projectRoot: string;
@@ -181,14 +236,28 @@ export class AgentLoop {
   private providerCache = new Map<string, ModelProvider>();
   private mcpTools = new Map<string, { client: McpHttpClient; def: McpToolDef }>();
   private workspaceRoots: string[] = [];
+  private coordinator: Coordinator | null = null;
+  private safetyValidator: SafetyValidator;
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
     this.router = options.router;
     this.onRoute = options.onRoute;
+    this.onCoordinatorPhase = options.onCoordinatorPhase;
+    this.onCoordinatorRouting = options.onCoordinatorRouting;
+    this.onCoordinatorPlan = options.onCoordinatorPlan;
     this.registry = buildRegistry();
     this.projectRoot = process.cwd();
+    this.safetyValidator = new SafetyValidator(this.projectRoot);
     this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
+  }
+
+  get coordinatorInstance(): Coordinator | null {
+    return this.coordinator;
+  }
+
+  get safety(): SafetyValidator {
+    return this.safetyValidator;
   }
 
   addWorkspaceRoot(path: string): void {
@@ -218,6 +287,60 @@ export class AgentLoop {
         console.error(`MCP server "${id}" init failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+  }
+
+  /** Initialize the multi-agent coordinator with a local worker provider. */
+  async initCoordinator(localWorkerProvider?: import("@metalmind/core").WorkerProvider): Promise<void> {
+    if (!this.router) return;
+
+    let workerProvider = localWorkerProvider ?? null;
+
+    if (!workerProvider) {
+      const detected = await AgentLoop.detectOllamaWorker();
+      if (detected) workerProvider = detected;
+    }
+
+    this.coordinator = new Coordinator(
+      this.getProvider(this.config.provider, this.config.model),
+      workerProvider,
+      {
+        cacheEnabled: true,
+        cacheTtlMs: 300_000,
+        router: {},
+        runner: {},
+      },
+    );
+
+    this.coordinator.on("coordinator:status", ((event: { phase: CoordinatorPhase; message: string }) => {
+      this.onCoordinatorPhase?.(event.phase);
+    }) as (...args: unknown[]) => void);
+
+    this.coordinator.on("coordinator:routing", ((event: { decision: ModelRoutingDecision }) => {
+      this.onCoordinatorRouting?.(event.decision);
+    }) as (...args: unknown[]) => void);
+
+    this.coordinator.on("coordinator:plan", ((event: { plan: import("@metalmind/core").CoordinatorPlan }) => {
+      this.onCoordinatorPlan?.(event.plan.steps);
+    }) as (...args: unknown[]) => void);
+  }
+
+  /** Probe Ollama for a small local model suitable for worker tasks. */
+  static async detectOllamaWorker(
+    preferredModel?: string,
+    baseUrl = "http://127.0.0.1:11434",
+    apiKey?: string,
+  ): Promise<OllamaWorkerProvider | null> {
+    const candidateModels = preferredModel
+      ? [preferredModel]
+      : ["deepseek-coder:1.3b", "deepseek-coder:6.7b", "qwen2.5-coder:1.5b", "qwen2.5-coder:7b", "codellama:7b"];
+
+    for (const modelId of candidateModels) {
+      const provider = new OllamaWorkerProvider(modelId, baseUrl, apiKey);
+      const available = await provider.isAvailable().catch(() => false);
+      if (available) return provider;
+    }
+
+    return null;
   }
 
   get providerLabel(): string {
@@ -306,12 +429,16 @@ export class AgentLoop {
     const toolDefs = this.toolDefs();
 
     if (!this.router) {
-      // Manual override: stream directly from the pinned provider, no gate.
       yield* this.agenticLoop(this.getProvider(this.config.provider, this.config.model), toolDefs);
       return;
     }
 
-    // Routed: pick a tier, then quality-gate the first response and escalate on failure.
+    if (this.coordinator) {
+      yield* this.runWithCoordinator(userInput, toolDefs);
+      return;
+    }
+
+    // Fallback: use ModelRouter directly (no coordinator).
     const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     let decision = await this.router.routeWithTriage(
       userInput,
@@ -353,6 +480,35 @@ export class AgentLoop {
     }
 
     yield* this.agenticLoop(provider, toolDefs, attempt);
+  }
+
+  /** Run a turn through the multi-agent Coordinator. */
+  private async *runWithCoordinator(userInput: string, toolDefs: unknown[]): AsyncGenerator<ChatStreamEvent> {
+    const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+    const { decision, localResult } = await this.coordinator!.processRequest(userInput, {
+      inputTokenEstimate: historyTokens,
+      input: { userMessage: userInput },
+    });
+
+    this.onCoordinatorRouting?.(decision);
+
+    if (localResult?.success) {
+      yield { type: "text", text: `\n[local worker: ${decision.taskType ?? "unknown"} → completed in ${localResult.durationMs}ms]\n` };
+      const localOutput = typeof localResult.output === "string"
+        ? localResult.output
+        : JSON.stringify(localResult.output, null, 2);
+      this.history.push({ role: "assistant", content: localOutput });
+      yield { type: "text", text: localOutput };
+      yield { type: "done" };
+      return;
+    }
+
+    if (localResult && !localResult.success && decision.target !== "cloud-main") {
+      yield { type: "text", text: `\n[local worker failed: ${localResult.error} — falling back to cloud]\n` };
+    }
+
+    const cloudProvider = this.getProvider(this.config.provider, this.config.model);
+    yield* this.agenticLoop(cloudProvider, toolDefs);
   }
 
   /**
@@ -416,6 +572,21 @@ export class AgentLoop {
       this.history.push({ role: "assistant", content: assistantText, toolCalls: pendingToolCalls });
 
       for (const call of pendingToolCalls) {
+        // Safety validation: check if tool requires approval
+        if (this.safetyValidator.requiresApproval(call.toolName)) {
+          const input = JSON.parse(call.argumentsJson) as Record<string, unknown>;
+          const filePath = typeof input.path === "string" ? input.path : "";
+          if (filePath) {
+            const pathViolation = this.safetyValidator.validateFilePath(filePath);
+            if (pathViolation) {
+              const output = `Blocked: ${pathViolation.message}`;
+              this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
+              yield { type: "tool-result", output };
+              continue;
+            }
+          }
+        }
+
         let output: string;
         try {
           const input = JSON.parse(call.argumentsJson) as unknown;

@@ -4,9 +4,14 @@ import Header from "./Header.js";
 import ChatView from "./ChatView.js";
 import InputBar from "./InputBar.js";
 import StatusBar from "./StatusBar.js";
+import MultiAgentStatus from "./MultiAgentStatus.js";
 import { useChat } from "../hooks/useChat.js";
 import { AgentLoop, createDefaultRouter } from "../agent.js";
 import type { TuiConfig } from "../config.js";
+import { Coordinator, SafetyValidator } from "@metalmind/core";
+import type { WorkerProvider } from "@metalmind/core";
+import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
+import type { ModelRoutingDecision } from "@metalmind/schemas";
 import CommandPalette from "./CommandPalette.js";
 import ProviderSelection from "./ProviderSelection.js";
 import ModelSelection from "./ModelSelection.js";
@@ -49,6 +54,12 @@ export default function App({ config }: AppProps) {
 
   const agentRef = useRef<AgentLoop | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [coordinatorPhase, setCoordinatorPhase] = useState<CoordinatorPhase>("idle");
+  const [currentRouting, setCurrentRouting] = useState<ModelRoutingDecision | undefined>(undefined);
+  const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
+  const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
+  const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
+  const [localWorkerAvailable, setLocalWorkerAvailable] = useState(false);
 
   const reloadAgent = useCallback(async () => {
     let cancelled = false;
@@ -62,11 +73,25 @@ export default function App({ config }: AppProps) {
         const agent = new AgentLoop(currentConfig, {
           router,
           onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
+          onCoordinatorPhase: (phase) => setCoordinatorPhase(phase),
+          onCoordinatorRouting: (decision) => setCurrentRouting(decision),
+          onCoordinatorPlan: (steps) => setPlanSteps(steps),
         });
         await agent.initMcp();
+        await agent.initCoordinator();
         if (cancelled) return;
         agentRef.current = agent;
         setAgentError(null);
+
+        const coordinator = agent.coordinatorInstance;
+        if (coordinator) {
+          const wp = coordinator.getRunner();
+          const providerField = (wp as unknown as { provider: WorkerProvider | null }).provider;
+          if (providerField) {
+            _setLocalWorkerProvider(providerField.providerName);
+            setLocalWorkerAvailable(true);
+          }
+        }
       } catch (err) {
         if (!cancelled) setAgentError(err instanceof Error ? err.message : String(err));
       }
@@ -87,10 +112,24 @@ export default function App({ config }: AppProps) {
         const agent = new AgentLoop(config, {
           router,
           onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
+          onCoordinatorPhase: (phase) => setCoordinatorPhase(phase),
+          onCoordinatorRouting: (decision) => setCurrentRouting(decision),
+          onCoordinatorPlan: (steps) => setPlanSteps(steps),
         });
         await agent.initMcp();
+        await agent.initCoordinator();
         if (cancelled) return;
         agentRef.current = agent;
+
+        const coordinator = agent.coordinatorInstance;
+        if (coordinator) {
+          const wp = coordinator.getRunner();
+          const providerField = (wp as unknown as { provider: WorkerProvider | null }).provider;
+          if (providerField) {
+            _setLocalWorkerProvider(providerField.providerName);
+            setLocalWorkerAvailable(true);
+          }
+        }
       } catch (err) {
         if (!cancelled) setAgentError(err instanceof Error ? err.message : String(err));
       }
@@ -187,6 +226,16 @@ export default function App({ config }: AppProps) {
     <Box flexDirection="column" padding={1} height="100%">
       <Header projectName={projectName} modelName={getActiveModel()} accent={theme.colors.accent} />
       <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} />
+      <MultiAgentStatus
+        mainModel={config.model}
+        mainProvider={config.provider}
+        localWorkerModel={localWorkerModel}
+        localWorkerProvider={localWorkerProvider}
+        localWorkerAvailable={localWorkerAvailable}
+        phase={coordinatorPhase}
+        currentRouting={currentRouting}
+        planSteps={planSteps}
+      />
       <InputBar onSubmit={handleSend} disabled={isStreaming} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} />
 

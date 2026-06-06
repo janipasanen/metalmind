@@ -10,6 +10,8 @@ vi.mock("@metalmind/config", async () => {
   };
 });
 
+const emptyFileConfig = { routing: {}, models: {}, mcp: {} } as any;
+
 describe("resolveConfig Priority", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -18,7 +20,6 @@ describe("resolveConfig Priority", () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.OLLAMA_API_KEY;
     
-    // Default mock behavior
     (configPkg.loadMergedConfig as any).mockReturnValue({
       activeProvider: "",
       apiKeys: {},
@@ -32,7 +33,7 @@ describe("resolveConfig Priority", () => {
       apiKeys: {},
     });
 
-    const cfg = resolveConfig([]);
+    const cfg = resolveConfig([], emptyFileConfig);
     expect(cfg.provider).toBe("ollama");
   });
 
@@ -40,13 +41,13 @@ describe("resolveConfig Priority", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     process.env.OLLAMA_API_KEY = "test-ollama-key";
     
-    const cfg = resolveConfig([]);
-    expect(cfg.provider).toBe("ollama");
+    const cfg = resolveConfig([], emptyFileConfig);
+    expect(cfg.provider).toBe("ollama-cloud");
     expect(cfg.apiKey).toBe("test-ollama-key");
   });
 
   it("defaults to ollama if no keys and no config", () => {
-    const cfg = resolveConfig([]);
+    const cfg = resolveConfig([], emptyFileConfig);
     expect(cfg.provider).toBe("ollama");
   });
 
@@ -57,7 +58,7 @@ describe("resolveConfig Priority", () => {
     });
     process.env.METALMIND_PROVIDER = "openai";
 
-    const cfg = resolveConfig([]);
+    const cfg = resolveConfig([], emptyFileConfig);
     expect(cfg.provider).toBe("openai");
   });
 
@@ -68,7 +69,7 @@ describe("resolveConfig Priority", () => {
     });
     process.env.METALMIND_PROVIDER = "openai";
 
-    const cfg = resolveConfig(["--provider", "anthropic"]);
+    const cfg = resolveConfig(["--provider", "anthropic"], emptyFileConfig);
     expect(cfg.provider).toBe("anthropic");
   });
 });

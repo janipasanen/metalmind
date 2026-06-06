@@ -4,7 +4,7 @@ routing:
 models:
   local-mlx:
     provider: mlx
-    model: /Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-4b-it-qat-4bit
+    model: /Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-12b-it-qat-4bit
   cloud-reasoning:
     provider: ollama
     model: gemini-3-flash-preview:cloud

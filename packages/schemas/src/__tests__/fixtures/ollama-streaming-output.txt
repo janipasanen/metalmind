@@ -1,0 +1,4 @@
+{"message":{"role":"assistant","content":"Here are the relevant files"},"done":false}
+{"message":{"role":"assistant","content":" for your project:","tool_calls":[{"function":{"name":"rank_relevant_files","arguments":{"files":["src/index.ts","src/provider.ts"]}}}]}
+{"message":{"content":"\n"},"done":false}
+{"message":{"content":"The most relevant file is src/provider.ts"},"done":true}

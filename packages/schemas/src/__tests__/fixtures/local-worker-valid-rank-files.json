@@ -1,0 +1,15 @@
+{
+  "rankedFiles": [
+    {
+      "path": "packages/providers/src/ollama/ollama-provider.ts",
+      "relevanceScore": 0.95,
+      "reason": "Likely contains existing Ollama local provider logic that can be extended for cloud models."
+    },
+    {
+      "path": "packages/providers/src/provider.ts",
+      "relevanceScore": 0.8,
+      "reason": "Defines the shared provider interface used by all model providers."
+    }
+  ],
+  "confidence": 0.84
+}

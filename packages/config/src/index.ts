@@ -79,6 +79,10 @@ export interface UserConfig {
   defaultModel: string;
   apiKeys: Record<string, string>;
   models: Record<string, string[]>;
+  routing?: {
+    defaultLocalModel?: string;
+    defaultReasoningModel?: string;
+  };
   mcpServers: Record<string, McpServerConfig>;
   workspacePaths: string[];
   uiTheme: "light" | "dark" | "system";

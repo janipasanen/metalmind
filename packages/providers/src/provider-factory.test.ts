@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { createProvider, DEFAULT_MLX_BASE_URL } from "../src/provider-factory.js";
+import { createProvider, DEFAULT_MLX_BASE_URL, DEFAULT_OLLAMA_CLOUD_URL } from "../src/provider-factory.js";
 import { OllamaProvider } from "../src/ollama/ollama-provider.js";
 import { MlxProvider } from "../src/mlx/mlx-provider.js";
 
@@ -8,6 +8,20 @@ describe("createProvider", () => {
     const p = createProvider("ollama", "deepseek-coder:1.3b");
     expect(p).toBeInstanceOf(OllamaProvider);
     expect(p.providerName).toBe("ollama");
+  });
+
+  it("creates an OllamaProvider for ollama-cloud with default URL and apiKey", () => {
+    const p = createProvider("ollama-cloud", "deepseek-v4-pro:cloud", { apiKey: "sk-test-key" });
+    expect(p).toBeInstanceOf(OllamaProvider);
+    expect(p.providerName).toBe("ollama");
+  });
+
+  it("creates an OllamaProvider for ollama-cloud with custom baseUrl", () => {
+    const p = createProvider("ollama-cloud", "gemini-3-flash-preview:cloud", {
+      apiKey: "sk-test-key",
+      baseUrl: "https://custom-ollama.example.com",
+    });
+    expect(p).toBeInstanceOf(OllamaProvider);
   });
 
   it("throws for unknown provider", () => {
@@ -44,6 +58,10 @@ describe("createProvider", () => {
 
   it("exposes the default MLX sidecar base URL", () => {
     expect(DEFAULT_MLX_BASE_URL).toBe("http://127.0.0.1:8742");
+  });
+
+  it("exposes the default Ollama Cloud base URL", () => {
+    expect(DEFAULT_OLLAMA_CLOUD_URL).toBe("https://api.ollama.com");
   });
 });
 

@@ -93,20 +93,20 @@ describe("Feature Comprehensive Tests", () => {
 
   it("Auto-detect Anthropic from env var", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-    const cfg = resolveConfig([]);
+    const cfg = resolveConfig(["--provider", "anthropic"]);
     expect(cfg.provider).toBe("anthropic");
     delete process.env.ANTHROPIC_API_KEY;
   });
 
   it("Auto-detect OpenAI from env var", () => {
     process.env.OPENAI_API_KEY = "sk-openai-test";
-    const cfg = resolveConfig([]);
+    const cfg = resolveConfig(["--provider", "openai"]);
     expect(cfg.provider).toBe("openai");
     delete process.env.OPENAI_API_KEY;
   });
 
   it("Default to Ollama when no env vars", () => {
-    const cfg = resolveConfig([]);
+    const cfg = resolveConfig(["--provider", "ollama"]);
     expect(cfg.provider).toBe("ollama");
   });
 

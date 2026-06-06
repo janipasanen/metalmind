@@ -5,6 +5,7 @@ import { AnthropicProvider } from "./anthropic/anthropic-provider.js";
 import { MlxProvider } from "./mlx/mlx-provider.js";
 
 export const DEFAULT_MLX_BASE_URL = "http://127.0.0.1:8742";
+export const DEFAULT_OLLAMA_CLOUD_URL = "https://api.ollama.com";
 
 export function createProvider(
   provider: string,
@@ -14,6 +15,11 @@ export function createProvider(
   switch (provider) {
     case "ollama":
       return new OllamaProvider(model, options?.baseUrl, options?.apiKey);
+    case "ollama-cloud": {
+      const apiKey = options?.apiKey;
+      const baseUrl = options?.baseUrl ?? DEFAULT_OLLAMA_CLOUD_URL;
+      return new OllamaProvider(model, baseUrl, apiKey);
+    }
     case "openai":
       if (!options?.apiKey) throw new Error("openai requires apiKey");
       return new OpenAIProvider(model, options.apiKey, options.baseUrl);

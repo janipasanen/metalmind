@@ -1,0 +1,8 @@
+I think the files you need are:
+
+src/main.ts  - probably important
+src/utils.ts - might be relevant
+
+Also, you should `rm -rf node_modules` and reinstall.
+
+The confidence for this is high but I cannot provide a number.
