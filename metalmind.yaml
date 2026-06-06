@@ -3,12 +3,17 @@ routing:
   defaultFallbackModel: local-ollama
   defaultReasoningModel: cloud-reasoning
 models:
+  # Tier 1 — Apple Silicon GPU via MLX sidecar (fastest local)
   local-mlx:
     provider: mlx
     model: /Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-12b-it-qat-4bit
+
+  # Tier 2 — Local Ollama worker, MLX-optimised 2B model (~1.2 GB RAM)
   local-ollama:
     provider: ollama
-    model: gemma3:4b
+    model: gemma4:e2b-mlx
+
+  # Tier 3 — Cloud brain: plans, coordinates, handles complex reasoning
   cloud-reasoning:
     provider: ollama-cloud
     model: gemini-3-flash-preview:latest
