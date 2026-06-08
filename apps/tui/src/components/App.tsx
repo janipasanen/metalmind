@@ -6,7 +6,8 @@ import InputBar from "./InputBar.js";
 import StatusBar from "./StatusBar.js";
 import MultiAgentStatus from "./MultiAgentStatus.js";
 import { useChat } from "../hooks/useChat.js";
-import { AgentLoop, createDefaultRouter, type ForcedTier } from "../agent.js";
+import { AgentLoop, createDefaultRouter, type ForcedTier, type ApprovalRequest, type ApprovalDecision } from "../agent.js";
+import ApprovalView from "./ApprovalView.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -84,6 +85,7 @@ export default function App({ config }: AppProps) {
   const [currentRouting, setCurrentRouting] = useState<ModelRoutingDecision | undefined>(undefined);
   const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
   const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | undefined>(undefined);
+  const [pendingApproval, setPendingApproval] = useState<{ req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
   const [localWorkerAvailable, setLocalWorkerAvailable] = useState(false);
@@ -104,6 +106,8 @@ export default function App({ config }: AppProps) {
           onCoordinatorRouting: (decision) => setCurrentRouting(decision),
           onCoordinatorPlan: (steps) => setPlanSteps(steps),
           onContextUsage: (used, limit) => setContextUsage({ used, limit }),
+          onApprovalRequest: (req) =>
+            new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -145,6 +149,8 @@ export default function App({ config }: AppProps) {
           onCoordinatorRouting: (decision) => setCurrentRouting(decision),
           onCoordinatorPlan: (steps) => setPlanSteps(steps),
           onContextUsage: (used, limit) => setContextUsage({ used, limit }),
+          onApprovalRequest: (req) =>
+            new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -386,6 +392,20 @@ export default function App({ config }: AppProps) {
   const handleSend = useCallback((text: string) => sendMessage(text), [sendMessage]);
 
   useInput((input, key) => {
+    // Approval prompt takes priority over all other input while it's open (#138).
+    if (pendingApproval) {
+      if (input === "y" || key.return) {
+        pendingApproval.resolve("approve");
+        setPendingApproval(null);
+      } else if (input === "a") {
+        pendingApproval.resolve("always");
+        setPendingApproval(null);
+      } else if (input === "n" || key.escape) {
+        pendingApproval.resolve("reject");
+        setPendingApproval(null);
+      }
+      return;
+    }
     // Esc during a stream aborts the in-flight turn (truthful to the StatusBar hint).
     if (key.escape && isStreaming) {
       cancelStream();
@@ -419,7 +439,8 @@ export default function App({ config }: AppProps) {
         currentRouting={currentRouting}
         planSteps={planSteps}
       />
-      <InputBar onSubmit={handleSend} disabled={isStreaming} />
+      {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
+      <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} />
 
       {showCommandPalette && (

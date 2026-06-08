@@ -1,5 +1,5 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
@@ -265,6 +265,20 @@ export function createDefaultRouter(
 
 export type ForcedTier = 1 | 2 | 3 | null;
 
+/** A pending human-in-the-loop approval for a side-effecting tool call (#138). */
+export interface ApprovalRequest {
+  toolName: string;
+  kind: "write" | "shell" | "git" | "mcp" | "other";
+  summary: string;
+  /** Unified diff for write/edit tools (rendered by DiffView). */
+  diff?: string;
+  /** Shell command for runCommand/runBackground. */
+  command?: string;
+  filePath?: string;
+}
+
+export type ApprovalDecision = "approve" | "reject" | "always";
+
 export interface AgentLoopOptions {
   /** When provided, the loop routes each turn via the router instead of a fixed provider. */
   router?: ModelRouter;
@@ -280,6 +294,8 @@ export interface AgentLoopOptions {
   onContextUsage?: (used: number, limit: number) => void;
   /** Override the project root (defaults to process.cwd()); used for tests. */
   projectRoot?: string;
+  /** Called before a side-effecting tool runs; resolves with the user's decision (#138). */
+  onApprovalRequest?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
 export class AgentLoop {
@@ -304,6 +320,9 @@ export class AgentLoop {
   private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
+  private onApprovalRequest?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
+  private alwaysAllow = new Set<string>();
+  private autoApprove = false;
   private skillLoader = new SkillLoader();
   private skillManager = new SkillManager();
   private sessionStore: SessionStore | null = null;
@@ -317,6 +336,8 @@ export class AgentLoop {
     this.onCoordinatorRouting = options.onCoordinatorRouting;
     this.onCoordinatorPlan = options.onCoordinatorPlan;
     this.onContextUsage = options.onContextUsage;
+    this.onApprovalRequest = options.onApprovalRequest;
+    this.autoApprove = loadXdgConfig().permissions?.autoApprove ?? false;
     this.projectRoot = options.projectRoot ?? process.cwd();
     this.registry = buildRegistry(this.projectRoot);
     this.safetyValidator = new SafetyValidator(this.projectRoot);
@@ -912,6 +933,25 @@ export class AgentLoop {
           continue;
         }
 
+        // Human-in-the-loop approval gate: pause before any side-effecting tool (#138).
+        if (this.needsApproval(call.toolName)) {
+          const decision = await this.requestApproval(call.toolName, inputObj);
+          if (decision === "reject") {
+            const output = `Rejected by user — "${call.toolName}" was not executed.`;
+            this.auditLog.log({
+              timestamp: new Date().toISOString(),
+              toolName: call.toolName,
+              input: inputObj,
+              output,
+              success: false,
+              error: "rejected by user",
+            });
+            this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
+            yield { type: "tool-result", output };
+            continue;
+          }
+        }
+
         // Snapshot affected files before any mutation so /undo can revert (#144).
         this.snapshotEdit(this.turnCount, call.toolName, inputObj);
 
@@ -989,6 +1029,67 @@ export class AgentLoop {
 
   private resolveProjectPath(p: string): string {
     return isAbsolute(p) ? resolve(p) : resolve(join(this.projectRoot, p));
+  }
+
+  /** Tools that must be approved before running: mutating built-ins, git, shell, and any MCP tool (#138). */
+  private needsApproval(toolName: string): boolean {
+    return this.safetyValidator.requiresApproval(toolName) || this.mcpTools.has(toolName);
+  }
+
+  /** Resolve the approval decision: always-allowed / auto-approve short-circuit, else ask the UI. */
+  private async requestApproval(toolName: string, input: Record<string, unknown>): Promise<ApprovalDecision> {
+    if (this.alwaysAllow.has(toolName) || this.autoApprove) return "approve";
+    if (!this.onApprovalRequest) return "approve"; // headless / no UI wired → no gate
+    try {
+      const decision = await this.onApprovalRequest(this.buildApprovalRequest(toolName, input));
+      if (decision === "always") this.alwaysAllow.add(toolName);
+      return decision;
+    } catch {
+      return "reject"; // a failed/aborted prompt must not silently execute
+    }
+  }
+
+  /** Build the approval payload (diff for writes, command for shell) for the UI. */
+  private buildApprovalRequest(toolName: string, input: Record<string, unknown>): ApprovalRequest {
+    const path = typeof input.path === "string" ? input.path : undefined;
+    try {
+      if ((toolName === "writeFile" || toolName === "createFile") && path) {
+        const diff = DiffGenerator.previewWrite(path, this.projectRoot, String(input.content ?? "")).patch;
+        return { toolName, kind: "write", summary: `Write ${path}`, diff, filePath: path };
+      }
+      if (toolName === "editFile" && path) {
+        const diff = DiffGenerator.previewEdit(
+          path,
+          this.projectRoot,
+          String(input.oldString ?? ""),
+          String(input.newString ?? ""),
+          Boolean(input.replaceAll),
+        ).patch;
+        return { toolName, kind: "write", summary: `Edit ${path}`, diff, filePath: path };
+      }
+    } catch {
+      // diff generation is best-effort; fall through to a summary
+    }
+    if (toolName === "deleteFile") return { toolName, kind: "write", summary: `Delete ${path ?? "(file)"}`, filePath: path };
+    if (toolName === "moveFile") return { toolName, kind: "write", summary: `Move ${String(input.source)} → ${String(input.destination)}` };
+    if (toolName === "multiEdit") {
+      const n = Array.isArray(input.edits) ? input.edits.length : 0;
+      return { toolName, kind: "write", summary: `Apply ${n} edit(s) atomically across files` };
+    }
+    if (toolName === "replaceInProject") {
+      return { toolName, kind: "write", summary: `Replace "${String(input.find)}" → "${String(input.replace)}" across the project` };
+    }
+    if (toolName === "runCommand" || toolName === "runBackground") {
+      const command = String(input.command ?? "");
+      return { toolName, kind: "shell", summary: `Run shell command`, command };
+    }
+    if (toolName.startsWith("git")) {
+      return { toolName, kind: "git", summary: `${toolName} ${JSON.stringify(input)}`.slice(0, 200) };
+    }
+    if (this.mcpTools.has(toolName)) {
+      return { toolName, kind: "mcp", summary: `MCP tool ${toolName}(${JSON.stringify(input).slice(0, 120)})` };
+    }
+    return { toolName, kind: "other", summary: `${toolName}(${JSON.stringify(input).slice(0, 120)})` };
   }
 
   /** Snapshot file contents before a mutating tool runs, grouped per turn (#144). */

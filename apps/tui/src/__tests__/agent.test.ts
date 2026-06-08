@@ -1039,3 +1039,116 @@ describe("AgentLoop persistence (M4 #140)", () => {
     expect(loop.listSessions()).toEqual([]);
   });
 });
+
+describe("AgentLoop approval gate (M3 #138)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function oneWrite(file: string, content: string) {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "tc1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: file, content }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("rejecting an approval blocks the write and returns a rejection result", async () => {
+    const root = join(tmpdir(), `mm-appr-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "x.ts");
+    mockCreateProvider.mockReturnValue(oneWrite(file, "should not be written"));
+
+    const loop = new AgentLoop(
+      { provider: "stub", model: "test", explicit: true },
+      { projectRoot: root, onApprovalRequest: async () => "reject" },
+    );
+    const events = await collect(loop.run("write x"));
+
+    expect(existsSync(file)).toBe(false); // no mutation on reject
+    const toolResult = events.find((e) => e.type === "tool-result") as { type: "tool-result"; output: string } | undefined;
+    expect(toolResult?.output).toMatch(/Rejected by user/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("approving lets the write through", async () => {
+    const root = join(tmpdir(), `mm-appr2-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "y.ts");
+    mockCreateProvider.mockReturnValue(oneWrite(file, "approved content"));
+
+    const loop = new AgentLoop(
+      { provider: "stub", model: "test", explicit: true },
+      { projectRoot: root, onApprovalRequest: async () => "approve" },
+    );
+    await collect(loop.run("write y"));
+
+    expect(existsSync(file)).toBe(true);
+    expect(readFileSync(file, "utf-8")).toBe("approved content");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("always-allow suppresses future prompts for that tool in the session", async () => {
+    const root = join(tmpdir(), `mm-appr3-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const f1 = join(root, "a.ts");
+    const f2 = join(root, "b.ts");
+    let calls = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "t1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: f1, content: "a" }) } };
+          yield { type: "tool-call", toolCall: { toolCallId: "t2", toolName: "writeFile", argumentsJson: JSON.stringify({ path: f2, content: "b" }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const approvalSpy = vi.fn(async () => "always" as const);
+    const loop = new AgentLoop(
+      { provider: "stub", model: "test", explicit: true },
+      { projectRoot: root, onApprovalRequest: approvalSpy },
+    );
+    await collect(loop.run("write two"));
+
+    // Asked exactly once (the second writeFile was auto-approved by always-allow).
+    expect(approvalSpy).toHaveBeenCalledTimes(1);
+    expect(existsSync(f1)).toBe(true);
+    expect(existsSync(f2)).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("does not gate when no approval callback is wired (headless)", async () => {
+    const root = join(tmpdir(), `mm-appr4-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "z.ts");
+    mockCreateProvider.mockReturnValue(oneWrite(file, "headless"));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("write z"));
+    expect(existsSync(file)).toBe(true); // no callback → executes
+    rmSync(root, { recursive: true, force: true });
+  });
+});
