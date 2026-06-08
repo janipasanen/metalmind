@@ -38,6 +38,16 @@ interface AppProps {
   config: TuiConfig;
 }
 
+/** Convert restored persisted messages into chat-view messages (#140). */
+function restoredToChatMessages(msgs: Array<{ role: string; content: string }>): ChatMessage[] {
+  return msgs.map((m, i) => ({
+    id: `restored-${i}`,
+    role: m.role === "assistant" ? "assistant" : m.role === "system" ? "system" : "user",
+    content: m.content,
+    timestamp: new Date(),
+  }));
+}
+
 export default function App({ config }: AppProps) {
   const [activeProvider, setActiveProvider] = useState(config.provider);
   const [activeModel, setActiveModel] = useState<string>(`${config.provider}/${config.model}`);
@@ -99,6 +109,7 @@ export default function App({ config }: AppProps) {
         await agent.initCoordinator();
         if (cancelled) return;
         agentRef.current = agent;
+        await agent.initPersistence({}); // reconfigure → fresh persisted session
         setAgentError(null);
 
         const coordinator = agent.coordinatorInstance;
@@ -140,6 +151,15 @@ export default function App({ config }: AppProps) {
         if (cancelled) return;
         agentRef.current = agent;
 
+        // Open persistence and resume if --continue/--resume was passed (#140).
+        const restored = await agent.initPersistence({
+          continue: config.continueSession,
+          resumeId: config.resumeSessionId,
+        });
+        if (!cancelled && restored.length > 0) {
+          replaceMessages(restoredToChatMessages(restored));
+        }
+
         const coordinator = agent.coordinatorInstance;
         if (coordinator) {
           const wp = coordinator.getRunner();
@@ -159,7 +179,7 @@ export default function App({ config }: AppProps) {
     };
   }, [config]);
 
-  const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls, cancelStream } = useChat({
+  const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls, cancelStream, replaceMessages } = useChat({
     generateResponse: async function* (input: string, signal?: AbortSignal) {
       if (input === "/help") {
         yield { type: "text", text: [
@@ -177,6 +197,7 @@ export default function App({ config }: AppProps) {
           "  /workspace <path> - Allow AI to access an additional directory",
           "  /init             - Generate a starter project memory file (.metalmind/MEMORY.md)",
           "  /skill            - list | activate <name> | deactivate <name>",
+          "  /resume [id]      - List saved sessions, or resume one by id (also --continue/--resume on launch)",
           "  /undo             - Revert the agent's last applied edit set",
           "  /audit            - Show this session's tool-call log",
           "  /clear            - Clear chat history",
@@ -195,7 +216,32 @@ export default function App({ config }: AppProps) {
       }
 
       if (input === "/clear") {
-        agentRef.current?.clearHistory();
+        // Start a new persisted session rather than destroying history (#140).
+        agentRef.current?.newSession();
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/resume" || input.startsWith("/resume ")) {
+        const id = input.slice(7).trim();
+        const agent = agentRef.current;
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+        } else if (!id) {
+          const sessions = agent.listSessions();
+          if (sessions.length === 0) {
+            yield { type: "text", text: "No saved sessions yet." } as const;
+          } else {
+            const lines = sessions
+              .slice(0, 15)
+              .map((s) => `  ${s.id}  (updated ${s.updated_at})${s.title ? ` — ${s.title}` : ""}`);
+            yield { type: "text", text: `Recent sessions — resume with /resume <id>:\n${lines.join("\n")}` } as const;
+          }
+        } else {
+          const restored = agent.resumeSession(id);
+          replaceMessages(restoredToChatMessages(restored));
+          yield { type: "text", text: `Resumed session ${id} (${restored.length} messages).` } as const;
+        }
         yield { type: "done" } as const;
         return;
       }

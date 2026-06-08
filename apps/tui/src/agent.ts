@@ -5,6 +5,15 @@ import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
 import { SkillLoader, SkillManager } from "@metalmind/skills";
 
+/** Structural view of the session store — imported lazily so a missing native
+ *  better-sqlite3 addon degrades to no-persistence instead of crashing launch. */
+interface SessionStore {
+  createSession(title?: string): string;
+  saveMessages(id: string, messages: AgentMessage[]): void;
+  loadMessages(id: string): AgentMessage[];
+  listSessions(): Array<{ id: string; title: string; created_at: string; updated_at: string }>;
+}
+
 /** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
 interface McpToolClient {
   callTool(name: string, input: unknown): Promise<string>;
@@ -297,6 +306,8 @@ export class AgentLoop {
   private editStack: EditSet[] = [];
   private skillLoader = new SkillLoader();
   private skillManager = new SkillManager();
+  private sessionStore: SessionStore | null = null;
+  private sessionId: string | null = null;
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
@@ -653,6 +664,15 @@ export class AgentLoop {
   }
 
   async *run(userInput: string, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
+    try {
+      yield* this.runInner(userInput, signal);
+    } finally {
+      // Persist after every turn, including on cancel/abort (#140).
+      this.saveSession();
+    }
+  }
+
+  private async *runInner(userInput: string, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     }
@@ -1349,6 +1369,100 @@ export class AgentLoop {
   clearHistory(): void {
     this.history = [];
     this.turnCount = 0;
+  }
+
+  /**
+   * Open the SQLite session store and create or resume a session (#140).
+   * Graceful: if the native store can't load, persistence is disabled silently.
+   * Returns the restored non-system messages (for the UI to display).
+   */
+  async initPersistence(opts: { continue?: boolean; resumeId?: string } = {}): Promise<AgentMessage[]> {
+    try {
+      // Lazy import: if the native better-sqlite3 addon is unavailable, this
+      // throws here and persistence is silently disabled — the TUI still runs.
+      const { SqliteSessionStore } = await import("@metalmind/memory");
+      this.sessionStore = new SqliteSessionStore(join(this.projectRoot, ".metalmind", "sessions.db"));
+    } catch {
+      this.sessionStore = null;
+      return [];
+    }
+    try {
+      if (opts.resumeId) {
+        this.sessionId = opts.resumeId;
+        this.history = this.sessionStore.loadMessages(opts.resumeId);
+      } else if (opts.continue) {
+        const recent = this.sessionStore.listSessions()[0];
+        if (recent) {
+          this.sessionId = recent.id;
+          this.history = this.sessionStore.loadMessages(recent.id);
+        } else {
+          this.sessionId = this.sessionStore.createSession();
+        }
+      } else {
+        this.sessionId = this.sessionStore.createSession();
+      }
+    } catch {
+      try {
+        this.sessionId = this.sessionStore.createSession();
+      } catch {
+        this.sessionStore = null;
+      }
+    }
+    if (this.history.length > 0) this.turnCount = this.history.filter((m) => m.role === "user").length;
+    return this.displayMessages();
+  }
+
+  /** User/assistant turns with content, for restoring the chat view on resume. */
+  private displayMessages(): AgentMessage[] {
+    return this.history.filter(
+      (m) => (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0,
+    );
+  }
+
+  /** Persist the current history to the active session (#140). */
+  private saveSession(): void {
+    if (!this.sessionStore || !this.sessionId) return;
+    try {
+      // Use the first user message as the session title if not already set.
+      this.sessionStore.saveMessages(this.sessionId, this.history);
+    } catch {
+      // persistence failure must never break a turn
+    }
+  }
+
+  /** List persisted sessions (most-recent first) for /resume (#140). */
+  listSessions(): Array<{ id: string; title: string; updated_at: string }> {
+    if (!this.sessionStore) return [];
+    try {
+      return this.sessionStore.listSessions();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Resume a specific session by id; returns its non-system messages (#140). */
+  resumeSession(id: string): AgentMessage[] {
+    if (!this.sessionStore) return [];
+    try {
+      this.history = this.sessionStore.loadMessages(id);
+      this.sessionId = id;
+      this.turnCount = this.history.filter((m) => m.role === "user").length;
+      return this.displayMessages();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Start a fresh session without destroying persisted data (for /clear) (#140). */
+  newSession(): void {
+    this.clearHistory();
+    if (this.sessionStore) {
+      try {
+        this.sessionId = this.sessionStore.createSession();
+      } catch {
+        // keep going in-memory
+      }
+    }
   }
 
   /** Release resources: background processes (#153) and stdio MCP clients (#155). */

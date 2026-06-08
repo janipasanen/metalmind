@@ -6,10 +6,11 @@ export default defineConfig({
   target: "node18",
   clean: true,
   bundle: true,
-  // tree-sitter uses N-API native addons and cannot be bundled.
-  // All other dependencies (@metalmind/*, ink, react, zod …) are inlined
-  // so the published package has no workspace/private deps.
-  external: ["tree-sitter", "tree-sitter-typescript", "react-devtools-core"],
+  // tree-sitter and better-sqlite3 use N-API native addons and cannot be
+  // bundled — they stay as runtime deps. All other dependencies (@metalmind/*,
+  // ink, react, zod …) are inlined so the published package has no
+  // workspace/private deps.
+  external: ["tree-sitter", "tree-sitter-typescript", "react-devtools-core", "better-sqlite3"],
   esbuildOptions(options) {
     options.jsx = "automatic";
     // Inject a `require()` polyfill so CJS packages bundled into ESM can still

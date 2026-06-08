@@ -13,6 +13,10 @@ export interface TuiConfig {
   /** Global models and routing from config.json */
   models?: Record<string, string[]>;
   routing?: UserConfig["routing"];
+  /** --continue: resume the most recent persisted session on launch. */
+  continueSession?: boolean;
+  /** --resume <id>: resume a specific persisted session on launch. */
+  resumeSessionId?: string;
 }
 
 /** Resolve credentials/base URL for a provider from the environment.
@@ -68,11 +72,16 @@ export function resolveConfig(
 ): TuiConfig {
   let cliProvider = "";
   let cliModel = "";
+  let continueSession = false;
+  let resumeSessionId = "";
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--provider" && argv[i + 1]) cliProvider = argv[++i];
     else if (argv[i] === "--model" && argv[i + 1]) cliModel = argv[++i];
     else if (argv[i]?.startsWith("--provider=")) cliProvider = argv[i].slice(11);
     else if (argv[i]?.startsWith("--model=")) cliModel = argv[i].slice(8);
+    else if (argv[i] === "--continue" || argv[i] === "-c") continueSession = true;
+    else if (argv[i] === "--resume" && argv[i + 1] && !argv[i + 1].startsWith("-")) resumeSessionId = argv[++i];
+    else if (argv[i]?.startsWith("--resume=")) resumeSessionId = argv[i].slice(9);
   }
 
   const explicitProvider = cliProvider || process.env.METALMIND_PROVIDER || "";
@@ -99,7 +108,7 @@ export function resolveConfig(
     const apiKey = envApiKey(provider) ?? entry.apiKey;
     const baseUrl =
       process.env.METALMIND_BASE_URL ?? entry.baseUrl ?? defaultBaseUrl(provider, apiKey);
-    return { provider, model: entry.model, apiKey, baseUrl, explicit };
+    return { provider, model: entry.model, apiKey, baseUrl, explicit, continueSession, resumeSessionId: resumeSessionId || undefined };
   }
 
   // Built-in resolution (no named model).
@@ -138,13 +147,15 @@ export function resolveConfig(
   const apiKey = mergedConfig.apiKeys[provider] || envApiKey(provider) || undefined;
   const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey);
 
-  return { 
-    provider, 
-    model, 
-    apiKey, 
-    baseUrl, 
+  return {
+    provider,
+    model,
+    apiKey,
+    baseUrl,
     explicit,
     models: mergedConfig.models,
-    routing: mergedConfig.routing
+    routing: mergedConfig.routing,
+    continueSession,
+    resumeSessionId: resumeSessionId || undefined,
   };
 }

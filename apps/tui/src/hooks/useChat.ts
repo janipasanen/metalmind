@@ -131,6 +131,11 @@ export function useChat(options: UseChatOptions) {
     abortRef.current?.abort();
   }, []);
 
+  /** Replace the visible messages (used when resuming a persisted session). */
+  const replaceMessages = useCallback((msgs: ChatMessage[]) => {
+    setMessages(msgs);
+  }, []);
+
   return {
     messages,
     sendMessage,
@@ -138,5 +143,6 @@ export function useChat(options: UseChatOptions) {
     streamingContent,
     activeToolCalls,
     cancelStream,
+    replaceMessages,
   };
 }

@@ -980,3 +980,62 @@ describe("AgentLoop skills (M5 #156)", () => {
     expect(loop.activateSkill("nope-not-real")).toMatch(/not found/);
   });
 });
+
+describe("AgentLoop persistence (M4 #140)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function replyProvider(text: string) {
+    return makeProvider([{ type: "text", text }, { type: "done" }]) as never;
+  }
+
+  it("persists history and resumes it in a new agent via --continue", async () => {
+    const root = join(tmpdir(), `mm-persist-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+
+    mockCreateProvider.mockReturnValue(replyProvider("the assistant reply"));
+    const loop1 = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await loop1.initPersistence({});
+    await collect(loop1.run("hello world"));
+
+    // A brand-new agent over the same project resumes the most recent session.
+    const loop2 = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const restored = await loop2.initPersistence({ continue: true });
+
+    expect(restored.some((m) => m.role === "user" && m.content === "hello world")).toBe(true);
+    expect(restored.some((m) => m.role === "assistant" && m.content.includes("the assistant reply"))).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("lists sessions and resumes a specific one by id", async () => {
+    const root = join(tmpdir(), `mm-persist2-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+
+    mockCreateProvider.mockReturnValue(replyProvider("reply one"));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await loop.initPersistence({});
+    await collect(loop.run("first message"));
+
+    const sessions = loop.listSessions();
+    expect(sessions.length).toBeGreaterThanOrEqual(1);
+
+    // newSession starts a fresh one without destroying the old.
+    loop.newSession();
+    expect(loop.listSessions().length).toBe(sessions.length + 1);
+
+    // Resume the original by id.
+    const restored = loop.resumeSession(sessions[0].id);
+    expect(restored.some((m) => m.content === "first message")).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("degrades gracefully when persistence is unused (no session store)", async () => {
+    mockCreateProvider.mockReturnValue(replyProvider("ok"));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    // No initPersistence call — run must still work and listSessions returns empty.
+    const events = await collect(loop.run("hi"));
+    expect(events.at(-1)?.type).toBe("done");
+    expect(loop.listSessions()).toEqual([]);
+  });
+});
