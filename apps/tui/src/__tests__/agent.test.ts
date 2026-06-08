@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ChatStreamEvent } from "../hooks/useChat.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 
 // Minimal provider stub
 function makeProvider(
@@ -70,13 +73,25 @@ vi.mock("@metalmind/providers", () => ({
   isRetryableError: (err: unknown) => !(err instanceof Error && /\b4\d\d\b/.test(err.message)),
 }));
 
-vi.mock("@metalmind/tools", () => ({
+vi.mock("@metalmind/tools", async () => {
+  const fs = await import("node:fs");
+  return {
+  AuditLog: class {
+    entries: unknown[] = [];
+    log = (e: unknown) => { this.entries.push(e); };
+    getRecent(n = 20) { return this.entries.slice(-n); }
+  },
   ToolRegistry: class {
     private tools = new Map();
     register(t: { toolName: string }) { this.tools.set(t.toolName, t); }
     list() { return [...this.tools.values()]; }
-    async execute(name: string) {
+    async execute(name: string, input: Record<string, unknown>, context?: { auditLog?: (e: unknown) => void }) {
+      context?.auditLog?.({ timestamp: "t", toolName: name, input, output: "ok", success: true });
       if (name === "successTool") return "tool output";
+      if (name === "writeFile") {
+        fs.writeFileSync(String(input.path), String(input.content ?? ""));
+        return `wrote ${input.path}`;
+      }
       throw new Error("tool not found");
     }
   },
@@ -91,7 +106,8 @@ vi.mock("@metalmind/tools", () => ({
     inputSchema: { _def: { typeName: "ZodObject", shape: () => ({}) } },
     execute: async () => "",
   }),
-}));
+  };
+});
 
 import { createProvider } from "@metalmind/providers";
 import { ModelRouter } from "@metalmind/core";
@@ -614,5 +630,93 @@ describe("AgentLoop.detectOllamaWorker", () => {
   it("accepts a preferred model override", async () => {
     const result = await AgentLoop.detectOllamaWorker("nonexistent-model:99b", "http://127.0.0.1:59999");
     expect(result).toBeNull();
+  });
+});
+
+describe("AgentLoop trust & recovery (M3)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // Provider that emits a single tool call on its first stream, then text+done.
+  function toolThenDoneProvider(toolName: string, args: Record<string, unknown>) {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "tc1", toolName, argumentsJson: JSON.stringify(args) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "finished" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("snapshots a write and reverts it with undoLastEdit (created file is deleted)", async () => {
+    const file = join(tmpdir(), `mm-undo-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`);
+    if (existsSync(file)) rmSync(file);
+    mockCreateProvider.mockReturnValue(toolThenDoneProvider("writeFile", { path: file, content: "agent content" }));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    await collect(loop.run("write the file"));
+
+    expect(existsSync(file)).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe("agent content");
+
+    const report = loop.undoLastEdit();
+    expect(report).toMatch(/deleted/);
+    expect(existsSync(file)).toBe(false); // was newly created → removed on undo
+  });
+
+  it("restores prior content on undo when the file already existed", async () => {
+    const file = join(tmpdir(), `mm-undo2-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`);
+    writeFileSync(file, "ORIGINAL");
+    mockCreateProvider.mockReturnValue(toolThenDoneProvider("writeFile", { path: file, content: "OVERWRITTEN" }));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    await collect(loop.run("overwrite it"));
+    expect(readFileSync(file, "utf8")).toBe("OVERWRITTEN");
+
+    loop.undoLastEdit();
+    expect(readFileSync(file, "utf8")).toBe("ORIGINAL");
+    rmSync(file);
+  });
+
+  it("records tool calls in the audit log", async () => {
+    const file = join(tmpdir(), `mm-audit-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`);
+    mockCreateProvider.mockReturnValue(toolThenDoneProvider("writeFile", { path: file, content: "x" }));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    await collect(loop.run("write"));
+
+    const entries = loop.getAuditEntries();
+    expect(entries.some((e) => e.toolName === "writeFile")).toBe(true);
+    if (existsSync(file)) rmSync(file);
+  });
+
+  it("blocks a dangerous shell command before execution (#139)", async () => {
+    mockCreateProvider.mockReturnValue(toolThenDoneProvider("runCommand", { command: "rm -rf /tmp/victim" }));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    const events = await collect(loop.run("clean up"));
+
+    const toolResult = events.find((e) => e.type === "tool-result") as { type: "tool-result"; output: string } | undefined;
+    expect(toolResult?.output).toMatch(/^Blocked:/);
+    // The blocked call is audited as a failure.
+    const audited = loop.getAuditEntries().find((e) => e.toolName === "runCommand");
+    expect(audited?.success).toBe(false);
+  });
+
+  it("undoLastEdit reports cleanly when there is nothing to undo", () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    expect(loop.undoLastEdit()).toMatch(/Nothing to undo/);
   });
 });

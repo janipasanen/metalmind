@@ -1,10 +1,13 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, createDiagnosticsTool } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, createDiagnosticsTool, AuditLog } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
+import { isAbsolute, resolve, join, dirname } from "node:path";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
-import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent } from "@metalmind/core";
+import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent, SafetyViolation } from "@metalmind/core";
+import type { ToolAuditEntry } from "@metalmind/tools";
 import { ModelRouter, estimateTokens, evaluateQuality, Coordinator, SafetyValidator } from "@metalmind/core";
 import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
 import type { ModelRoutingDecision } from "@metalmind/schemas";
@@ -45,6 +48,14 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** File-mutating tools whose targets are snapshotted before execution for /undo. */
+const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "deleteFile"]);
+
+interface EditSet {
+  turn: number;
+  files: Array<{ path: string; before: string | null }>;
 }
 
 interface TierTarget {
@@ -255,6 +266,8 @@ export class AgentLoop {
   private safetyValidator: SafetyValidator;
   private _forcedTier: ForcedTier = null;
   private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
+  private auditLog = new AuditLog();
+  private editStack: EditSet[] = [];
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
@@ -769,36 +782,44 @@ export class AgentLoop {
       this.history.push({ role: "assistant", content: assistantText, toolCalls: pendingToolCalls });
 
       for (const call of pendingToolCalls) {
-        // Safety validation: check if tool requires approval
-        if (this.safetyValidator.requiresApproval(call.toolName)) {
-          const input = JSON.parse(call.argumentsJson) as Record<string, unknown>;
-          const filePath = typeof input.path === "string" ? input.path : "";
-          if (filePath) {
-            const pathViolation = this.safetyValidator.validateFilePath(filePath);
-            if (pathViolation) {
-              const output = `Blocked: ${pathViolation.message}`;
-              this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
-              yield { type: "tool-result", output };
-              continue;
-            }
-          }
+        const inputObj = this.safeParseArgs(call.argumentsJson);
+
+        // Safety gate: block dangerous shell commands and secret-path access
+        // before any execution (#139).
+        const violation = this.preflightSafety(call.toolName, inputObj);
+        if (violation) {
+          const output = `Blocked: ${violation.message}`;
+          this.auditLog.log({
+            timestamp: new Date().toISOString(),
+            toolName: call.toolName,
+            input: inputObj,
+            output,
+            success: false,
+            error: violation.message,
+          });
+          this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
+          yield { type: "tool-result", output };
+          continue;
         }
+
+        // Snapshot affected files before any mutation so /undo can revert (#144).
+        this.snapshotEdit(this.turnCount, call.toolName, inputObj);
 
         let output: string;
         try {
-          const input = JSON.parse(call.argumentsJson) as unknown;
           const mcpEntry = this.mcpTools.get(call.toolName);
           if (mcpEntry) {
-            output = await mcpEntry.client.callTool(call.toolName, input);
+            output = await this.callMcpAudited(mcpEntry.client, call.toolName, inputObj);
           } else {
-            const result = await this.registry.execute(call.toolName, input, {
+            const result = await this.registry.execute(call.toolName, inputObj, {
               projectRoot: this.projectRoot,
               workspaceRoots: this.workspaceRoots,
+              auditLog: this.auditLog.log, // record every built-in tool call (#147)
             });
             output = typeof result === "string" ? result : JSON.stringify(result);
           }
         } catch (err) {
-          output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+          output = `Error: ${errText(err)}`;
         }
 
         yield { type: "tool-result", output };
@@ -813,6 +834,124 @@ export class AgentLoop {
 
     yield { type: "error", message: "Agent reached maximum iterations." };
     yield { type: "done" };
+  }
+
+  private safeParseArgs(json: string): Record<string, unknown> {
+    try {
+      const v = JSON.parse(json) as unknown;
+      return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** Pre-execution safety check: dangerous shell commands, secret/traversal paths. */
+  private preflightSafety(toolName: string, input: Record<string, unknown>): SafetyViolation | null {
+    if (toolName === "runCommand" && typeof input.command === "string") {
+      return (
+        this.safetyValidator.validateShellCommand(input.command) ??
+        this.safetyValidator.validateFilePath(input.command)
+      );
+    }
+    if (this.safetyValidator.requiresApproval(toolName)) {
+      const p =
+        typeof input.path === "string" ? input.path
+        : typeof input.source === "string" ? input.source
+        : typeof input.destination === "string" ? input.destination
+        : "";
+      if (p) return this.safetyValidator.validateFilePath(p);
+    }
+    return null;
+  }
+
+  private resolveProjectPath(p: string): string {
+    return isAbsolute(p) ? resolve(p) : resolve(join(this.projectRoot, p));
+  }
+
+  /** Snapshot file contents before a mutating tool runs, grouped per turn (#144). */
+  private snapshotEdit(turn: number, toolName: string, input: Record<string, unknown>): void {
+    const targets: string[] = [];
+    if (MUTATING_FILE_TOOLS.has(toolName) && typeof input.path === "string") {
+      targets.push(input.path);
+    } else if (toolName === "moveFile") {
+      if (typeof input.source === "string") targets.push(input.source);
+      if (typeof input.destination === "string") targets.push(input.destination);
+    } else {
+      return;
+    }
+
+    const files = targets.map((t) => {
+      const abs = this.resolveProjectPath(t);
+      let before: string | null = null;
+      try {
+        before = existsSync(abs) ? readFileSync(abs, "utf8") : null;
+      } catch {
+        before = null;
+      }
+      return { path: abs, before };
+    });
+    if (files.length === 0) return;
+
+    const top = this.editStack[this.editStack.length - 1];
+    if (top && top.turn === turn) top.files.push(...files);
+    else this.editStack.push({ turn, files });
+  }
+
+  /** Revert the most recent agent edit set, restoring pre-edit snapshots (#144). */
+  undoLastEdit(): string {
+    const set = this.editStack.pop();
+    if (!set) return "Nothing to undo — no agent edits recorded this session.";
+
+    // Earliest snapshot per path holds the pre-turn content.
+    const earliest = new Map<string, string | null>();
+    for (const f of set.files) if (!earliest.has(f.path)) earliest.set(f.path, f.before);
+
+    const reverted: string[] = [];
+    for (const [path, before] of earliest) {
+      try {
+        if (before === null) {
+          if (existsSync(path)) {
+            rmSync(path);
+            reverted.push(`deleted ${path} (was newly created)`);
+          }
+        } else {
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, before, "utf8");
+          reverted.push(`restored ${path}`);
+        }
+      } catch (err) {
+        reverted.push(`FAILED ${path}: ${errText(err)}`);
+      }
+    }
+    return `Undid last edit set:\n${reverted.map((r) => `  • ${r}`).join("\n")}`;
+  }
+
+  /** Invoke an MCP tool, recording the call in the audit log (#147). */
+  private async callMcpAudited(
+    client: McpHttpClient,
+    toolName: string,
+    input: Record<string, unknown>,
+  ): Promise<string> {
+    const timestamp = new Date().toISOString();
+    let output = "";
+    let success = true;
+    let error: string | undefined;
+    try {
+      output = await client.callTool(toolName, input);
+      return output;
+    } catch (err) {
+      success = false;
+      error = errText(err);
+      output = `Error: ${error}`;
+      return output;
+    } finally {
+      this.auditLog.log({ timestamp, toolName, input, output, success, error });
+    }
+  }
+
+  /** Recent tool-call audit entries for the in-session /audit view (#147). */
+  getAuditEntries(limit = 30): ToolAuditEntry[] {
+    return this.auditLog.getRecent(limit);
   }
 
   private buildSystemPrompt(): string {

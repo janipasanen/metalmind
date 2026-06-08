@@ -48,6 +48,31 @@ describe("SafetyValidator", () => {
       expect(result?.type).toBe("forbidden_command");
     });
 
+    it("should block rm recursive-force in any flag order", () => {
+      for (const cmd of [
+        "rm -rf build",
+        "rm -fr build",
+        "rm -r -f build",
+        "rm -f -r build",
+        "rm -Rf node_modules",
+        "rm --recursive --force dist",
+        "rm --force --recursive dist",
+      ]) {
+        expect(validator.validateShellCommand(cmd), cmd).not.toBeNull();
+      }
+    });
+
+    it("should block mkfs and dd to a device", () => {
+      expect(validator.validateShellCommand("mkfs.ext4 /dev/sda1")).not.toBeNull();
+      expect(validator.validateShellCommand("dd if=/dev/zero of=/dev/sda")).not.toBeNull();
+    });
+
+    it("should not block non-destructive rm usages", () => {
+      expect(validator.validateShellCommand("rm file.txt")).toBeNull();
+      expect(validator.validateShellCommand("rm -i file.txt")).toBeNull();
+      expect(validator.validateShellCommand("rm -r emptydir")).toBeNull(); // recursive but not forced
+    });
+
     it("should allow safe commands", () => {
       expect(validator.validateShellCommand("ls -la")).toBeNull();
       expect(validator.validateShellCommand("npm test")).toBeNull();

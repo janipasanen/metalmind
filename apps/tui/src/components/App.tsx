@@ -172,6 +172,8 @@ export default function App({ config }: AppProps) {
           "  /model <name>     - Switch model (e.g. /model gemma3:27b)",
           "  /apikey <key>     - Update API key for current provider",
           "  /workspace <path> - Allow AI to access an additional directory",
+          "  /undo             - Revert the agent's last applied edit set",
+          "  /audit            - Show this session's tool-call log",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
           "",
@@ -188,6 +190,30 @@ export default function App({ config }: AppProps) {
 
       if (input === "/clear") {
         agentRef.current?.clearHistory();
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/undo") {
+        const report = agentRef.current?.undoLastEdit() ?? "Agent not initialised.";
+        yield { type: "text", text: report } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/audit") {
+        const entries = agentRef.current?.getAuditEntries() ?? [];
+        if (entries.length === 0) {
+          yield { type: "text", text: "No tool calls recorded yet this session." } as const;
+        } else {
+          const lines = entries.map((e) => {
+            const status = e.success ? "✓" : "✗";
+            const inputSummary = JSON.stringify(e.input).slice(0, 80);
+            const errSuffix = e.error ? `  — ${e.error}` : "";
+            return `${status} ${e.toolName}(${inputSummary})${errSuffix}`;
+          });
+          yield { type: "text", text: `Tool-call audit (last ${entries.length}):\n${lines.join("\n")}` } as const;
+        }
         yield { type: "done" } as const;
         return;
       }

@@ -7,6 +7,8 @@ const SLASH_COMMANDS = [
   { syntax: "/model ",      description: "Switch model  e.g. /model gemma3:27b" },
   { syntax: "/apikey ",     description: "Update API key for current provider" },
   { syntax: "/workspace ",  description: "Allow AI to access a directory" },
+  { syntax: "/undo",        description: "Revert the agent's last edit set" },
+  { syntax: "/audit",       description: "Show this session's tool-call log" },
   { syntax: "/clear",       description: "Clear chat history" },
   { syntax: "/quit",        description: "Exit" },
 ];

@@ -56,6 +56,17 @@ export class SafetyValidator {
   }
 
   validateShellCommand(command: string): SafetyViolation | null {
+    // Robust recursive-force `rm` detection: catches -rf, -fr, -r -f, -f -r,
+    // -Rf, --recursive --force in any order/spacing (the regex list below only
+    // catches a subset). Triggers only when BOTH recursive and force are set.
+    if (this.isRecursiveForceRm(command)) {
+      return {
+        type: "forbidden_command",
+        message: `Dangerous command blocked: "${command}" (recursive force delete)`,
+        severity: "error",
+        details: { command, pattern: "rm -rf (any order)" },
+      };
+    }
     for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
       if (pattern.test(command)) {
         return {
@@ -67,6 +78,21 @@ export class SafetyValidator {
       }
     }
     return null;
+  }
+
+  /** True if the command invokes `rm` with both recursive and force flags, in any order. */
+  private isRecursiveForceRm(command: string): boolean {
+    // Inspect each `rm` invocation up to a command separator.
+    const re = /\brm\b([^;&|\n]*)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(command)) !== null) {
+      const args = m[1];
+      const flagLetters = (args.match(/-[a-zA-Z]+/g) ?? []).join("");
+      const recursive = /r/i.test(flagLetters) || /--recursive\b/.test(args);
+      const force = /f/i.test(flagLetters) || /--force\b/.test(args);
+      if (recursive && force) return true;
+    }
+    return false;
   }
 
   validateFilePath(path: string): SafetyViolation | null {
