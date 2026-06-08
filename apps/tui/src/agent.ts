@@ -789,12 +789,12 @@ export class AgentLoop {
    */
   private async *runWithCoordinator(userInput: string, toolDefs: unknown[], signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
     const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-    const { decision, localResult } = await this.coordinator!.processRequest(userInput, {
+    const { decision: coordDecision, localResult } = await this.coordinator!.processRequest(userInput, {
       inputTokenEstimate: historyTokens,
       input: { userMessage: userInput },
     });
 
-    this.onCoordinatorRouting?.(decision);
+    this.onCoordinatorRouting?.(coordDecision);
 
     // Use the classification to pick a tier, but never return the raw
     // classification JSON as the user's answer — that's just routing metadata.
@@ -807,14 +807,42 @@ export class AgentLoop {
     }
     // If classification failed, log it silently and fall back to cloud.
 
-    const tieredDecision = this.router
-      ? this.router.decisionForTier(targetTierKey, `coordinator classified: ${targetTierKey}`)
-      : null;
-    if (tieredDecision) this.onRoute?.(tieredDecision);
-    // Build a fallback chain so a cloud rate-limit/quota error descends to a
-    // local tier instead of ending the turn (the user has hit this repeatedly).
-    const chain = this.buildFallbackChain(tieredDecision, targetTierKey);
-    yield* this.agenticLoop(chain, toolDefs, { signal });
+    if (!this.router) {
+      yield* this.agenticLoop([this.getProvider(this.config.provider, this.config.model)], toolDefs, { signal });
+      return;
+    }
+
+    // Quality gate + escalation on the coordinator path (#158): collect the
+    // chosen tier's first response, evaluate it, and escalate UP to the next
+    // tier if it's weak/empty/errored — instead of returning a poor tier-1
+    // answer as-is. recordFailure feeds escalation thresholds + telemetry.
+    let decision = this.router.decisionForTier(targetTierKey, `coordinator classified: ${targetTierKey}`);
+    this.onRoute?.(decision);
+    let provider = this.getProvider(decision.provider, decision.modelId);
+    let attempt = await this.collectAttempt(provider, toolDefs, signal);
+    let verdict = evaluateQuality({ text: attempt.text, toolCalls: attempt.toolCalls, errored: attempt.errored });
+
+    while (!verdict.passed && decision.tier !== "tier3-cloud") {
+      this.router.recordFailure(decision.tier);
+      const nextTier = this.router.escalateTier(decision.tier);
+      decision = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
+      this.onRoute?.(decision);
+      yield { type: "text", text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n` };
+      provider = this.getProvider(decision.provider, decision.modelId);
+      attempt = await this.collectAttempt(provider, toolDefs, signal);
+      verdict = evaluateQuality({ text: attempt.text, toolCalls: attempt.toolCalls, errored: attempt.errored });
+    }
+
+    if (attempt.errored) {
+      // Errored even at the top tier — descend the fallback chain (cloud→local)
+      // so a rate-limit/quota error still completes the turn somewhere.
+      this.router.recordFailure(decision.tier);
+      const chain = this.buildFallbackChain(decision, decision.tier as "tier1-local" | "tier2-medium" | "tier3-cloud");
+      yield* this.agenticLoop(chain, toolDefs, { signal });
+      return;
+    }
+
+    yield* this.agenticLoop([provider], toolDefs, { primed: attempt, signal });
   }
 
   /** Ordered provider chain: chosen tier first, then descend to cheaper local tiers. */
