@@ -286,3 +286,45 @@ describe("multiEditTool (#151)", () => {
     expect(readFileSync(join(testDir, "a.ts"), "utf-8")).toBe(aBefore);
   });
 });
+
+import { replaceInProjectTool } from "./write-tools.js";
+
+describe("replaceInProjectTool (#164)", () => {
+  const testDir = join(tmpdir(), `metalmind-rip-${Date.now()}`);
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(join(testDir, "src"), { recursive: true });
+    mkdirSync(join(testDir, "node_modules"), { recursive: true });
+    writeFileSync(join(testDir, "src", "a.ts"), "const oldName = 1;\nuse(oldName);");
+    writeFileSync(join(testDir, "src", "b.ts"), "import { oldName } from './a';");
+    writeFileSync(join(testDir, "src", "c.ts"), "const unrelated = 2;");
+    writeFileSync(join(testDir, "node_modules", "vendor.ts"), "const oldName = 'vendored';");
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("replaces a string across all matching files but skips node_modules", async () => {
+    const result = await replaceInProjectTool.execute(
+      { find: "oldName", replace: "newName", isRegex: false },
+      { projectRoot: testDir },
+    );
+    expect(result).toMatch(/Replaced \d+ occurrence\(s\) across 2 file\(s\)/);
+    expect(readFileSync(join(testDir, "src", "a.ts"), "utf-8")).toBe("const newName = 1;\nuse(newName);");
+    expect(readFileSync(join(testDir, "src", "b.ts"), "utf-8")).toContain("newName");
+    // node_modules is excluded from the match phase
+    expect(readFileSync(join(testDir, "node_modules", "vendor.ts"), "utf-8")).toContain("oldName");
+    // unrelated file untouched
+    expect(readFileSync(join(testDir, "src", "c.ts"), "utf-8")).toBe("const unrelated = 2;");
+  });
+
+  it("reports when nothing matches", async () => {
+    const result = await replaceInProjectTool.execute(
+      { find: "NONEXISTENT_TOKEN_XYZ", replace: "x", isRegex: false },
+      { projectRoot: testDir },
+    );
+    expect(result).toMatch(/No files contain/);
+  });
+});

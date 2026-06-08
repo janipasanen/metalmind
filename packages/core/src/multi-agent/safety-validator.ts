@@ -160,6 +160,7 @@ export class SafetyValidator {
       "writeFile",
       "editFile",
       "multiEdit",
+      "replaceInProject",
       "createFile",
       "deleteFile",
       "moveFile",

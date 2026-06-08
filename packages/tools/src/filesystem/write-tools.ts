@@ -9,6 +9,7 @@ import {
   readFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { spawnSync } from "node:child_process";
 import type { AgentTool, ToolExecutionContext } from "../types.js";
 import { PathValidator } from "../path-validator.js";
 import { createTool } from "../types.js";
@@ -228,11 +229,97 @@ export const multiEditTool: AgentTool<z.input<typeof multiEditSchema>, string> =
   },
 });
 
+const replaceInProjectSchema = z.object({
+  find: z.string().min(1),
+  replace: z.string(),
+  include: z.string().optional().describe("Optional glob to limit which files are searched, e.g. '*.ts'."),
+  isRegex: z.boolean().default(false),
+});
+
+export const replaceInProjectTool: AgentTool<z.input<typeof replaceInProjectSchema>, string> = createTool({
+  toolName: "replaceInProject",
+  description:
+    "Find and replace a string (or regex) across ALL matching files in the project in one atomic operation (respects .gitignore, excludes node_modules/.git). Use for renames/refactors spanning many files. Rolls back every file on any failure.",
+  inputSchema: replaceInProjectSchema,
+  requiresConfirmation: true,
+  async execute(input: z.output<typeof replaceInProjectSchema>, ctx: ToolExecutionContext): Promise<string> {
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
+
+    // Match phase via ripgrep — respects ignore files, excludes vendored dirs.
+    const args = ["--files-with-matches"];
+    if (!input.isRegex) args.push("--fixed-strings");
+    args.push("--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
+    if (input.include) args.push("--glob", input.include);
+    args.push("-e", input.find, ".");
+
+    const rg = spawnSync("rg", args, {
+      cwd: ctx.projectRoot,
+      encoding: "utf-8",
+      timeout: 30_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    if (rg.error) {
+      throw new Error("replaceInProject requires ripgrep (rg). Install it (brew install ripgrep).");
+    }
+    if (rg.status !== 0 && rg.status !== 1) {
+      throw new Error(`Match phase failed: ${rg.stderr ?? `rg exit ${rg.status}`}`);
+    }
+
+    const matched = (rg.stdout ?? "").split("\n").filter(Boolean);
+    if (matched.length === 0) {
+      return `No files contain ${input.isRegex ? "pattern" : "string"} "${input.find}".`;
+    }
+
+    // Snapshot all targets up-front (resolveSafePath also enforces blocked paths).
+    const snapshots = new Map<string, string>();
+    for (const rel of matched) {
+      const safe = validator.resolveSafePath(rel);
+      if (existsSync(safe) && statSync(safe).isFile()) snapshots.set(safe, readFileSync(safe, "utf-8"));
+    }
+
+    const buffers = new Map(snapshots);
+    let totalReplacements = 0;
+    try {
+      const re = input.isRegex ? new RegExp(input.find, "g") : null;
+      for (const [path, content] of buffers) {
+        let count: number;
+        let updated: string;
+        if (re) {
+          count = (content.match(re) ?? []).length;
+          updated = content.replace(re, input.replace);
+        } else {
+          count = content.split(input.find).length - 1;
+          updated = content.split(input.find).join(input.replace);
+        }
+        if (count > 0) {
+          buffers.set(path, updated);
+          totalReplacements += count;
+        }
+      }
+      for (const [path, content] of buffers) writeFileSync(path, content, "utf-8");
+    } catch (err) {
+      for (const [path, original] of snapshots) {
+        try {
+          writeFileSync(path, original, "utf-8");
+        } catch {
+          // best-effort restore
+        }
+      }
+      throw new Error(
+        `replaceInProject rolled back — no files changed. Cause: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    return `Replaced ${totalReplacements} occurrence(s) across ${snapshots.size} file(s).`;
+  },
+});
+
 export const allWriteTools = [
   writeFileTool,
   createFileTool,
   editFileTool,
   multiEditTool,
+  replaceInProjectTool,
   deleteFileTool,
   moveFileTool,
   createDirectoryTool,
