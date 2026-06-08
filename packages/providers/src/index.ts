@@ -5,3 +5,10 @@ export { AnthropicProvider } from "./anthropic/anthropic-provider.js";
 export { MlxProvider } from "./mlx/mlx-provider.js";
 export type { MlxSidecarConfig } from "./mlx/mlx-provider.js";
 export { createProvider, DEFAULT_MLX_BASE_URL, DEFAULT_OLLAMA_CLOUD_URL } from "./provider-factory.js";
+export {
+  ProviderError,
+  isRetryableError,
+  isAbortError,
+  parseRetryAfter,
+  providerErrorFromResponse,
+} from "./normalization/provider-error.js";

@@ -156,8 +156,8 @@ export default function App({ config }: AppProps) {
     };
   }, [config]);
 
-  const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls } = useChat({
-    generateResponse: async function* (input: string) {
+  const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls, cancelStream } = useChat({
+    generateResponse: async function* (input: string, signal?: AbortSignal) {
       if (input === "/help") {
         yield { type: "text", text: [
           "Available commands:",
@@ -278,13 +278,18 @@ export default function App({ config }: AppProps) {
         return;
       }
 
-      yield* agentRef.current.run(input);
+      yield* agentRef.current.run(input, signal);
     },
   });
 
   const handleSend = useCallback((text: string) => sendMessage(text), [sendMessage]);
 
   useInput((input, key) => {
+    // Esc during a stream aborts the in-flight turn (truthful to the StatusBar hint).
+    if (key.escape && isStreaming) {
+      cancelStream();
+      return;
+    }
     if (key.tab) setFocusPanel(prev => prev === "chat" ? "input" : "chat");
     if (key.ctrl && input === "p") setShowCommandPalette(prev => !prev);
   });

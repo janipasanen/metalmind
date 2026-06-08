@@ -15,3 +15,15 @@ export { RepoMap } from "./context/repo-map.js";
 export type { RepoMapEntry, RepoMapOptions } from "./context/repo-map.js";
 export { parseSource, SymbolIndex } from "./code-intel/tree-sitter-parser.js";
 export type { SymbolInfo, ImportInfo, ParseResult } from "./code-intel/tree-sitter-parser.js";
+export {
+  findSymbolTool,
+  findReferencesTool,
+  getCallGraphTool,
+  allSymbolTools,
+  getReferenceIndex,
+  resetReferenceIndex,
+  indexFile,
+} from "./code-intel/symbol-tools.js";
+export { createDiagnosticsTool } from "./code-intel/diagnostics-tool.js";
+export { ReferenceIndex } from "./code-intel/reference-index.js";
+export type { ReferenceInfo } from "./code-intel/reference-index.js";

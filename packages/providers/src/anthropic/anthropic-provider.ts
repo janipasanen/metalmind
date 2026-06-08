@@ -6,6 +6,7 @@ import type {
   ModelStreamEvent,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
+import { providerErrorFromResponse } from "../normalization/provider-error.js";
 
 const anthropicCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -84,12 +85,11 @@ export class AnthropicProvider implements ModelProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(
-        `Anthropic chat failed: ${res.status} ${await res.text()}`,
-      );
+      throw await providerErrorFromResponse(res, "anthropic", "Anthropic chat failed");
     }
 
     const data = (await res.json()) as AnthropicMessageResponse;
@@ -121,12 +121,11 @@ export class AnthropicProvider implements ModelProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(
-        `Anthropic stream failed: ${res.status} ${await res.text()}`,
-      );
+      throw await providerErrorFromResponse(res, "anthropic", "Anthropic stream failed");
     }
     if (!res.body) throw new Error("Anthropic response has no body");
 
@@ -158,7 +157,19 @@ export class AnthropicProvider implements ModelProvider {
               index?: number;
               content_block?: { type: string; id?: string; name?: string };
               delta?: AnthropicStreamDelta & { type?: string; partial_json?: string };
+              error?: { type?: string; message?: string };
             };
+
+            // Anthropic emits {"type":"error","error":{...}} mid-stream (e.g.
+            // overloaded_error) after a 200 OK; surface it instead of a silent done.
+            if (chunk.type === "error") {
+              const e = chunk.error;
+              yield {
+                type: "error",
+                message: `Anthropic stream error: ${e?.message ?? e?.type ?? "unknown"}`,
+              };
+              return;
+            }
 
             if (
               chunk.type === "content_block_start" &&

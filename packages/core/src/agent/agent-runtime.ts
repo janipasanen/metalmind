@@ -13,11 +13,14 @@ export interface ChatCompletionRequest {
   readonly messages: AgentMessage[];
   readonly tools?: unknown[];
   readonly stream?: boolean;
+  /** Cancels the in-flight HTTP request when aborted (Esc-to-interrupt, timeouts). */
+  readonly signal?: AbortSignal;
 }
 
 export type ModelStreamEvent =
   | { type: "text"; text: string }
   | { type: "tool-call"; toolCall: { toolCallId: string; toolName: string; argumentsJson: string } }
+  | { type: "error"; message: string }
   | { type: "done" };
 
 export interface TokenCountRequest {

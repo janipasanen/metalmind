@@ -321,6 +321,67 @@ describe("OllamaProvider streaming", () => {
     const doneIdx = events.findIndex((e) => e.type === "done");
     expect(tcIdx).toBeLessThan(doneIdx);
   });
+
+  it("surfaces a mid-stream {\"error\":...} line as an error event", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createMockStream(
+        { message: { content: "partial" } },
+        { error: "Function call is missing a thought_signature" },
+      ),
+    );
+
+    const p = new OllamaProvider("test");
+    const events: ModelStreamEvent[] = [];
+    for await (const e of p.streamChatCompletion({ messages: [] })) {
+      events.push(e);
+    }
+
+    const errEvent = events.find((e) => e.type === "error");
+    expect(errEvent).toBeDefined();
+    expect((errEvent as { message: string }).message).toContain("thought_signature");
+    expect(events.some((e) => e.type === "done")).toBe(false);
+  });
+
+  it("uses the server-provided tool_call id as the toolCallId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createMockStream(
+        { message: { content: "", tool_calls: [{ id: "srv-abc123", function: { name: "readFile", arguments: { path: "/a.ts" } } }] } },
+        { done: true },
+      ),
+    );
+
+    const p = new OllamaProvider("test");
+    const events: ModelStreamEvent[] = [];
+    for await (const e of p.streamChatCompletion({ messages: [] })) {
+      events.push(e);
+    }
+
+    const toolCalls = events.filter((e) => e.type === "tool-call");
+    // The server id must be preserved so Gemini can recover the call's
+    // thought_signature on the follow-up turn (not replaced by a synthetic one).
+    expect(toolCalls[0].toolCall.toolCallId).toBe("srv-abc123");
+  });
+
+  it("falls back to a synthetic toolCallId when the server omits one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createMockStream(
+        { message: { content: "", tool_calls: [{ function: { name: "readFile", arguments: {} } }] } },
+        { done: true },
+      ),
+    );
+
+    const p = new OllamaProvider("test");
+    const events: ModelStreamEvent[] = [];
+    for await (const e of p.streamChatCompletion({ messages: [] })) {
+      events.push(e);
+    }
+
+    const toolCalls = events.filter((e) => e.type === "tool-call");
+    expect(toolCalls[0].toolCall.toolCallId).toMatch(/^ollama-tc-\d+$/);
+  });
 });
 
 describe("OllamaProvider message conversion", () => {
@@ -357,5 +418,38 @@ describe("OllamaProvider message conversion", () => {
     expect(assistant.tool_calls![0].function.arguments).toEqual({ path: "/a.ts" });
     expect(msgs[2].role).toBe("tool");
     expect(msgs[2].content).toBe("file contents");
+  });
+
+  it("echoes tool-call correlation ids for the Gemini thought_signature round-trip", async () => {
+    let requestBody: { messages: Array<Record<string, unknown>> } | null = null;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+      requestBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({ message: { role: "assistant", content: "OK" } }),
+      };
+    }));
+
+    const p = new OllamaProvider("gemini-3-flash-preview:cloud");
+    await p.completeChat({
+      messages: [
+        { role: "user", content: "read it" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ toolCallId: "srv-xyz", toolName: "readFile", argumentsJson: '{"path":"/a.ts"}' }],
+        },
+        { role: "tool", content: "file contents", metadata: { toolCallId: "srv-xyz" } },
+      ],
+    });
+
+    const msgs = requestBody!.messages;
+    const assistant = msgs[1] as { tool_calls?: Array<{ id?: string }> };
+    // Assistant tool_call must carry the server id...
+    expect(assistant.tool_calls![0].id).toBe("srv-xyz");
+    // ...and the tool result must echo it back so Gemini can match the pair.
+    expect(msgs[2].tool_call_id).toBe("srv-xyz");
   });
 });

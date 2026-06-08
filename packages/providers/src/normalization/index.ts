@@ -4,3 +4,10 @@ export { MessageNormalizer } from "./message-normalizer.js";
 export { RetryManager } from "./retry-policy.js";
 export type { RetryPolicy } from "./retry-policy.js";
 export type { NormalizationResult } from "./message-normalizer.js";
+export {
+  ProviderError,
+  isRetryableError,
+  isAbortError,
+  parseRetryAfter,
+  providerErrorFromResponse,
+} from "./provider-error.js";

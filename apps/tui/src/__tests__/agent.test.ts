@@ -56,6 +56,18 @@ vi.mock("@metalmind/providers", () => ({
     }
     async sendTask() { return "{}"; }
   },
+  ProviderError: class extends Error {
+    status?: number;
+    retryAfterMs?: number;
+    constructor(message: string, opts: { status?: number; retryAfterMs?: number } = {}) {
+      super(message);
+      this.status = opts.status;
+      this.retryAfterMs = opts.retryAfterMs;
+    }
+    get retryable() { return this.status === undefined || this.status === 429 || this.status >= 500; }
+  },
+  isAbortError: (err: unknown) => err instanceof Error && (err.name === "AbortError" || /aborted/i.test(err.message)),
+  isRetryableError: (err: unknown) => !(err instanceof Error && /\b4\d\d\b/.test(err.message)),
 }));
 
 vi.mock("@metalmind/tools", () => ({
@@ -72,6 +84,13 @@ vi.mock("@metalmind/tools", () => ({
   allWriteTools: [],
   allGitTools: [],
   runShellTools: [],
+  allSymbolTools: [],
+  createDiagnosticsTool: () => ({
+    toolName: "getDiagnostics",
+    description: "",
+    inputSchema: { _def: { typeName: "ZodObject", shape: () => ({}) } },
+    execute: async () => "",
+  }),
 }));
 
 import { createProvider } from "@metalmind/providers";

@@ -8,6 +8,7 @@ import type {
   TokenCountResponse,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
+import { providerErrorFromResponse } from "../normalization/provider-error.js";
 
 const mlxCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -114,10 +115,11 @@ export class MlxProvider implements ModelProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(`MLX chat failed: ${res.status} ${await res.text()}`);
+      throw await providerErrorFromResponse(res, "mlx", "MLX chat failed");
     }
 
     const data = (await res.json()) as {
@@ -147,10 +149,11 @@ export class MlxProvider implements ModelProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(`MLX stream failed: ${res.status} ${await res.text()}`);
+      throw await providerErrorFromResponse(res, "mlx", "MLX stream failed");
     }
     if (!res.body) throw new Error("MLX response has no body");
 

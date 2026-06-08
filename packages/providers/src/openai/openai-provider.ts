@@ -6,6 +6,7 @@ import type {
   ModelStreamEvent,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
+import { providerErrorFromResponse } from "../normalization/provider-error.js";
 
 const openaiCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -30,6 +31,13 @@ function convertToOpenAIMessage(msg: AgentMessage) {
         arguments: tc.argumentsJson,
       },
     }));
+  }
+  // OpenAI requires `tool_call_id` on tool-role messages to pair a result with
+  // its call; without it the second request 400s. The agent loop stores the id
+  // in metadata.toolCallId (mirrors the Ollama fix).
+  if (msg.role === "tool") {
+    const id = msg.metadata?.["toolCallId"];
+    if (typeof id === "string") m.tool_call_id = id;
   }
   return m;
 }
@@ -69,12 +77,11 @@ export class OpenAIProvider implements ModelProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(
-        `OpenAI chat failed: ${res.status} ${await res.text()}`,
-      );
+      throw await providerErrorFromResponse(res, "openai", "OpenAI chat failed");
     }
 
     const data = (await res.json()) as {
@@ -127,12 +134,11 @@ export class OpenAIProvider implements ModelProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(
-        `OpenAI stream failed: ${res.status} ${await res.text()}`,
-      );
+      throw await providerErrorFromResponse(res, "openai", "OpenAI stream failed");
     }
     if (!res.body) throw new Error("OpenAI response has no body");
 
@@ -184,6 +190,7 @@ export class OpenAIProvider implements ModelProvider {
 
           try {
             const chunk = JSON.parse(jsonStr) as {
+              error?: { message?: string } | string;
               choices?: Array<{
                 delta?: {
                   content?: string;
@@ -195,6 +202,17 @@ export class OpenAIProvider implements ModelProvider {
                 };
               }>;
             };
+
+            // A mid-stream error chunk arrives after a 200 OK; surface it
+            // instead of ending the turn as if it succeeded.
+            if (chunk.error) {
+              const msg =
+                typeof chunk.error === "string"
+                  ? chunk.error
+                  : chunk.error.message ?? JSON.stringify(chunk.error);
+              yield { type: "error", message: `OpenAI stream error: ${msg}` };
+              return;
+            }
 
             const delta = chunk.choices?.[0]?.delta;
             if (delta?.content) {

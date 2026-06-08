@@ -240,5 +240,26 @@ describe("AnthropicProvider", () => {
       expect(toolCalls).toHaveLength(1);
       expect(toolCalls[0].toolCall.toolName).toBe("readFile");
     });
+
+    it("surfaces a mid-stream overloaded_error as an error event", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createAnthropicSSE(
+          { type: "content_block_delta", delta: { type: "text_delta", text: "hi" } },
+          { type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+        ),
+      );
+
+      const p = new AnthropicProvider("claude", "sk-test");
+      const events: ModelStreamEvent[] = [];
+      for await (const e of p.streamChatCompletion({ messages: [] })) {
+        events.push(e);
+      }
+
+      const errEvent = events.find((e) => e.type === "error");
+      expect(errEvent).toBeDefined();
+      expect((errEvent as { message: string }).message).toContain("Overloaded");
+      expect(events.some((e) => e.type === "done")).toBe(false);
+    });
   });
 });

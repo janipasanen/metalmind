@@ -8,11 +8,17 @@ import type {
   TokenCountResponse,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
+import { providerErrorFromResponse } from "../normalization/provider-error.js";
 
 interface OllamaMessage {
   role: string;
   content: string;
+  /** Correlation id for a tool result, paired with the assistant tool_call's id.
+   *  Gemini (via Ollama Cloud) keys each call's thought_signature to this id and
+   *  returns a 400 if the call/response pair can't be matched on a follow-up turn. */
+  tool_call_id?: string;
   tool_calls?: Array<{
+    id?: string;
     function: { name: string; arguments: Record<string, unknown> };
   }>;
 }
@@ -89,10 +95,11 @@ export class OllamaProvider implements ModelProvider {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(`Ollama chat failed: ${res.status} ${await res.text()}`);
+      throw await providerErrorFromResponse(res, "ollama", "Ollama chat failed");
     }
 
     const data = (await res.json()) as OllamaChatResponse;
@@ -126,10 +133,11 @@ export class OllamaProvider implements ModelProvider {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
+      signal: request.signal,
     });
 
     if (!res.ok) {
-      throw new Error(`Ollama stream failed: ${res.status} ${await res.text()}`);
+      throw await providerErrorFromResponse(res, "ollama", "Ollama stream failed");
     }
 
     if (!res.body) {
@@ -153,7 +161,14 @@ export class OllamaProvider implements ModelProvider {
           if (!line.trim()) continue;
 
           try {
-            const data = JSON.parse(line) as OllamaChatResponse & { done?: boolean };
+            const data = JSON.parse(line) as OllamaChatResponse & { done?: boolean; error?: string };
+
+            // Ollama reports mid-stream failures as a {"error":"..."} line after
+            // a 200 OK; surface it instead of ending the turn as success.
+            if (data.error) {
+              yield { type: "error", message: `Ollama stream error: ${data.error}` };
+              return;
+            }
 
             if (data.message?.content) {
               yield { type: "text", text: data.message.content };
@@ -163,7 +178,7 @@ export class OllamaProvider implements ModelProvider {
               yield {
                 type: "tool-call",
                 toolCall: {
-                  toolCallId: `ollama-tc-${this.toolCallCounter++}`,
+                  toolCallId: tc.id ?? `ollama-tc-${this.toolCallCounter++}`,
                   toolName: tc.function.name,
                   argumentsJson: JSON.stringify(tc.function.arguments ?? {}),
                 },
@@ -182,7 +197,11 @@ export class OllamaProvider implements ModelProvider {
 
       if (buffer.trim()) {
         try {
-          const data = JSON.parse(buffer) as OllamaChatResponse & { done?: boolean };
+          const data = JSON.parse(buffer) as OllamaChatResponse & { done?: boolean; error?: string };
+          if (data.error) {
+            yield { type: "error", message: `Ollama stream error: ${data.error}` };
+            return;
+          }
           if (data.message?.content) {
             yield { type: "text", text: data.message.content };
           }
@@ -190,7 +209,7 @@ export class OllamaProvider implements ModelProvider {
             yield {
               type: "tool-call",
               toolCall: {
-                toolCallId: `ollama-tc-${this.toolCallCounter++}`,
+                toolCallId: tc.id ?? `ollama-tc-${this.toolCallCounter++}`,
                 toolName: tc.function.name,
                 argumentsJson: JSON.stringify(tc.function.arguments ?? {}),
               },
@@ -216,11 +235,19 @@ export class OllamaProvider implements ModelProvider {
       const out: OllamaMessage = { role: msg.role, content: msg.content };
       if (msg.toolCalls?.length) {
         out.tool_calls = msg.toolCalls.map((tc) => ({
+          id: tc.toolCallId,
           function: {
             name: tc.toolName,
             arguments: safeParseArgs(tc.argumentsJson),
           },
         }));
+      }
+      // Echo the tool-call correlation id back on tool results. Gemini (via
+      // Ollama Cloud) keys each function call's thought_signature to this id and
+      // rejects the follow-up turn with a 400 if the pair can't be matched.
+      const toolCallId = msg.metadata?.["toolCallId"];
+      if (msg.role === "tool" && typeof toolCallId === "string") {
+        out.tool_call_id = toolCallId;
       }
       return out;
     });

@@ -1,10 +1,10 @@
-import { createProvider, OllamaWorkerProvider } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools } from "@metalmind/tools";
+import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, createDiagnosticsTool } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
-import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities } from "@metalmind/core";
+import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent } from "@metalmind/core";
 import { ModelRouter, estimateTokens, evaluateQuality, Coordinator, SafetyValidator } from "@metalmind/core";
 import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
 import type { ModelRoutingDecision } from "@metalmind/schemas";
@@ -18,13 +18,33 @@ interface BufferedAttempt {
   errorMessage?: string;
 }
 
-function buildRegistry(): ToolRegistry {
+function buildRegistry(projectRoot: string): ToolRegistry {
   const registry = new ToolRegistry();
   for (const tool of allReadOnlyTools) registry.register(tool);
   for (const tool of allWriteTools) registry.register(tool);
   for (const tool of allGitTools) registry.register(tool);
   for (const tool of runShellTools) registry.register(tool);
+  // Code-intelligence tools: symbol/reference/call-graph navigation + LSP diagnostics.
+  for (const tool of allSymbolTools) registry.register(tool);
+  registry.register(createDiagnosticsTool(projectRoot));
   return registry;
+}
+
+/** Exponential backoff for transient retries: 0.5s, 1s, 2s, … capped at 8s. */
+function backoffMs(attempt: number): number {
+  return Math.min(8000, 500 * 2 ** attempt);
+}
+
+/** Cancellable sleep — resolves early if the signal aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 interface TierTarget {
@@ -243,8 +263,8 @@ export class AgentLoop {
     this.onCoordinatorPhase = options.onCoordinatorPhase;
     this.onCoordinatorRouting = options.onCoordinatorRouting;
     this.onCoordinatorPlan = options.onCoordinatorPlan;
-    this.registry = buildRegistry();
     this.projectRoot = process.cwd();
+    this.registry = buildRegistry(this.projectRoot);
     this.safetyValidator = new SafetyValidator(this.projectRoot);
     this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
   }
@@ -435,25 +455,103 @@ export class AgentLoop {
   }
 
   /** Run a single model response fully into a buffer (no streaming to the user). */
-  private async collectAttempt(provider: ModelProvider, toolDefs: unknown[]): Promise<BufferedAttempt> {
+  private async collectAttempt(
+    provider: ModelProvider,
+    toolDefs: unknown[],
+    signal?: AbortSignal,
+  ): Promise<BufferedAttempt> {
     const attempt: BufferedAttempt = { text: "", toolCalls: [], errored: false };
     try {
       for await (const event of provider.streamChatCompletion({
         messages: [...this.history],
         tools: toolDefs,
+        signal,
       })) {
         if (event.type === "text") attempt.text += event.text;
         else if (event.type === "tool-call") attempt.toolCalls.push(event.toolCall);
-        else if (event.type === "done") break;
+        else if (event.type === "error") {
+          attempt.errored = true;
+          attempt.errorMessage = event.message;
+          break;
+        } else if (event.type === "done") break;
       }
     } catch (err) {
       attempt.errored = true;
-      attempt.errorMessage = err instanceof Error ? err.message : String(err);
+      attempt.errorMessage = errText(err);
     }
     return attempt;
   }
 
-  async *run(userInput: string): AsyncGenerator<ChatStreamEvent> {
+  /**
+   * Stream one model response with resilience: retry transient failures
+   * (429/5xx/network) with backoff on the same provider, then fall back to the
+   * next provider in the chain. Retry/fallback only happens before any content
+   * has been emitted for the current attempt — a partially-streamed turn is not
+   * retried. A provider `error` event is treated as a thrown error. User aborts
+   * stop cleanly without retry.
+   */
+  private async *streamResilient(
+    providers: ModelProvider[],
+    toolDefs: unknown[],
+    signal?: AbortSignal,
+  ): AsyncGenerator<ModelStreamEvent> {
+    const maxRetries = 2;
+    let lastErr: unknown;
+
+    for (let p = 0; p < providers.length; p++) {
+      const provider = providers[p];
+      const moreProviders = p < providers.length - 1;
+
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (signal?.aborted) return;
+        let emitted = false;
+        try {
+          for await (const ev of provider.streamChatCompletion({
+            messages: [...this.history],
+            tools: toolDefs,
+            signal,
+          })) {
+            if (ev.type === "error") throw new ProviderError(ev.message);
+            if (ev.type === "text" || ev.type === "tool-call") emitted = true;
+            yield ev;
+            if (ev.type === "done") return;
+          }
+          return; // stream ended without an explicit done
+        } catch (err) {
+          lastErr = err;
+          if (isAbortError(err) || signal?.aborted) return; // user cancelled
+          // Already streamed content this attempt → cannot safely retry.
+          if (emitted) {
+            yield { type: "error", message: errText(err) };
+            return;
+          }
+          const retryable = isRetryableError(err);
+          if (retryable && attempt < maxRetries) {
+            const waitMs =
+              err instanceof ProviderError && err.retryAfterMs
+                ? err.retryAfterMs
+                : backoffMs(attempt);
+            await sleep(waitMs, signal);
+            continue; // retry same provider
+          }
+          if (retryable && moreProviders) {
+            yield {
+              type: "text",
+              text: `\n[${provider.providerName} unavailable (${errText(err)}); falling back to ${providers[p + 1].providerName}]\n`,
+            };
+            break; // advance to next provider in the chain
+          }
+          // Fatal, or all retries/providers exhausted.
+          yield { type: "error", message: errText(err) };
+          return;
+        }
+      }
+    }
+
+    yield { type: "error", message: lastErr ? errText(lastErr) : "all providers failed" };
+  }
+
+  async *run(userInput: string, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     }
@@ -462,7 +560,7 @@ export class AgentLoop {
     const toolDefs = this.toolDefs();
 
     if (!this.router) {
-      yield* this.agenticLoop(this.getProvider(this.config.provider, this.config.model), toolDefs);
+      yield* this.agenticLoop([this.getProvider(this.config.provider, this.config.model)], toolDefs, { signal });
       return;
     }
 
@@ -481,12 +579,13 @@ export class AgentLoop {
 
       this.onRoute?.(decision);
       const provider = this.getProvider(decision.provider, decision.modelId);
-      yield* this.agenticLoop(provider, toolDefs);
+      // Forced tier: respect the user's explicit choice — retry, but no auto-fallback.
+      yield* this.agenticLoop([provider], toolDefs, { signal });
       return;
     }
 
     if (this.coordinator) {
-      yield* this.runWithCoordinator(userInput, toolDefs);
+      yield* this.runWithCoordinator(userInput, toolDefs, signal);
       return;
     }
 
@@ -501,7 +600,7 @@ export class AgentLoop {
     this.onRoute?.(decision);
 
     let provider = this.getProvider(decision.provider, decision.modelId);
-    let attempt = await this.collectAttempt(provider, toolDefs);
+    let attempt = await this.collectAttempt(provider, toolDefs, signal);
     let verdict = evaluateQuality({
       text: attempt.text,
       toolCalls: attempt.toolCalls,
@@ -517,7 +616,7 @@ export class AgentLoop {
         text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n`,
       };
       provider = this.getProvider(decision.provider, decision.modelId);
-      attempt = await this.collectAttempt(provider, toolDefs);
+      attempt = await this.collectAttempt(provider, toolDefs, signal);
       verdict = evaluateQuality({
         text: attempt.text,
         toolCalls: attempt.toolCalls,
@@ -531,7 +630,7 @@ export class AgentLoop {
       return;
     }
 
-    yield* this.agenticLoop(provider, toolDefs, attempt);
+    yield* this.agenticLoop([provider], toolDefs, { primed: attempt, signal });
   }
 
   /** Run a turn through the multi-agent Coordinator.
@@ -540,7 +639,7 @@ export class AgentLoop {
    * the result is routing metadata, never a user-facing response.
    * After classification the real work always goes to the appropriate tier.
    */
-  private async *runWithCoordinator(userInput: string, toolDefs: unknown[]): AsyncGenerator<ChatStreamEvent> {
+  private async *runWithCoordinator(userInput: string, toolDefs: unknown[], signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
     const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const { decision, localResult } = await this.coordinator!.processRequest(userInput, {
       inputTokenEstimate: historyTokens,
@@ -563,27 +662,64 @@ export class AgentLoop {
     const tieredDecision = this.router
       ? this.router.decisionForTier(targetTierKey, `coordinator classified: ${targetTierKey}`)
       : null;
-    const provider = tieredDecision
-      ? this.getProvider(tieredDecision.provider, tieredDecision.modelId)
-      : this.getProvider(this.config.provider, this.config.model);
     if (tieredDecision) this.onRoute?.(tieredDecision);
-    yield* this.agenticLoop(provider, toolDefs);
+    // Build a fallback chain so a cloud rate-limit/quota error descends to a
+    // local tier instead of ending the turn (the user has hit this repeatedly).
+    const chain = this.buildFallbackChain(tieredDecision, targetTierKey);
+    yield* this.agenticLoop(chain, toolDefs, { signal });
+  }
+
+  /** Ordered provider chain: chosen tier first, then descend to cheaper local tiers. */
+  private buildFallbackChain(
+    primary: RouteDecision | null,
+    tierKey: "tier1-local" | "tier2-medium" | "tier3-cloud",
+  ): ModelProvider[] {
+    const chain: ModelProvider[] = [];
+    const seen = new Set<string>();
+    const add = (provider: string, model: string) => {
+      const key = `${provider}/${model}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      chain.push(this.getProvider(provider, model));
+    };
+
+    if (primary) add(primary.provider, primary.modelId);
+    else add(this.config.provider, this.config.model);
+
+    if (this.router) {
+      const descent: Array<"tier2-medium" | "tier1-local"> =
+        tierKey === "tier3-cloud" ? ["tier2-medium", "tier1-local"]
+        : tierKey === "tier2-medium" ? ["tier1-local"]
+        : [];
+      for (const t of descent) {
+        try {
+          const d = this.router.decisionForTier(t, "fallback");
+          add(d.provider, d.modelId);
+        } catch {
+          // tier not configured — skip
+        }
+      }
+    }
+    return chain;
   }
 
   /**
-   * Drive the agentic tool loop with a chosen provider. An optional `primed`
-   * first response (already collected + gated) is emitted before streaming resumes.
+   * Drive the agentic tool loop with a provider chain (primary + fallbacks).
+   * An optional `primed` first response (already collected + gated) is emitted
+   * before streaming resumes. A `signal` cancels the turn at each boundary.
    */
   private async *agenticLoop(
-    provider: ModelProvider,
+    providers: ModelProvider[],
     toolDefs: unknown[],
-    primed?: BufferedAttempt,
+    opts: { primed?: BufferedAttempt; signal?: AbortSignal } = {},
   ): AsyncGenerator<ChatStreamEvent> {
+    const signal = opts.signal;
     let iterations = 0;
     const maxIterations = 10;
-    let pending = primed;
+    let pending = opts.primed;
 
     while (iterations < maxIterations) {
+      if (signal?.aborted) { yield { type: "done" }; return; }
       iterations++;
       let assistantText = "";
       const pendingToolCalls: Array<{ toolCallId: string; toolName: string; argumentsJson: string }> = [];
@@ -597,26 +733,28 @@ export class AgentLoop {
         }
         pending = undefined;
       } else {
-        try {
-          for await (const event of provider.streamChatCompletion({
-            messages: [...this.history],
-            tools: toolDefs,
-          })) {
-            if (event.type === "text") {
-              assistantText += event.text;
-              yield { type: "text", text: event.text };
-            } else if (event.type === "tool-call") {
-              pendingToolCalls.push(event.toolCall);
-              yield {
-                type: "tool-call",
-                toolCall: { toolName: event.toolCall.toolName, argumentsJson: event.toolCall.argumentsJson },
-              };
-            } else if (event.type === "done") {
-              break;
-            }
+        let sawError = false;
+        for await (const event of this.streamResilient(providers, toolDefs, signal)) {
+          if (event.type === "text") {
+            assistantText += event.text;
+            yield { type: "text", text: event.text };
+          } else if (event.type === "tool-call") {
+            pendingToolCalls.push(event.toolCall);
+            yield {
+              type: "tool-call",
+              toolCall: { toolName: event.toolCall.toolName, argumentsJson: event.toolCall.argumentsJson },
+            };
+          } else if (event.type === "error") {
+            yield { type: "error", message: event.message };
+            sawError = true;
+          } else if (event.type === "done") {
+            break;
           }
-        } catch (err) {
-          yield { type: "error", message: err instanceof Error ? err.message : String(err) };
+        }
+        if (sawError) { yield { type: "done" }; return; }
+        // User cancelled mid-stream: persist partial output and end cleanly.
+        if (signal?.aborted) {
+          if (assistantText) this.history.push({ role: "assistant", content: assistantText });
           yield { type: "done" };
           return;
         }

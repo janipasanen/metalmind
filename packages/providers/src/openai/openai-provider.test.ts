@@ -182,6 +182,28 @@ describe("OpenAIProvider", () => {
       await expect(iter.next()).rejects.toThrow(/OpenAI stream failed/);
     });
 
+    it("surfaces a mid-stream error chunk as an error event (not a silent done)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createSSEStream(
+          { choices: [{ delta: { content: "partial" } }] },
+          { error: { message: "model overloaded" } },
+        ),
+      );
+
+      const p = new OpenAIProvider("gpt-4", "sk-test");
+      const events: ModelStreamEvent[] = [];
+      for await (const e of p.streamChatCompletion({ messages: [] })) {
+        events.push(e);
+      }
+
+      const errEvent = events.find((e) => e.type === "error");
+      expect(errEvent).toBeDefined();
+      expect((errEvent as { message: string }).message).toContain("model overloaded");
+      // The stream must stop at the error, not emit a success `done`.
+      expect(events.some((e) => e.type === "done")).toBe(false);
+    });
+
     it("throws when response has no body", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: true,
@@ -267,6 +289,40 @@ describe("OpenAIProvider", () => {
       const toolCalls = events.filter((e) => e.type === "tool-call");
       expect(toolCalls).toHaveLength(2);
       expect(toolCalls.map((t) => t.toolCall.toolName)).toEqual(["readFile", "gitStatus"]);
+    });
+  });
+
+  describe("message conversion", () => {
+    it("emits id on assistant tool_calls and tool_call_id on tool results", async () => {
+      let requestBody: { messages: Array<Record<string, unknown>> } | null = null;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+        requestBody = JSON.parse(opts.body as string);
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({ choices: [{ message: { role: "assistant", content: "ok" } }] }),
+        };
+      }));
+
+      const p = new OpenAIProvider("gpt-4", "sk-test");
+      await p.completeChat({
+        messages: [
+          { role: "user", content: "read it" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ toolCallId: "call_abc", toolName: "readFile", argumentsJson: '{"path":"/a.ts"}' }],
+          },
+          { role: "tool", content: "file contents", metadata: { toolCallId: "call_abc" } },
+        ],
+      });
+
+      const msgs = requestBody!.messages;
+      const assistant = msgs[1] as { tool_calls?: Array<{ id?: string }> };
+      // Without these two ids OpenAI 400s on the second turn of a tool conversation.
+      expect(assistant.tool_calls![0].id).toBe("call_abc");
+      expect(msgs[2].tool_call_id).toBe("call_abc");
     });
   });
 });

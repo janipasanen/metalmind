@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { ChatMessage } from "../components/App.js";
 
 export interface UseChatOptions {
-  generateResponse: (input: string) => AsyncGenerator<ChatStreamEvent>;
+  generateResponse: (input: string, signal?: AbortSignal) => AsyncGenerator<ChatStreamEvent>;
 }
 
 export type ChatStreamEvent =
@@ -49,7 +49,7 @@ export function useChat(options: UseChatOptions) {
           output?: string;
         }> = [];
 
-        for await (const event of options.generateResponse(userContent)) {
+        for await (const event of options.generateResponse(userContent, abortController.signal)) {
           if (abortController.signal.aborted) break;
 
           switch (event.type) {
