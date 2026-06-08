@@ -18,6 +18,8 @@ export interface RepoMapV2Options {
   maxFiles?: number;
   includeSymbols?: boolean;
   includeImports?: boolean;
+  /** Share an external reference index (so symbol tools and the map stay unified). */
+  referenceIndex?: ReferenceIndex;
 }
 
 const DEFAULT_EXCLUDE = [
@@ -32,12 +34,13 @@ const DEFAULT_EXCLUDE = [
 export class RepoMapV2 {
   private root: string;
   private options: RepoMapV2Options;
-  private referenceIndex = new ReferenceIndex();
+  private referenceIndex: ReferenceIndex;
   private dependencyGraph = new Map<string, Set<string>>(); // file -> files it imports from
 
   constructor(root: string, options: RepoMapV2Options = {}) {
     this.root = root;
     this.options = options;
+    this.referenceIndex = options.referenceIndex ?? new ReferenceIndex();
   }
 
   /**

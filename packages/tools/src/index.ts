@@ -11,7 +11,7 @@ export { allWebTools, webFetchTool, webSearchTool } from "./web/web-tools.js";
 export { allGitTools, gitStatusTool, gitDiffTool, gitDiffFileTool, gitAddTool, gitCommitTool } from "./git/git-tools.js";
 export { CommitMessageGenerator } from "./git/commit-generator.js";
 export type { CommitSuggestion } from "./git/commit-generator.js";
-export { runShellTools, runCommandTool, runTestsTool, runBuildTool, runLintTool } from "./shell/shell-tools.js";
+export { runShellTools, runCommandTool, runTestsTool, runBuildTool, runLintTool, runFormatTool } from "./shell/shell-tools.js";
 export { RepoMap } from "./context/repo-map.js";
 export type { RepoMapEntry, RepoMapOptions } from "./context/repo-map.js";
 export { parseSource, SymbolIndex } from "./code-intel/tree-sitter-parser.js";

@@ -86,3 +86,37 @@ describe("runBuildTool / runLintTool", () => {
     expect(result).toContain("lint ok");
   });
 });
+
+import { runFormatTool } from "./shell-tools.js";
+
+describe("runFormatTool (#162)", () => {
+  const testDir = join(tmpdir(), `metalmind-fmt-${Date.now()}`);
+  beforeEach(() => { rmSync(testDir, { recursive: true, force: true }); mkdirSync(testDir, { recursive: true }); });
+  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); });
+
+  it("runs a configurable format command", async () => {
+    // Use a harmless command standing in for prettier.
+    const result = await runFormatTool.execute(
+      { command: "echo formatted", timeout: 10000 },
+      { projectRoot: testDir },
+    );
+    expect(result).toContain("formatted");
+    expect(result).toContain("Format complete");
+  });
+
+  it("appends the path to the command when provided", async () => {
+    const result = await runFormatTool.execute(
+      { command: "echo", path: "src/x.ts", timeout: 10000 },
+      { projectRoot: testDir },
+    );
+    expect(result).toContain("src/x.ts");
+  });
+
+  it("reports failure without throwing when the command exits non-zero", async () => {
+    const result = await runFormatTool.execute(
+      { command: "false", timeout: 10000 },
+      { projectRoot: testDir },
+    );
+    expect(result).toContain("Format failed");
+  });
+});

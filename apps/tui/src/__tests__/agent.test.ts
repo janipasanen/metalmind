@@ -88,6 +88,9 @@ vi.mock("@metalmind/tools", async () => {
     async execute(name: string, input: Record<string, unknown>, context?: { auditLog?: (e: unknown) => void }) {
       context?.auditLog?.({ timestamp: "t", toolName: name, input, output: "ok", success: true });
       if (name === "successTool") return "tool output";
+      if (name === "getDiagnostics") {
+        return (globalThis as Record<string, unknown>).__MM_DIAGNOSTICS__ ?? "No diagnostics found.";
+      }
       if (name === "writeFile") {
         fs.writeFileSync(String(input.path), String(input.content ?? ""));
         return `wrote ${input.path}`;
@@ -101,6 +104,8 @@ vi.mock("@metalmind/tools", async () => {
   runShellTools: [],
   allSymbolTools: [],
   allWebTools: [],
+  indexFile: () => {},
+  getReferenceIndex: () => ({ indexFile: () => {} }),
   RepoMapV2: class {
     toTreeString() { return "src/\n  index.ts [exports: 2] (function)"; }
     getSummary() { return "summary"; }
@@ -859,5 +864,65 @@ describe("AgentLoop M5 integration", () => {
     const names = defs.map((d) => d.name);
     expect(names).toContain("serverA:search");
     expect(names).toContain("serverB:search");
+  });
+});
+
+describe("AgentLoop post-edit diagnostics (M5 #152)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function writeThenDone(file: string) {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "tc1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: file, content: "foo;" }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("appends diagnostics for the edited file to the tool result", async () => {
+    const root = join(tmpdir(), `mm-diag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "x.ts");
+    (globalThis as Record<string, unknown>).__MM_DIAGNOSTICS__ = "error TS2304: Cannot find name 'foo'.";
+
+    mockCreateProvider.mockReturnValue(writeThenDone(file));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const events = await collect(loop.run("write x"));
+
+    const toolResult = events.find((e) => e.type === "tool-result") as { type: "tool-result"; output: string } | undefined;
+    expect(toolResult?.output).toContain("[diagnostics:");
+    expect(toolResult?.output).toContain("Cannot find name 'foo'");
+
+    delete (globalThis as Record<string, unknown>).__MM_DIAGNOSTICS__;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("does not append a diagnostics block when there are none", async () => {
+    const root = join(tmpdir(), `mm-diag2-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "y.ts");
+    delete (globalThis as Record<string, unknown>).__MM_DIAGNOSTICS__; // mock returns "No diagnostics found."
+
+    mockCreateProvider.mockReturnValue(writeThenDone(file));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const events = await collect(loop.run("write y"));
+
+    const toolResult = events.find((e) => e.type === "tool-result") as { type: "tool-result"; output: string } | undefined;
+    expect(toolResult?.output).not.toContain("[diagnostics:");
+    rmSync(root, { recursive: true, force: true });
   });
 });

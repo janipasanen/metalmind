@@ -90,6 +90,12 @@ export interface UserConfig {
   permissions: {
     autoApprove: boolean;
   };
+  editor?: {
+    /** When true, run `formatCommand` on each file the agent writes/edits. */
+    formatOnWrite?: boolean;
+    /** Formatter command; the changed file path is appended. Default: prettier. */
+    formatCommand?: string;
+  };
 }
 
 export interface McpServerConfig {
@@ -124,6 +130,10 @@ const DEFAULT_XDG_CONFIG: UserConfig = {
   recentModels: [],
   permissions: {
     autoApprove: false,
+  },
+  editor: {
+    formatOnWrite: false,
+    formatCommand: "npx prettier --write",
   },
 };
 

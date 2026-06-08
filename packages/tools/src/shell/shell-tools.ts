@@ -142,4 +142,35 @@ export const runLintTool: AgentTool<z.input<typeof runLintSchema>, string> = cre
   },
 });
 
-export const runShellTools = [runCommandTool, runTestsTool, runBuildTool, runLintTool];
+export const runFormatSchema = z.object({
+  command: z.string().default("npx prettier --write"),
+  path: z.string().optional().describe("File or glob to format; appended to the command."),
+  timeout: z.number().int().min(1000).default(120_000),
+});
+
+export const runFormatTool: AgentTool<z.input<typeof runFormatSchema>, string> = createTool({
+  toolName: "runFormat",
+  description:
+    "Run a code formatter (default: prettier --write). Pass `path` to format a specific file or glob; otherwise formats per the command's own defaults.",
+  inputSchema: runFormatSchema,
+  requiresConfirmation: false,
+  async execute(input: z.output<typeof runFormatSchema>, ctx: ToolExecutionContext): Promise<string> {
+    const cmd = input.path ? `${input.command} ${JSON.stringify(input.path)}` : input.command;
+    const start = Date.now();
+    try {
+      const result = execSync(cmd, {
+        cwd: ctx.projectRoot,
+        encoding: "utf-8",
+        timeout: input.timeout,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      return `${result.trim()}\n--- Format complete, ${Date.now() - start}ms`;
+    } catch (err: unknown) {
+      const execErr = err as { stdout?: string; stderr?: string };
+      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Format failed, ${Date.now() - start}ms`;
+    }
+  },
+});
+
+export const runShellTools = [runCommandTool, runTestsTool, runBuildTool, runLintTool, runFormatTool];

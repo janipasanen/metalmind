@@ -1,10 +1,11 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, createDiagnosticsTool, AuditLog, RepoMapV2 } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, createDiagnosticsTool, AuditLog, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
-import { isAbsolute, resolve, join, dirname } from "node:path";
+import { isAbsolute, resolve, join, dirname, extname } from "node:path";
+import { execSync } from "node:child_process";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent, SafetyViolation } from "@metalmind/core";
 import type { ToolAuditEntry } from "@metalmind/tools";
@@ -57,6 +58,12 @@ const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "del
 
 /** Project memory/rules files auto-loaded into the system prompt, in priority order. */
 const PROJECT_MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", ".metalmind/MEMORY.md", "CONVENTIONS.md", ".cursorrules"];
+
+/** Directories skipped by the startup symbol-index crawl. */
+const INDEX_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "out", "coverage", ".turbo", "target", ".venv", "__pycache__"]);
+/** Source extensions the symbol indexer understands. */
+const INDEXABLE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java", ".rb", ".swift", ".c", ".cc", ".cpp", ".h", ".hpp"]);
+const INDEX_MAX_FILES = 400;
 
 interface EditSet {
   turn: number;
@@ -291,6 +298,9 @@ export class AgentLoop {
     this.registry = buildRegistry(this.projectRoot);
     this.safetyValidator = new SafetyValidator(this.projectRoot);
     this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
+    // Warm the symbol/reference index in the background so findSymbol/findReferences
+    // return results without blocking startup (#149).
+    this.indexProjectInBackground();
   }
 
   get coordinatorInstance(): Coordinator | null {
@@ -837,6 +847,8 @@ export class AgentLoop {
               auditLog: this.auditLog.log, // record every built-in tool call (#147)
             });
             output = typeof result === "string" ? result : JSON.stringify(result);
+            // Post-edit feedback loop: re-index, optional format, append diagnostics.
+            output = await this.postEditHook(call.toolName, inputObj, output);
           }
         } catch (err) {
           output = `Error: ${errText(err)}`;
@@ -1024,6 +1036,8 @@ export class AgentLoop {
         maxDepth: 4,
         includeSymbols: true,
         includeImports: false,
+        // Share the symbol tools' index so generating the map also populates it (#149).
+        referenceIndex: getReferenceIndex(),
       });
       const tree = map.toTreeString();
       if (!tree.trim()) return null;
@@ -1031,6 +1045,108 @@ export class AgentLoop {
       return tree.length > MAX_CHARS ? `${tree.slice(0, MAX_CHARS)}\n…(map truncated)` : tree;
     } catch {
       return null; // never block a turn on map generation
+    }
+  }
+
+  /** Bounded startup crawl that populates the shared symbol/reference index (#149). */
+  private indexProjectInBackground(): void {
+    void Promise.resolve().then(() => {
+      try {
+        const files: string[] = [];
+        this.collectSourceFiles(this.projectRoot, files);
+        for (const f of files) {
+          try {
+            indexFile(f);
+          } catch {
+            // skip unparseable file
+          }
+        }
+      } catch {
+        // never let indexing crash the agent
+      }
+    });
+  }
+
+  private collectSourceFiles(dir: string, acc: string[]): void {
+    if (acc.length >= INDEX_MAX_FILES) return;
+    let entries: Array<{ name: string; isDirectory(): boolean }>;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean }>;
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (acc.length >= INDEX_MAX_FILES) return;
+      if (entry.isDirectory()) {
+        if (INDEX_IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        this.collectSourceFiles(join(dir, entry.name), acc);
+      } else if (INDEXABLE_EXTS.has(extname(entry.name))) {
+        acc.push(join(dir, entry.name));
+      }
+    }
+  }
+
+  /** Files a tool mutated, for re-indexing / format-on-write / diagnostics. */
+  private changedPaths(toolName: string, input: Record<string, unknown>): string[] {
+    if (MUTATING_FILE_TOOLS.has(toolName) && typeof input.path === "string") return [input.path];
+    if (toolName === "moveFile" && typeof input.destination === "string") return [input.destination];
+    if (toolName === "multiEdit" && Array.isArray(input.edits)) {
+      return [...new Set((input.edits as Array<{ path?: unknown }>).filter((e) => typeof e?.path === "string").map((e) => e.path as string))];
+    }
+    return [];
+  }
+
+  /**
+   * After a successful file mutation: keep the symbol index fresh (#149),
+   * optionally format the file (#162), and append type/lint diagnostics to the
+   * tool result so the model gets a feedback loop without an explicit build (#152).
+   */
+  private async postEditHook(toolName: string, input: Record<string, unknown>, output: string): Promise<string> {
+    if (output.startsWith("Error") || output.startsWith("Blocked")) return output;
+    const paths = this.changedPaths(toolName, input);
+    if (paths.length === 0) return output;
+
+    const editorCfg = loadXdgConfig().editor;
+    for (const p of paths) {
+      const abs = this.resolveProjectPath(p);
+      // Format-on-write (#162), opt-in via config.
+      if (editorCfg?.formatOnWrite) {
+        try {
+          const cmd = `${editorCfg.formatCommand || "npx prettier --write"} ${JSON.stringify(abs)}`;
+          execSync(cmd, { cwd: this.projectRoot, timeout: 20_000, stdio: "ignore" });
+        } catch {
+          // formatter missing/failed — leave the file as written
+        }
+      }
+      // Re-index the (possibly formatted) file so lookups reflect the change (#149).
+      try {
+        indexFile(abs);
+      } catch {
+        // ignore
+      }
+    }
+
+    // Surface diagnostics for the first changed file (#152), bounded + best-effort.
+    const diag = await this.diagnosticsFor(paths[0]);
+    return diag ? `${output}\n\n[diagnostics: ${paths[0]}]\n${diag}` : output;
+  }
+
+  /** Run the diagnostics tool for one file, time-bounded so it never hangs the loop (#152). */
+  private async diagnosticsFor(relPath: string): Promise<string | null> {
+    try {
+      const result = await Promise.race([
+        this.registry.execute("getDiagnostics", { filePath: relPath }, {
+          projectRoot: this.projectRoot,
+          workspaceRoots: this.workspaceRoots,
+        }),
+        new Promise<null>((res) => setTimeout(() => res(null), 6000)),
+      ]);
+      if (result == null) return null;
+      const text = typeof result === "string" ? result : JSON.stringify(result);
+      if (/no diagnostics/i.test(text)) return null; // suppress boilerplate
+      return text.length > 2000 ? `${text.slice(0, 2000)}\n…(truncated)` : text;
+    } catch {
+      return null;
     }
   }
 
