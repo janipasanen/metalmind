@@ -160,7 +160,12 @@ export class OllamaProvider implements ModelProvider {
           if (!line.trim()) continue;
 
           try {
-            const data = JSON.parse(line) as OllamaChatResponse & { done?: boolean; error?: string };
+            const data = JSON.parse(line) as OllamaChatResponse & {
+              done?: boolean;
+              error?: string;
+              prompt_eval_count?: number;
+              eval_count?: number;
+            };
 
             // Ollama reports mid-stream failures as a {"error":"..."} line after
             // a 200 OK; surface it instead of ending the turn as success.
@@ -185,6 +190,9 @@ export class OllamaProvider implements ModelProvider {
             }
 
             if (data.done) {
+              if (data.prompt_eval_count != null || data.eval_count != null) {
+                yield { type: "usage", usage: { inputTokens: data.prompt_eval_count, outputTokens: data.eval_count } };
+              }
               yield { type: "done" };
               return;
             }
@@ -196,10 +204,18 @@ export class OllamaProvider implements ModelProvider {
 
       if (buffer.trim()) {
         try {
-          const data = JSON.parse(buffer) as OllamaChatResponse & { done?: boolean; error?: string };
+          const data = JSON.parse(buffer) as OllamaChatResponse & {
+            done?: boolean;
+            error?: string;
+            prompt_eval_count?: number;
+            eval_count?: number;
+          };
           if (data.error) {
             yield { type: "error", message: `Ollama stream error: ${data.error}` };
             return;
+          }
+          if (data.prompt_eval_count != null || data.eval_count != null) {
+            yield { type: "usage", usage: { inputTokens: data.prompt_eval_count, outputTokens: data.eval_count } };
           }
           if (data.message?.content) {
             yield { type: "text", text: data.message.content };

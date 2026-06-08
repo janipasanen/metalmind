@@ -4,6 +4,8 @@ import TextInput from "ink-text-input";
 
 const SLASH_COMMANDS = [
   { syntax: "/help",        description: "Show available commands" },
+  { syntax: "/tier ",       description: "Force a tier: 1|2|3|auto [model]" },
+  { syntax: "/cost",        description: "Show this session's token usage" },
   { syntax: "/model ",      description: "Switch model  e.g. /model gemma3:27b" },
   { syntax: "/apikey ",     description: "Update API key for current provider" },
   { syntax: "/workspace ",  description: "Allow AI to access a directory" },

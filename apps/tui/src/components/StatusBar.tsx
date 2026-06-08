@@ -12,6 +12,7 @@ interface StatusBarProps {
   isStreaming?: boolean;
   mcpServers?: McpServerStatus[];
   context?: { used: number; limit: number };
+  usage?: { inputTokens: number; outputTokens: number };
 }
 
 export default function StatusBar({
@@ -19,6 +20,7 @@ export default function StatusBar({
   isStreaming = false,
   mcpServers,
   context,
+  usage,
 }: StatusBarProps) {
   const connectedServers = mcpServers?.filter((s) => s.connected) ?? [];
   const totalMcpTools = connectedServers.reduce((sum, s) => sum + s.toolCount, 0);
@@ -33,6 +35,13 @@ export default function StatusBar({
     ctxColor = pct >= 90 ? "red" : pct >= 75 ? "yellow" : undefined;
   }
 
+  // Session token usage meter (#157).
+  let usageLabel = "";
+  if (usage && (usage.inputTokens > 0 || usage.outputTokens > 0)) {
+    const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+    usageLabel = ` | ↑${k(usage.inputTokens)} ↓${k(usage.outputTokens)}`;
+  }
+
   return (
     <Box marginTop={1} flexDirection="column">
       <Box>
@@ -43,6 +52,7 @@ export default function StatusBar({
           {focusPanel === "input" ? "Input" : "Chat"} active
         </Text>
         {ctxLabel ? <Text color={ctxColor} dimColor={!ctxColor}>{ctxLabel}</Text> : null}
+        {usageLabel ? <Text dimColor>{usageLabel}</Text> : null}
       </Box>
       {connectedServers.length > 0 && (
         <Box>

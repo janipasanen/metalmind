@@ -175,9 +175,13 @@ export class MlxProvider implements ModelProvider {
             const chunk = JSON.parse(line) as {
               message?: { content: string };
               done?: boolean;
+              usage?: { prompt_tokens?: number; completion_tokens?: number };
             };
 
             if (chunk.done) {
+              if (chunk.usage) {
+                yield { type: "usage", usage: { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens } };
+              }
               yield { type: "done" };
               return;
             }

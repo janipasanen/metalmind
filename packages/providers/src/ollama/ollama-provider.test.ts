@@ -322,6 +322,21 @@ describe("OllamaProvider streaming", () => {
     expect(tcIdx).toBeLessThan(doneIdx);
   });
 
+  it("emits a usage event from prompt_eval_count/eval_count on done (#157)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createMockStream(
+        { message: { content: "hi" } },
+        { done: true, prompt_eval_count: 42, eval_count: 17 },
+      ),
+    );
+    const p = new OllamaProvider("test");
+    const events: ModelStreamEvent[] = [];
+    for await (const e of p.streamChatCompletion({ messages: [] })) events.push(e);
+    const usage = events.find((e) => e.type === "usage") as { type: "usage"; usage: { inputTokens?: number; outputTokens?: number } } | undefined;
+    expect(usage?.usage).toEqual({ inputTokens: 42, outputTokens: 17 });
+  });
+
   it("surfaces a mid-stream {\"error\":...} line as an error event", async () => {
     vi.stubGlobal(
       "fetch",

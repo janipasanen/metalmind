@@ -190,6 +190,7 @@ export class OpenAIProvider implements ModelProvider {
           try {
             const chunk = JSON.parse(jsonStr) as {
               error?: { message?: string } | string;
+              usage?: { prompt_tokens?: number; completion_tokens?: number };
               choices?: Array<{
                 delta?: {
                   content?: string;
@@ -211,6 +212,13 @@ export class OpenAIProvider implements ModelProvider {
                   : chunk.error.message ?? JSON.stringify(chunk.error);
               yield { type: "error", message: `OpenAI stream error: ${msg}` };
               return;
+            }
+
+            if (chunk.usage) {
+              yield {
+                type: "usage",
+                usage: { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens },
+              };
             }
 
             const delta = chunk.choices?.[0]?.delta;

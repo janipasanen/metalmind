@@ -1211,3 +1211,35 @@ describe("AgentLoop /compact and /export (M4)", () => {
     expect(await loop.compactHistory()).toMatch(/nothing to compact/i);
   });
 });
+
+describe("AgentLoop token usage (M6 #157)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("accumulates provider usage events and reports via getSessionUsage + onUsage", async () => {
+    const usageCb = vi.fn();
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: "hi" };
+        yield { type: "usage", usage: { inputTokens: 100, outputTokens: 25 } };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop(
+      { provider: "stub", model: "test", explicit: true },
+      { projectRoot: tmpdir(), onUsage: usageCb },
+    );
+    await collect(loop.run("a"));
+    await collect(loop.run("b")); // second turn accumulates
+
+    expect(loop.getSessionUsage()).toEqual({ inputTokens: 200, outputTokens: 50 });
+    expect(usageCb).toHaveBeenLastCalledWith({ inputTokens: 200, outputTokens: 50 });
+  });
+});

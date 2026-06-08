@@ -242,7 +242,17 @@ export class AnthropicProvider implements ModelProvider {
               content_block?: { type: string; id?: string; name?: string };
               delta?: AnthropicStreamDelta & { type?: string; partial_json?: string };
               error?: { type?: string; message?: string };
+              message?: { usage?: { input_tokens?: number } };
+              usage?: { output_tokens?: number };
             };
+
+            // Token usage: input_tokens on message_start, output_tokens on message_delta.
+            if (chunk.type === "message_start" && chunk.message?.usage) {
+              yield { type: "usage", usage: { inputTokens: chunk.message.usage.input_tokens } };
+            }
+            if (chunk.type === "message_delta" && chunk.usage) {
+              yield { type: "usage", usage: { outputTokens: chunk.usage.output_tokens } };
+            }
 
             // Anthropic emits {"type":"error","error":{...}} mid-stream (e.g.
             // overloaded_error) after a 200 OK; surface it instead of a silent done.

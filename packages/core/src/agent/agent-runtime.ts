@@ -21,6 +21,7 @@ export type ModelStreamEvent =
   | { type: "text"; text: string }
   | { type: "tool-call"; toolCall: { toolCallId: string; toolName: string; argumentsJson: string } }
   | { type: "error"; message: string }
+  | { type: "usage"; usage: { inputTokens?: number; outputTokens?: number } }
   | { type: "done" };
 
 export interface TokenCountRequest {

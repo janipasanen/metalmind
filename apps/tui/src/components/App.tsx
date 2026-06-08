@@ -86,6 +86,7 @@ export default function App({ config }: AppProps) {
   const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
   const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | undefined>(undefined);
   const [pendingApproval, setPendingApproval] = useState<{ req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null>(null);
+  const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number } | undefined>(undefined);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
   const [localWorkerAvailable, setLocalWorkerAvailable] = useState(false);
@@ -108,6 +109,7 @@ export default function App({ config }: AppProps) {
           onContextUsage: (used, limit) => setContextUsage({ used, limit }),
           onApprovalRequest: (req) =>
             new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
+          onUsage: (u) => setUsage(u),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -151,6 +153,7 @@ export default function App({ config }: AppProps) {
           onContextUsage: (used, limit) => setContextUsage({ used, limit }),
           onApprovalRequest: (req) =>
             new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
+          onUsage: (u) => setUsage(u),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -206,6 +209,7 @@ export default function App({ config }: AppProps) {
           "  /resume [id]      - List saved sessions, or resume one by id (also --continue/--resume on launch)",
           "  /compact          - Summarize older turns to reclaim context window",
           "  /export [md|json] - Export the conversation transcript to a file",
+          "  /cost             - Show this session's token usage",
           "  /undo             - Revert the agent's last applied edit set",
           "  /audit            - Show this session's tool-call log",
           "  /clear            - Clear chat history",
@@ -294,6 +298,16 @@ export default function App({ config }: AppProps) {
         else if (sub === "activate" && name) text = agent.activateSkill(name);
         else if (sub === "deactivate" && name) text = agent.deactivateSkill(name);
         else text = "Usage: /skill list | /skill activate <name> | /skill deactivate <name>";
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/cost") {
+        const u = agentRef.current?.getSessionUsage();
+        const text = u
+          ? `Session token usage:\n  input:  ${u.inputTokens.toLocaleString()}\n  output: ${u.outputTokens.toLocaleString()}\n  total:  ${(u.inputTokens + u.outputTokens).toLocaleString()}`
+          : "Agent not initialised.";
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;
@@ -458,7 +472,7 @@ export default function App({ config }: AppProps) {
       />
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
       <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null} />
-      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} />
+      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} />
 
       {showCommandPalette && (
         <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} accent={theme.colors.accent}

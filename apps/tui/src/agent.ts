@@ -292,6 +292,8 @@ export interface AgentLoopOptions {
   onCoordinatorPlan?: (steps: PlanStep[]) => void;
   /** Called before each turn with the history token usage vs the active model's limit. */
   onContextUsage?: (used: number, limit: number) => void;
+  /** Called when real token usage is reported by a provider (#157). */
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
   /** Override the project root (defaults to process.cwd()); used for tests. */
   projectRoot?: string;
   /** Called before a side-effecting tool runs; resolves with the user's decision (#138). */
@@ -306,6 +308,8 @@ export class AgentLoop {
   private onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
   private onCoordinatorPlan?: (steps: PlanStep[]) => void;
   private onContextUsage?: (used: number, limit: number) => void;
+  private onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+  private sessionUsage = { inputTokens: 0, outputTokens: 0 };
   private registry: ToolRegistry;
   private history: AgentMessage[] = [];
   private projectRoot: string;
@@ -336,6 +340,7 @@ export class AgentLoop {
     this.onCoordinatorRouting = options.onCoordinatorRouting;
     this.onCoordinatorPlan = options.onCoordinatorPlan;
     this.onContextUsage = options.onContextUsage;
+    this.onUsage = options.onUsage;
     this.onApprovalRequest = options.onApprovalRequest;
     this.autoApprove = loadXdgConfig().permissions?.autoApprove ?? false;
     this.projectRoot = options.projectRoot ?? process.cwd();
@@ -602,6 +607,7 @@ export class AgentLoop {
       })) {
         if (event.type === "text") attempt.text += event.text;
         else if (event.type === "tool-call") attempt.toolCalls.push(event.toolCall);
+        else if (event.type === "usage") this.recordUsage(event.usage);
         else if (event.type === "error") {
           attempt.errored = true;
           attempt.errorMessage = event.message;
@@ -888,6 +894,8 @@ export class AgentLoop {
               type: "tool-call",
               toolCall: { toolName: event.toolCall.toolName, argumentsJson: event.toolCall.argumentsJson },
             };
+          } else if (event.type === "usage") {
+            this.recordUsage(event.usage);
           } else if (event.type === "error") {
             yield { type: "error", message: event.message };
             sawError = true;
@@ -1180,6 +1188,18 @@ export class AgentLoop {
   /** Recent tool-call audit entries for the in-session /audit view (#147). */
   getAuditEntries(limit = 30): ToolAuditEntry[] {
     return this.auditLog.getRecent(limit);
+  }
+
+  /** Accumulate real provider token usage and notify the UI meter (#157). */
+  private recordUsage(usage: { inputTokens?: number; outputTokens?: number }): void {
+    if (usage.inputTokens) this.sessionUsage.inputTokens += usage.inputTokens;
+    if (usage.outputTokens) this.sessionUsage.outputTokens += usage.outputTokens;
+    this.onUsage?.({ ...this.sessionUsage });
+  }
+
+  /** Session token usage totals, for the /cost summary (#157). */
+  getSessionUsage(): { inputTokens: number; outputTokens: number } {
+    return { ...this.sessionUsage };
   }
 
   /** Window history to fit the active model's context limit, reporting usage (#141). */
