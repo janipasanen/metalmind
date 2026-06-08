@@ -161,10 +161,78 @@ export const createDirectoryTool: AgentTool<z.input<typeof createDirectorySchema
   },
 });
 
+const multiEditSchema = z.object({
+  edits: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        oldString: z.string().min(1),
+        newString: z.string(),
+        replaceAll: z.boolean().default(false),
+      }),
+    )
+    .min(1)
+    .describe("Edits applied as a single all-or-nothing transaction across one or more files."),
+});
+
+export const multiEditTool: AgentTool<z.input<typeof multiEditSchema>, string> = createTool({
+  toolName: "multiEdit",
+  description:
+    "Apply a batch of find/replace edits across one or more files atomically. If any edit fails, ALL files are rolled back to their pre-operation state. Use for refactors that touch many sites.",
+  inputSchema: multiEditSchema,
+  requiresConfirmation: true,
+  async execute(input: z.output<typeof multiEditSchema>, ctx: ToolExecutionContext): Promise<string> {
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
+
+    // Snapshot every distinct target file up-front so we can roll back on any failure.
+    const snapshots = new Map<string, string>();
+    const resolved = input.edits.map((e) => ({ ...e, safePath: validator.resolveSafePath(e.path) }));
+    for (const e of resolved) {
+      if (!existsSync(e.safePath) || !statSync(e.safePath).isFile()) {
+        throw new Error(`File not found: ${e.path}`);
+      }
+      if (!snapshots.has(e.safePath)) snapshots.set(e.safePath, readFileSync(e.safePath, "utf-8"));
+    }
+
+    // Apply sequentially against in-memory buffers; only flush to disk if all succeed.
+    const buffers = new Map(snapshots);
+    try {
+      for (const e of resolved) {
+        const current = buffers.get(e.safePath)!;
+        const count = current.split(e.oldString).length - 1;
+        if (count === 0) throw new Error(`String not found in ${e.path}:\n${e.oldString}`);
+        if (!e.replaceAll && count > 1) {
+          throw new Error(`Found ${count} occurrences in ${e.path}. Use replaceAll: true or be more specific.`);
+        }
+        buffers.set(
+          e.safePath,
+          e.replaceAll ? current.replaceAll(e.oldString, e.newString) : current.replace(e.oldString, e.newString),
+        );
+      }
+      // All edits computed successfully → commit every changed file.
+      for (const [path, content] of buffers) writeFileSync(path, content, "utf-8");
+    } catch (err) {
+      // Roll back anything already written to guarantee all-or-nothing.
+      for (const [path, original] of snapshots) {
+        try {
+          writeFileSync(path, original, "utf-8");
+        } catch {
+          // best-effort restore
+        }
+      }
+      throw new Error(`multiEdit rolled back — no files changed. Cause: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const fileCount = snapshots.size;
+    return `Applied ${input.edits.length} edit(s) across ${fileCount} file(s) atomically.`;
+  },
+});
+
 export const allWriteTools = [
   writeFileTool,
   createFileTool,
   editFileTool,
+  multiEditTool,
   deleteFileTool,
   moveFileTool,
   createDirectoryTool,

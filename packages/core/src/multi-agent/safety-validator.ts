@@ -159,6 +159,7 @@ export class SafetyValidator {
     const APPROVAL_REQUIRED_TOOLS = new Set([
       "writeFile",
       "editFile",
+      "multiEdit",
       "createFile",
       "deleteFile",
       "moveFile",

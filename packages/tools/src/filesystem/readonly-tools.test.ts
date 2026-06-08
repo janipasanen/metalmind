@@ -150,3 +150,36 @@ describe("searchInFilesTool", () => {
     ).rejects.toThrow(/blocked path/);
   });
 });
+
+import { findFilesTool } from "./readonly-tools.js";
+
+describe("findFilesTool (#163)", () => {
+  const testDir = join(tmpdir(), `metalmind-ff-${Date.now()}`);
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(join(testDir, "src"), { recursive: true });
+    mkdirSync(join(testDir, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(testDir, "src", "index.ts"), "export const a = 1;");
+    writeFileSync(join(testDir, "src", "util.ts"), "export const b = 2;");
+    writeFileSync(join(testDir, "node_modules", "dep", "index.ts"), "module.exports = {};");
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("finds matching files but excludes node_modules", async () => {
+    const out = await findFilesTool.execute({ pattern: "*.ts", path: "." }, { projectRoot: testDir });
+    const files = out.split("\n").filter(Boolean);
+    expect(files).toContain("src/index.ts");
+    expect(files).toContain("src/util.ts");
+    expect(files.some((f) => f.includes("node_modules"))).toBe(false);
+  });
+
+  it("supports path-aware ** globs", async () => {
+    const out = await findFilesTool.execute({ pattern: "src/**/*.ts", path: "." }, { projectRoot: testDir });
+    expect(out).toContain("src/index.ts");
+    expect(out.includes("node_modules")).toBe(false);
+  });
+});

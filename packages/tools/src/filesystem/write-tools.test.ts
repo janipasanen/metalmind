@@ -216,3 +216,73 @@ describe("createDirectoryTool", () => {
     ).rejects.toThrow(/already exists/);
   });
 });
+
+import { multiEditTool } from "./write-tools.js";
+
+describe("multiEditTool (#151)", () => {
+  const testDir = join(tmpdir(), `metalmind-me-${Date.now()}`);
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(join(testDir, "a.ts"), "const x = 1;\nexport { x };");
+    writeFileSync(join(testDir, "b.ts"), "import { x } from './a';\nconsole.log(x);");
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("applies edits across multiple files atomically", async () => {
+    const result = await multiEditTool.execute(
+      {
+        edits: [
+          { path: "a.ts", oldString: "const x = 1;", newString: "const value = 1;", replaceAll: false },
+          { path: "a.ts", oldString: "export { x };", newString: "export { value };", replaceAll: false },
+          { path: "b.ts", oldString: "x", newString: "value", replaceAll: true },
+        ],
+      },
+      { projectRoot: testDir },
+    );
+    expect(result).toMatch(/Applied 3 edit\(s\) across 2 file\(s\)/);
+    expect(readFileSync(join(testDir, "a.ts"), "utf-8")).toBe("const value = 1;\nexport { value };");
+    expect(readFileSync(join(testDir, "b.ts"), "utf-8")).toContain("console.log(value);");
+  });
+
+  it("rolls back ALL files when one edit fails mid-batch", async () => {
+    const aBefore = readFileSync(join(testDir, "a.ts"), "utf-8");
+    const bBefore = readFileSync(join(testDir, "b.ts"), "utf-8");
+
+    await expect(
+      multiEditTool.execute(
+        {
+          edits: [
+            { path: "a.ts", oldString: "const x = 1;", newString: "const y = 1;", replaceAll: false },
+            { path: "b.ts", oldString: "THIS_STRING_DOES_NOT_EXIST", newString: "nope", replaceAll: false },
+          ],
+        },
+        { projectRoot: testDir },
+      ),
+    ).rejects.toThrow(/rolled back/);
+
+    // Neither file changed — a.ts edit was reverted even though it would have succeeded.
+    expect(readFileSync(join(testDir, "a.ts"), "utf-8")).toBe(aBefore);
+    expect(readFileSync(join(testDir, "b.ts"), "utf-8")).toBe(bBefore);
+  });
+
+  it("fails atomically when a target file does not exist", async () => {
+    const aBefore = readFileSync(join(testDir, "a.ts"), "utf-8");
+    await expect(
+      multiEditTool.execute(
+        {
+          edits: [
+            { path: "a.ts", oldString: "const x = 1;", newString: "const z = 1;", replaceAll: false },
+            { path: "missing.ts", oldString: "foo", newString: "bar", replaceAll: false },
+          ],
+        },
+        { projectRoot: testDir },
+      ),
+    ).rejects.toThrow(/File not found/);
+    expect(readFileSync(join(testDir, "a.ts"), "utf-8")).toBe(aBefore);
+  });
+});

@@ -100,6 +100,7 @@ vi.mock("@metalmind/tools", async () => {
   allGitTools: [],
   runShellTools: [],
   allSymbolTools: [],
+  allWebTools: [],
   createDiagnosticsTool: () => ({
     toolName: "getDiagnostics",
     description: "",

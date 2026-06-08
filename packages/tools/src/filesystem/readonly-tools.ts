@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { AgentTool, ToolExecutionContext } from "../types.js";
 import { PathValidator } from "../path-validator.js";
@@ -73,11 +73,16 @@ function globMatch(name: string, pattern: string): boolean {
   return regex.test(name);
 }
 
+const WALK_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "out", "coverage", ".turbo", "target"]);
+
 function walkDir(dir: string): string[] {
   const results: string[] = [];
   try {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
+        // Fallback-walk ignores: skip vendored/build/VCS dirs so we don't walk
+        // (and then truncate) node_modules on large repos.
+        if (WALK_IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
         results.push(...walkDir(join(dir, entry.name)));
       } else {
         results.push(join(dir, entry.name));
@@ -95,9 +100,12 @@ export const findFilesSchema = z.object({
 });
 type FindFilesOutput = z.output<typeof findFilesSchema>;
 
+const FIND_FILES_LIMIT = 200;
+
 export const findFilesTool: AgentTool<z.input<typeof findFilesSchema>, string> = createTool({
   toolName: "findFiles",
-  description: "Find files matching a glob pattern within the project.",
+  description:
+    "Find files matching a glob pattern within the project. Respects .gitignore and excludes node_modules/.git/build output. Supports path-aware globs including **.",
   inputSchema: findFilesSchema,
   requiresConfirmation: false,
   async execute(input: FindFilesOutput, context: ToolExecutionContext): Promise<string> {
@@ -110,14 +118,33 @@ export const findFilesTool: AgentTool<z.input<typeof findFilesSchema>, string> =
     if (isFile && globMatch(searchDir.split(sep).pop()!, input.pattern)) {
       return relative(context.projectRoot, searchDir);
     }
-
     if (isFile) return "";
 
-    const allFiles = walkDir(searchDir);
-    const matched = allFiles
+    // Prefer ripgrep: it lists files respecting ignore files, never descends
+    // into node_modules/.git, and is bounded — instead of walking the whole tree
+    // and truncating after the fact. A bare pattern (no "/") matches at any depth.
+    const glob = input.pattern.includes("/") ? input.pattern : `**/${input.pattern}`;
+    // Run with cwd=searchDir (no path arg) so path-aware globs like "src/**/*.ts"
+    // match relative paths; output is relative to searchDir.
+    const rg = spawnSync(
+      "rg",
+      ["--files", "--glob", glob, "--glob", "!**/node_modules/**", "--glob", "!**/.git/**"],
+      { cwd: searchDir, encoding: "utf-8", timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
+    );
+
+    if (!rg.error && (rg.status === 0 || rg.status === 1)) {
+      const files = (rg.stdout ?? "")
+        .split("\n")
+        .filter(Boolean)
+        .map((f) => relative(context.projectRoot, resolve(searchDir, f)));
+      return files.slice(0, FIND_FILES_LIMIT).join("\n");
+    }
+
+    // Fallback (ripgrep not installed): ignore-aware hand-rolled walk.
+    const matched = walkDir(searchDir)
       .filter((f) => globMatch(f.split(sep).pop()!, input.pattern))
       .map((f) => relative(context.projectRoot, f))
-      .slice(0, 200);
+      .slice(0, FIND_FILES_LIMIT);
 
     return matched.join("\n");
   },

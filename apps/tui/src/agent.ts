@@ -1,5 +1,5 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, createDiagnosticsTool, AuditLog } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, createDiagnosticsTool, AuditLog } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
@@ -30,6 +30,8 @@ function buildRegistry(projectRoot: string): ToolRegistry {
   // Code-intelligence tools: symbol/reference/call-graph navigation + LSP diagnostics.
   for (const tool of allSymbolTools) registry.register(tool);
   registry.register(createDiagnosticsTool(projectRoot));
+  // Web tools: fetch a URL / search the web.
+  for (const tool of allWebTools) registry.register(tool);
   return registry;
 }
 
@@ -865,6 +867,16 @@ export class AgentLoop {
         this.safetyValidator.validateFilePath(input.command)
       );
     }
+    // multiEdit carries a batch of {path} edits rather than a single path.
+    if (toolName === "multiEdit" && Array.isArray(input.edits)) {
+      for (const e of input.edits as Array<{ path?: unknown }>) {
+        if (typeof e?.path === "string") {
+          const v = this.safetyValidator.validateFilePath(e.path);
+          if (v) return v;
+        }
+      }
+      return null;
+    }
     if (this.safetyValidator.requiresApproval(toolName)) {
       const p =
         typeof input.path === "string" ? input.path
@@ -888,6 +900,10 @@ export class AgentLoop {
     } else if (toolName === "moveFile") {
       if (typeof input.source === "string") targets.push(input.source);
       if (typeof input.destination === "string") targets.push(input.destination);
+    } else if (toolName === "multiEdit" && Array.isArray(input.edits)) {
+      for (const e of input.edits as Array<{ path?: unknown }>) {
+        if (typeof e?.path === "string") targets.push(e.path);
+      }
     } else {
       return;
     }
