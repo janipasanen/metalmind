@@ -10,6 +10,8 @@ const SLASH_COMMANDS = [
   { syntax: "/init",        description: "Generate a starter project memory file" },
   { syntax: "/skill ",      description: "list / activate / deactivate skills" },
   { syntax: "/resume",      description: "List or resume a saved session" },
+  { syntax: "/compact",     description: "Summarize older turns to save context" },
+  { syntax: "/export ",     description: "Export transcript (md|json)" },
   { syntax: "/undo",        description: "Revert the agent's last edit set" },
   { syntax: "/audit",       description: "Show this session's tool-call log" },
   { syntax: "/clear",       description: "Clear chat history" },

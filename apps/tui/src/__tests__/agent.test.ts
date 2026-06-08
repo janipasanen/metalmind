@@ -1152,3 +1152,62 @@ describe("AgentLoop approval gate (M3 #138)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("AgentLoop /compact and /export (M4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("compacts older turns into a summary, keeping recent ones (#145)", async () => {
+    let calls = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        yield { type: "text", text: `reply ${calls}` };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "SUMMARY of earlier chat" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: tmpdir() });
+    for (let i = 0; i < 5; i++) await collect(loop.run(`message ${i}`));
+
+    const msg = await loop.compactHistory();
+    expect(msg).toMatch(/Compacted \d+ earlier messages/);
+    // The export should now contain the summary marker and the recent turns.
+    const file = loop.exportTranscript("md");
+    const content = readFileSync(file, "utf-8");
+    expect(content).toContain("Summary of");
+    rmSync(file, { force: true });
+  });
+
+  it("exports the transcript to markdown and json (#154)", async () => {
+    mockCreateProvider.mockReturnValue(makeProvider([{ type: "text", text: "hello there" }, { type: "done" }]) as never);
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: tmpdir() });
+    await collect(loop.run("a question"));
+
+    const md = loop.exportTranscript("md");
+    expect(md).toMatch(/\.md$/);
+    const mdContent = readFileSync(md, "utf-8");
+    expect(mdContent).toContain("## You");
+    expect(mdContent).toContain("a question");
+    expect(mdContent).toContain("hello there");
+
+    const jsonPath = loop.exportTranscript("json");
+    expect(jsonPath).toMatch(/\.json$/);
+    const parsed = JSON.parse(readFileSync(jsonPath, "utf-8"));
+    expect(Array.isArray(parsed)).toBe(true);
+
+    rmSync(md, { force: true });
+    rmSync(jsonPath, { force: true });
+  });
+
+  it("/compact reports nothing to do on a short history", async () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: tmpdir() });
+    expect(await loop.compactHistory()).toMatch(/nothing to compact/i);
+  });
+});

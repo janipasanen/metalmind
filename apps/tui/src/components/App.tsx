@@ -204,6 +204,8 @@ export default function App({ config }: AppProps) {
           "  /init             - Generate a starter project memory file (.metalmind/MEMORY.md)",
           "  /skill            - list | activate <name> | deactivate <name>",
           "  /resume [id]      - List saved sessions, or resume one by id (also --continue/--resume on launch)",
+          "  /compact          - Summarize older turns to reclaim context window",
+          "  /export [md|json] - Export the conversation transcript to a file",
           "  /undo             - Revert the agent's last applied edit set",
           "  /audit            - Show this session's tool-call log",
           "  /clear            - Clear chat history",
@@ -255,6 +257,21 @@ export default function App({ config }: AppProps) {
       if (input === "/undo") {
         const report = agentRef.current?.undoLastEdit() ?? "Agent not initialised.";
         yield { type: "text", text: report } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/compact") {
+        const msg = (await agentRef.current?.compactHistory()) ?? "Agent not initialised.";
+        yield { type: "text", text: msg } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/export" || input.startsWith("/export ")) {
+        const fmt = input.slice(7).trim().toLowerCase() === "json" ? "json" : "md";
+        const path = agentRef.current?.exportTranscript(fmt as "md" | "json");
+        yield { type: "text", text: path ? `Exported transcript to ${path}` : "Agent not initialised." } as const;
         yield { type: "done" } as const;
         return;
       }

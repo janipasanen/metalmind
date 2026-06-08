@@ -1566,6 +1566,73 @@ export class AgentLoop {
     }
   }
 
+  /** Summarize older turns into one message to reclaim context window (#145). */
+  async compactHistory(): Promise<string> {
+    const systemPart = this.history[0]?.role === "system" ? [this.history[0]] : [];
+    const rest = this.history.slice(systemPart.length);
+    const KEEP_RECENT = 4;
+    if (rest.length <= KEEP_RECENT + 2) return "History is short — nothing to compact yet.";
+
+    const toSummarize = rest.slice(0, rest.length - KEEP_RECENT);
+    const recent = rest.slice(rest.length - KEEP_RECENT);
+    const convo = toSummarize
+      .map((m) => `${m.role}: ${m.content}${m.toolCalls?.length ? ` [tools: ${m.toolCalls.map((t) => t.toolName).join(", ")}]` : ""}`)
+      .join("\n")
+      .slice(0, 12_000);
+
+    try {
+      const provider = this.getProvider(this.config.provider, this.config.model);
+      const res = await provider.completeChat({
+        messages: [
+          {
+            role: "system",
+            content:
+              "Summarize the following conversation concisely. Preserve key decisions, file paths touched, important facts, and any unresolved tasks. Output only the summary.",
+          },
+          { role: "user", content: convo },
+        ],
+      });
+      const summary = res.message.content.trim() || "(summary unavailable)";
+      this.history = [
+        ...systemPart,
+        { role: "assistant", content: `[Summary of ${toSummarize.length} earlier messages]\n${summary}` },
+        ...recent,
+      ];
+      this.saveSession();
+      return `Compacted ${toSummarize.length} earlier messages into a summary; kept the last ${KEEP_RECENT}.`;
+    } catch (err) {
+      return `Compaction failed: ${errText(err)}`;
+    }
+  }
+
+  /** Export the conversation transcript to Markdown or JSON; returns the file path (#154). */
+  exportTranscript(format: "md" | "json" = "md"): string {
+    const dir = join(this.projectRoot, ".metalmind", "transcripts");
+    mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = join(dir, `transcript-${stamp}.${format === "json" ? "json" : "md"}`);
+
+    if (format === "json") {
+      writeFileSync(file, JSON.stringify(this.history, null, 2), "utf-8");
+      return file;
+    }
+
+    const md = this.history
+      .filter((m) => m.role !== "system")
+      .map((m) => {
+        if (m.role === "user") return `## You\n\n${m.content}`;
+        if (m.role === "assistant") {
+          const tools = m.toolCalls?.length ? `\n\n_Tool calls: ${m.toolCalls.map((t) => t.toolName).join(", ")}_` : "";
+          return `## Assistant\n\n${m.content}${tools}`;
+        }
+        if (m.role === "tool") return `> tool result:\n>\n> \`\`\`\n> ${m.content.slice(0, 2000).replace(/\n/g, "\n> ")}\n> \`\`\``;
+        return m.content;
+      })
+      .join("\n\n");
+    writeFileSync(file, `# MetalMind transcript\n\n${md}\n`, "utf-8");
+    return file;
+  }
+
   /** Release resources: background processes (#153) and stdio MCP clients (#155). */
   dispose(): void {
     killAllBackgroundProcesses();
