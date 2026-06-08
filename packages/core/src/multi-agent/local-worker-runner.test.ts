@@ -196,11 +196,15 @@ describe("LocalWorkerRunner", () => {
       };
 
       const runner = new LocalWorkerRunner(wrongSchemaProvider, { maxSchemaValidationRetries: 0 });
+      // Use rankRelevantFiles: its output schema has required fields with no
+      // .catch() fallback, so genuinely wrong output is rejected. (The
+      // classifyUserIntent schema intentionally coerces hallucinated output to
+      // safe defaults, so it can never fail validation.)
       const task: LocalWorkerTask = {
         taskId: "test-wrong-schema",
-        taskType: "classifyUserIntent",
-        input: { userMessage: "test" },
-        outputSchemaName: "ClassifyUserIntentOutput",
+        taskType: "rankRelevantFiles",
+        input: { userGoal: "test", candidateFiles: ["src/index.ts"] },
+        outputSchemaName: "RankRelevantFilesOutput",
         maximumInputTokens: 3000,
         maximumOutputTokens: 800,
         timeoutMilliseconds: 15000,

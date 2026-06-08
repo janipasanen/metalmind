@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { PathValidator } from "./path-validator.js";
 
@@ -32,22 +32,23 @@ describe("PathValidator", () => {
       expect(resolved).toBe(join(testDir, "src"));
     });
 
-    it("blocks parent directory traversal", () => {
-      expect(() => validator.resolveSafePath("../../../etc/passwd")).toThrow(
-        /outside project root/,
+    // Traversal and absolute paths are intentionally allowed — the AI needs to
+    // work on any directory the user points it at. Only sensitive patterns
+    // (.ssh/.aws/.env/keys) are blocked (see tests below).
+    it("allows parent directory traversal (cross-project access)", () => {
+      expect(validator.resolveSafePath("../../../etc/passwd")).toBe(
+        resolve(testDir, "../../../etc/passwd"),
       );
     });
 
-    it("blocks parent traversal with .. prefix", () => {
-      expect(() => validator.resolveSafePath("../outside")).toThrow(
-        /outside project root/,
+    it("allows parent traversal with .. prefix (cross-project access)", () => {
+      expect(validator.resolveSafePath("../outside")).toBe(
+        resolve(testDir, "../outside"),
       );
     });
 
-    it("blocks path starting with /", () => {
-      expect(() => validator.resolveSafePath("/etc/passwd")).toThrow(
-        /outside project root/,
-      );
+    it("allows absolute paths outside the project root", () => {
+      expect(validator.resolveSafePath("/etc/passwd")).toBe("/etc/passwd");
     });
 
     it("blocks .ssh directory access", () => {
@@ -107,8 +108,12 @@ describe("PathValidator", () => {
       expect(validator.isValidPath("src/index.ts")).toBe(true);
     });
 
-    it("returns false for traversal paths", () => {
-      expect(validator.isValidPath("../../../etc/passwd")).toBe(false);
+    it("returns true for traversal paths (cross-project access allowed)", () => {
+      expect(validator.isValidPath("../../../etc/passwd")).toBe(true);
+    });
+
+    it("returns false for blocked sensitive paths", () => {
+      expect(validator.isValidPath(".ssh/id_rsa")).toBe(false);
     });
   });
 

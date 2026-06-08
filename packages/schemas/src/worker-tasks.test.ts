@@ -48,8 +48,10 @@ describe("ClassifyUserIntent schemas", () => {
     expect(ClassifyUserIntentInputSchema.safeParse({ userMessage: "" }).success).toBe(false);
   });
 
-  it("should reject invalid intent", () => {
-    expect(ClassifyUserIntentOutputSchema.safeParse({ ...validOutput, intent: "invalid" }).success).toBe(false);
+  it("should coerce an invalid intent to 'other' (local models hallucinate)", () => {
+    const result = ClassifyUserIntentOutputSchema.safeParse({ ...validOutput, intent: "invalid" });
+    expect(result.success).toBe(true);
+    expect(result.data?.intent).toBe("other");
   });
 
   it("should accept greeting intent", () => {
@@ -60,9 +62,14 @@ describe("ClassifyUserIntent schemas", () => {
     }).success).toBe(true);
   });
 
-  it("should reject confidence out of range", () => {
-    expect(ClassifyUserIntentOutputSchema.safeParse({ ...validOutput, confidence: 1.5 }).success).toBe(false);
-    expect(ClassifyUserIntentOutputSchema.safeParse({ ...validOutput, confidence: -0.1 }).success).toBe(false);
+  it("should coerce out-of-range confidence to the 0.5 fallback", () => {
+    const high = ClassifyUserIntentOutputSchema.safeParse({ ...validOutput, confidence: 1.5 });
+    expect(high.success).toBe(true);
+    expect(high.data?.confidence).toBe(0.5);
+
+    const low = ClassifyUserIntentOutputSchema.safeParse({ ...validOutput, confidence: -0.1 });
+    expect(low.success).toBe(true);
+    expect(low.data?.confidence).toBe(0.5);
   });
 });
 

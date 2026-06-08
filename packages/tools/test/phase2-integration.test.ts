@@ -75,14 +75,23 @@ describe("Phase 2 integration — filesystem tool pipeline", () => {
     expect(auditLog.failureCount).toBe(0);
   });
 
-  it("blocks operations outside project root", async () => {
-    await expect(
-      registry.execute("readFile", { path: "../../../etc/passwd" }, ctx()),
-    ).rejects.toThrow(/outside project root/);
+  it("allows operations outside the project root (cross-project access)", async () => {
+    // The PathValidator intentionally permits traversal/absolute paths so the
+    // agent can work on any directory the user points it at. Only sensitive
+    // patterns (.ssh/.aws/.env/keys) are blocked — see the test below.
+    const outsideName = `metalmind-phase2-outside-${Date.now()}.txt`;
+    const outsidePath = join(tmpdir(), outsideName);
+    rmSync(outsidePath, { force: true });
 
-    await expect(
-      registry.execute("writeFile", { path: "../outside.txt", content: "x" }, ctx()),
-    ).rejects.toThrow(/outside project root/);
+    try {
+      await registry.execute("writeFile", { path: `../${outsideName}`, content: "outside" }, ctx());
+      expect(readFileSync(outsidePath, "utf-8")).toBe("outside");
+
+      const read = await registry.execute("readFile", { path: `../${outsideName}` }, ctx());
+      expect(read).toContain("outside");
+    } finally {
+      rmSync(outsidePath, { force: true });
+    }
   });
 
   it("blocks access to secret directories", async () => {

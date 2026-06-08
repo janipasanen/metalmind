@@ -67,6 +67,13 @@ export class McpClient extends EventEmitter {
       this.emit("stderr", data.toString());
     });
 
+    // Swallow stdin errors (e.g. EPIPE when writing after the child has closed
+    // its pipe). Without a listener, Node turns these into unhandled 'error'
+    // events that crash the host process.
+    this.process.stdin?.on("error", (err: Error) => {
+      this.emit("stderr", `stdin error: ${err.message}`);
+    });
+
     this.rl = createInterface({ input: this.process.stdout! });
 
     this.rl.on("line", (line: string) => {
@@ -137,7 +144,7 @@ export class McpClient extends EventEmitter {
       const payload = JSON.stringify(req) + "\n";
 
       this.pending.set(id, { resolve, reject });
-      this.process?.stdin?.write(payload);
+      this.writeToStdin(payload);
 
       const timeout = setTimeout(() => {
         this.pending.delete(id);
@@ -154,7 +161,23 @@ export class McpClient extends EventEmitter {
 
   private sendNotification(method: string, params: Record<string, unknown>): void {
     const payload = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
-    this.process?.stdin?.write(payload);
+    this.writeToStdin(payload);
+  }
+
+  /**
+   * Writes to the child's stdin, tolerating a closed/destroyed pipe. The async
+   * error path is also covered by the 'error' listener attached in connect().
+   */
+  private writeToStdin(payload: string): void {
+    const stdin = this.process?.stdin;
+    if (!stdin || stdin.destroyed || !stdin.writable) return;
+    try {
+      stdin.write(payload, (err) => {
+        if (err) this.emit("stderr", `stdin write failed: ${err.message}`);
+      });
+    } catch (err) {
+      this.emit("stderr", `stdin write threw: ${(err as Error).message}`);
+    }
   }
 
   private rejectAll(err: Error): void {

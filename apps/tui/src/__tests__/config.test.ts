@@ -119,7 +119,7 @@ describe("resolveConfig", () => {
       const cfg = resolveConfig(["--provider", "ollama-cloud", "--model", "gemini-3-flash-preview:cloud"]);
       expect(cfg.provider).toBe("ollama-cloud");
       expect(cfg.model).toBe("gemini-3-flash-preview:cloud");
-      expect(cfg.baseUrl).toBe("https://ollama.com");
+      expect(cfg.baseUrl).toBe("https://api.ollama.com");
     });
   });
 

@@ -55,13 +55,15 @@ describe("readFileTool", () => {
     expect(result).toBe("");
   });
 
-  it("blocks path traversal", async () => {
+  it("blocks access to sensitive files", async () => {
+    // Traversal/absolute paths are allowed now; the security boundary is the
+    // blocked-pattern list (.ssh/.aws/.env/keys).
     await expect(
       readFileTool.execute(
-        { path: "../../../etc/passwd" },
+        { path: ".ssh/id_rsa" },
         { projectRoot: testDir },
       ),
-    ).rejects.toThrow(/outside project root/);
+    ).rejects.toThrow(/blocked path/);
   });
 
   it("rejects directories", async () => {
@@ -138,12 +140,13 @@ describe("searchInFilesTool", () => {
     expect(result).toContain("auth");
   });
 
-  it("blocks path traversal", async () => {
+  it("blocks access to sensitive directories", async () => {
+    // Traversal is allowed; only blocked patterns (.ssh/.aws/.env/keys) throw.
     await expect(
       searchInFilesTool.execute(
-        { pattern: "root", path: "../../../" },
+        { pattern: "root", path: ".ssh" },
         { projectRoot: testDir },
       ),
-    ).rejects.toThrow(/outside project root/);
+    ).rejects.toThrow(/blocked path/);
   });
 });
