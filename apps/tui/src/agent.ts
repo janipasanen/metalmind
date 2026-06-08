@@ -2,6 +2,12 @@ import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, P
 import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
+import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
+
+/** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
+interface McpToolClient {
+  callTool(name: string, input: unknown): Promise<string>;
+}
 import { zodToJsonSchema } from "./zod-to-json.js";
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve, join, dirname, extname } from "node:path";
@@ -279,7 +285,8 @@ export class AgentLoop {
   private projectRoot: string;
   private turnCount = 0;
   private providerCache = new Map<string, ModelProvider>();
-  private mcpTools = new Map<string, { client: McpHttpClient; def: McpToolDef }>();
+  private mcpTools = new Map<string, { client: McpToolClient; def: McpToolDef }>();
+  private mcpStdioClients: McpClient[] = [];
   private workspaceRoots: string[] = [];
   private coordinator: Coordinator | null = null;
   private safetyValidator: SafetyValidator;
@@ -348,17 +355,30 @@ export class AgentLoop {
   async initMcp(): Promise<void> {
     const userConfig = loadXdgConfig();
     for (const [id, srv] of Object.entries(userConfig.mcpServers || {})) {
-      if (!srv.enabled || !srv.url) continue;
+      if (!srv.enabled) continue;
       try {
-        const client = new McpHttpClient(srv.url, srv.headers ?? {});
-        await client.initialize();
-        const tools = await client.listTools();
-        for (const tool of tools) {
-          // Namespace by server id so two servers exposing the same tool name
-          // don't collide/overwrite each other (#161). The original name is
-          // preserved in `def.name` for the actual MCP call.
-          this.mcpTools.set(`${id}:${tool.name}`, { client, def: tool });
+        if (srv.url) {
+          // HTTP/SSE transport.
+          const client = new McpHttpClient(srv.url, srv.headers ?? {});
+          await client.initialize();
+          for (const tool of await client.listTools()) {
+            // Namespace by server id so two servers' same-named tools don't collide (#161).
+            this.mcpTools.set(`${id}:${tool.name}`, { client, def: tool });
+          }
+        } else if (srv.command) {
+          // Stdio transport — spawn a command-based MCP server (#155).
+          const stdio = new McpClient({ name: id, command: srv.command, args: srv.args, env: srv.env, cwd: srv.cwd });
+          await stdio.connect();
+          this.mcpStdioClients.push(stdio);
+          const adapter: McpToolClient = {
+            callTool: async (name, input) =>
+              normalizeMcpResult(await stdio.callTool(name, (input ?? {}) as Record<string, unknown>)),
+          };
+          for (const tool of stdio.tools) {
+            this.mcpTools.set(`${id}:${tool.name}`, { client: adapter, def: tool });
+          }
         }
+        // else: neither url nor command configured — nothing to connect.
       } catch (err) {
         console.error(`MCP server "${id}" init failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -976,7 +996,7 @@ export class AgentLoop {
 
   /** Invoke an MCP tool, recording the call in the audit log (#147). */
   private async callMcpAudited(
-    client: McpHttpClient,
+    client: McpToolClient,
     toolName: string,
     input: Record<string, unknown>,
   ): Promise<string> {
@@ -1286,8 +1306,11 @@ export class AgentLoop {
     this.turnCount = 0;
   }
 
-  /** Release resources: kill any background processes started this session (#153). */
+  /** Release resources: background processes (#153) and stdio MCP clients (#155). */
   dispose(): void {
     killAllBackgroundProcesses();
+    for (const client of this.mcpStdioClients) {
+      void client.disconnect().catch(() => {});
+    }
   }
 }

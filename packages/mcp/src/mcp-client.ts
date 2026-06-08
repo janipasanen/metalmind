@@ -63,6 +63,17 @@ export class McpClient extends EventEmitter {
       this.rejectAll(new Error(`MCP server exited with code ${code}`));
     });
 
+    // A spawn failure (e.g. ENOENT for an unknown command) fires 'error'
+    // asynchronously. Without this handler the pending initialize never settles
+    // and connect() hangs; reject it so a bad stdio server fails fast (#155).
+    this.process.on("error", (err: Error) => {
+      this.connected = false;
+      // Note: do NOT emit "error" — an EventEmitter with no 'error' listener
+      // throws. Surface via "stderr" and reject the pending connect instead.
+      this.emit("stderr", `spawn error: ${err.message}`);
+      this.rejectAll(new Error(`MCP server "${this.config.name}" failed to start: ${err.message}`));
+    });
+
     this.process.stderr?.on("data", (data: Buffer) => {
       this.emit("stderr", data.toString());
     });
