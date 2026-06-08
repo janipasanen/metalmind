@@ -27,6 +27,7 @@
     "@metalmind/mcp": "*",
     "@metalmind/providers": "*",
     "@metalmind/schemas": "*",
+    "@metalmind/skills": "*",
     "@metalmind/tools": "*",
     "@types/react": "^19.0.0",
     "ink": "^5.0.0",

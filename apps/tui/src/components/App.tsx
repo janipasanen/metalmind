@@ -176,6 +176,7 @@ export default function App({ config }: AppProps) {
           "  /apikey <key>     - Update API key for current provider",
           "  /workspace <path> - Allow AI to access an additional directory",
           "  /init             - Generate a starter project memory file (.metalmind/MEMORY.md)",
+          "  /skill            - list | activate <name> | deactivate <name>",
           "  /undo             - Revert the agent's last applied edit set",
           "  /audit            - Show this session's tool-call log",
           "  /clear            - Clear chat history",
@@ -209,6 +210,22 @@ export default function App({ config }: AppProps) {
       if (input === "/init") {
         const report = agentRef.current?.initProjectDoc() ?? "Agent not initialised.";
         yield { type: "text", text: report } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/skill" || input.startsWith("/skill ")) {
+        const rest = input.slice(6).trim();
+        const [sub, ...nameParts] = rest.split(/\s+/);
+        const name = nameParts.join(" ");
+        const agent = agentRef.current;
+        let text: string;
+        if (!agent) text = "Agent not initialised.";
+        else if (!sub || sub === "list") text = agent.listSkills();
+        else if (sub === "activate" && name) text = agent.activateSkill(name);
+        else if (sub === "deactivate" && name) text = agent.deactivateSkill(name);
+        else text = "Usage: /skill list | /skill activate <name> | /skill deactivate <name>";
+        yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;
       }

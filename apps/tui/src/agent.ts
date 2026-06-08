@@ -3,6 +3,7 @@ import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellToo
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
+import { SkillLoader, SkillManager } from "@metalmind/skills";
 
 /** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
 interface McpToolClient {
@@ -294,6 +295,8 @@ export class AgentLoop {
   private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
+  private skillLoader = new SkillLoader();
+  private skillManager = new SkillManager();
 
   constructor(config: TuiConfig, options: AgentLoopOptions = {}) {
     this.config = config;
@@ -310,6 +313,42 @@ export class AgentLoop {
     // Warm the symbol/reference index in the background so findSymbol/findReferences
     // return results without blocking startup (#149).
     this.indexProjectInBackground();
+    // Discover skills; activating one updates the live system prompt (#156).
+    this.skillManager.setToolRegistry(this.registry);
+    this.skillManager.onSystemPromptChange(() => {
+      if (this.history[0]?.role === "system") {
+        this.history[0] = { role: "system", content: this.buildSystemPrompt() };
+      }
+    });
+    try {
+      this.skillLoader.loadAll(this.projectRoot);
+    } catch {
+      // skill discovery failure must never block startup
+    }
+  }
+
+  /** List discovered skills with their active state, for `/skill list` (#156). */
+  listSkills(): string {
+    const all = this.skillLoader.getSkills();
+    if (all.length === 0) {
+      return "No skills found. Add one at .metalmind/skills/<name>/SKILL.md (project) or ~/.metalmind/skills/<name>/SKILL.md (global).";
+    }
+    return all
+      .map((s) => `${this.skillManager.isActive(s.metadata.name) ? "● active " : "○ inactive"}  ${s.metadata.name} v${s.metadata.version} — ${s.metadata.description}`)
+      .join("\n");
+  }
+
+  activateSkill(name: string): string {
+    const skill = this.skillLoader.getSkill(name);
+    if (!skill) return `Skill "${name}" not found. Run /skill list.`;
+    const res = this.skillManager.activate(skill);
+    return res.success
+      ? `Activated skill "${name}" — its instructions now apply to subsequent turns.`
+      : `Could not activate "${name}": ${res.error}`;
+  }
+
+  deactivateSkill(name: string): string {
+    return this.skillManager.deactivate(name) ? `Deactivated skill "${name}".` : `Skill "${name}" was not active.`;
   }
 
   get coordinatorInstance(): Coordinator | null {
@@ -1296,6 +1335,12 @@ export class AgentLoop {
         repoMap,
         "--- end repository map ---",
       );
+    }
+
+    // Inject the prompts of any active skills (#156).
+    const skillPrompt = this.skillManager.buildSystemPrompt();
+    if (skillPrompt) {
+      lines.push("", "--- Active skills ---", skillPrompt, "--- end active skills ---");
     }
 
     return lines.join("\n");

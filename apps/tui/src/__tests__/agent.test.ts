@@ -928,3 +928,55 @@ describe("AgentLoop post-edit diagnostics (M5 #152)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("AgentLoop skills (M5 #156)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeSkillDir(): string {
+    const root = join(tmpdir(), `mm-skill-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(join(root, ".metalmind", "skills", "bananas"), { recursive: true });
+    writeFileSync(
+      join(root, ".metalmind", "skills", "bananas", "SKILL.md"),
+      ["---", "name: bananas", "version: 1.0.0", "description: Always mention bananas", "---", "", "When this skill is active, always mention BANANA in your answer."].join("\n"),
+    );
+    return root;
+  }
+
+  it("discovers, activates, and injects a skill prompt into the system prompt", async () => {
+    const root = makeSkillDir();
+    const captured: unknown[][] = [];
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: 128000 } as never,
+      async *streamChatCompletion(req: { messages: unknown[] }) {
+        captured.push(req.messages);
+        yield { type: "text", text: "ok" };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+
+    expect(loop.listSkills()).toContain("bananas");
+    expect(loop.activateSkill("bananas")).toMatch(/Activated skill "bananas"/);
+
+    await collect(loop.run("hi"));
+    const sys = (captured[0] as Array<{ role: string; content: string }>)[0];
+    expect(sys.content).toContain("Active skills");
+    expect(sys.content).toContain("always mention BANANA");
+
+    // Deactivation removes it.
+    expect(loop.deactivateSkill("bananas")).toMatch(/Deactivated/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reports a helpful message for an unknown skill", () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: tmpdir() });
+    expect(loop.activateSkill("nope-not-real")).toMatch(/not found/);
+  });
+});

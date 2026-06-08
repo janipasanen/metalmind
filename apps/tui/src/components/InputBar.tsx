@@ -8,6 +8,7 @@ const SLASH_COMMANDS = [
   { syntax: "/apikey ",     description: "Update API key for current provider" },
   { syntax: "/workspace ",  description: "Allow AI to access a directory" },
   { syntax: "/init",        description: "Generate a starter project memory file" },
+  { syntax: "/skill ",      description: "list / activate / deactivate skills" },
   { syntax: "/undo",        description: "Revert the agent's last edit set" },
   { syntax: "/audit",       description: "Show this session's tool-call log" },
   { syntax: "/clear",       description: "Clear chat history" },
