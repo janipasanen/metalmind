@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ChatStreamEvent } from "../hooks/useChat.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 
 // Minimal provider stub
 function makeProvider(
@@ -718,5 +718,91 @@ describe("AgentLoop trust & recovery (M3)", () => {
   it("undoLastEdit reports cleanly when there is nothing to undo", () => {
     const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
     expect(loop.undoLastEdit()).toMatch(/Nothing to undo/);
+  });
+});
+
+describe("AgentLoop session & context (M4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function capturingProvider(maxTokens: number, captured: unknown[][]) {
+    return {
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: maxTokens } as never,
+      async *streamChatCompletion(req: { messages: unknown[] }) {
+        captured.push(req.messages);
+        yield { type: "text", text: "ok" };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("injects a project memory file into the system prompt (#146)", async () => {
+    const root = join(tmpdir(), `mm-mem-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "AGENTS.md"), "ALWAYS use tabs, never spaces.");
+
+    const captured: unknown[][] = [];
+    mockCreateProvider.mockReturnValue(capturingProvider(128000, captured));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("hello"));
+
+    const sys = (captured[0] as Array<{ role: string; content: string }>)[0];
+    expect(sys.role).toBe("system");
+    expect(sys.content).toContain("Project instructions (from AGENTS.md)");
+    expect(sys.content).toContain("ALWAYS use tabs");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("/init writes a starter memory doc and is idempotent (#146)", async () => {
+    const root = join(tmpdir(), `mm-init-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "demo", scripts: { build: "tsc" } }));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const first = loop.initProjectDoc();
+    expect(first).toMatch(/Created starter project memory/);
+    const docPath = join(root, ".metalmind", "MEMORY.md");
+    expect(existsSync(docPath)).toBe(true);
+    const doc = readFileSync(docPath, "utf8");
+    expect(doc).toContain("# Project memory: demo");
+    expect(doc).toContain("- `src/`");
+    expect(doc).toContain("npm run build");
+
+    // Second call must not overwrite.
+    expect(loop.initProjectDoc()).toMatch(/already exists/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("trims history to fit a small context window and reports usage (#141)", async () => {
+    const root = join(tmpdir(), `mm-ctx-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+
+    const usages: Array<{ used: number; limit: number }> = [];
+    const captured: unknown[][] = [];
+    // ~1000-token window forces trimming after a few large turns.
+    mockCreateProvider.mockReturnValue(capturingProvider(1000, captured));
+
+    const loop = new AgentLoop(
+      { provider: "stub", model: "test", explicit: true },
+      { projectRoot: root, onContextUsage: (used, limit) => usages.push({ used, limit }) },
+    );
+
+    const big = "word ".repeat(400); // ~400+ tokens per turn
+    for (let i = 0; i < 4; i++) await collect(loop.run(big));
+
+    // Usage was reported against the model limit.
+    expect(usages.length).toBeGreaterThan(0);
+    expect(usages.at(-1)?.limit).toBe(1000);
+    // The final request stayed under budget (limit - reserve) — no unbounded growth.
+    const lastMessages = captured.at(-1) as Array<{ role: string }>;
+    expect(lastMessages[0].role).toBe("system"); // system prompt always preserved
+    expect(usages.at(-1)!.used).toBeLessThanOrEqual(1000);
+    rmSync(root, { recursive: true, force: true });
   });
 });

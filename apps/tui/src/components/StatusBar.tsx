@@ -11,15 +11,27 @@ interface StatusBarProps {
   focusPanel: "chat" | "input";
   isStreaming?: boolean;
   mcpServers?: McpServerStatus[];
+  context?: { used: number; limit: number };
 }
 
 export default function StatusBar({
   focusPanel,
   isStreaming = false,
   mcpServers,
+  context,
 }: StatusBarProps) {
   const connectedServers = mcpServers?.filter((s) => s.connected) ?? [];
   const totalMcpTools = connectedServers.reduce((sum, s) => sum + s.toolCount, 0);
+
+  // Context-window gauge for the active model (#141).
+  let ctxLabel = "";
+  let ctxColor: string | undefined;
+  if (context && context.limit > 0) {
+    const pct = Math.min(100, Math.round((context.used / context.limit) * 100));
+    const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
+    ctxLabel = ` | ctx ${k(context.used)}/${k(context.limit)} (${pct}%)`;
+    ctxColor = pct >= 90 ? "red" : pct >= 75 ? "yellow" : undefined;
+  }
 
   return (
     <Box marginTop={1} flexDirection="column">
@@ -30,6 +42,7 @@ export default function StatusBar({
             : "Ctrl+P: commands | Tab: panels | Ctrl+C: quit | "}
           {focusPanel === "input" ? "Input" : "Chat"} active
         </Text>
+        {ctxLabel ? <Text color={ctxColor} dimColor={!ctxColor}>{ctxLabel}</Text> : null}
       </Box>
       {connectedServers.length > 0 && (
         <Box>

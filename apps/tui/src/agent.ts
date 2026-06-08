@@ -3,7 +3,7 @@ import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellToo
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve, join, dirname } from "node:path";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent, SafetyViolation } from "@metalmind/core";
@@ -52,6 +52,9 @@ function errText(err: unknown): string {
 
 /** File-mutating tools whose targets are snapshotted before execution for /undo. */
 const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "deleteFile"]);
+
+/** Project memory/rules files auto-loaded into the system prompt, in priority order. */
+const PROJECT_MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", ".metalmind/MEMORY.md", "CONVENTIONS.md", ".cursorrules"];
 
 interface EditSet {
   turn: number;
@@ -246,6 +249,10 @@ export interface AgentLoopOptions {
   onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
   /** Called when the coordinator plan changes. */
   onCoordinatorPlan?: (steps: PlanStep[]) => void;
+  /** Called before each turn with the history token usage vs the active model's limit. */
+  onContextUsage?: (used: number, limit: number) => void;
+  /** Override the project root (defaults to process.cwd()); used for tests. */
+  projectRoot?: string;
 }
 
 export class AgentLoop {
@@ -255,6 +262,7 @@ export class AgentLoop {
   private onCoordinatorPhase?: (phase: CoordinatorPhase) => void;
   private onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
   private onCoordinatorPlan?: (steps: PlanStep[]) => void;
+  private onContextUsage?: (used: number, limit: number) => void;
   private registry: ToolRegistry;
   private history: AgentMessage[] = [];
   private projectRoot: string;
@@ -276,7 +284,8 @@ export class AgentLoop {
     this.onCoordinatorPhase = options.onCoordinatorPhase;
     this.onCoordinatorRouting = options.onCoordinatorRouting;
     this.onCoordinatorPlan = options.onCoordinatorPlan;
-    this.projectRoot = process.cwd();
+    this.onContextUsage = options.onContextUsage;
+    this.projectRoot = options.projectRoot ?? process.cwd();
     this.registry = buildRegistry(this.projectRoot);
     this.safetyValidator = new SafetyValidator(this.projectRoot);
     this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
@@ -474,6 +483,7 @@ export class AgentLoop {
     signal?: AbortSignal,
   ): Promise<BufferedAttempt> {
     const attempt: BufferedAttempt = { text: "", toolCalls: [], errored: false };
+    this.enforceContextBudget(provider);
     try {
       for await (const event of provider.streamChatCompletion({
         messages: [...this.history],
@@ -734,6 +744,8 @@ export class AgentLoop {
     while (iterations < maxIterations) {
       if (signal?.aborted) { yield { type: "done" }; return; }
       iterations++;
+      // Keep the payload within the active model's context window (#141).
+      if (providers[0]) this.enforceContextBudget(providers[0]);
       let assistantText = "";
       const pendingToolCalls: Array<{ toolCallId: string; toolName: string; argumentsJson: string }> = [];
 
@@ -954,6 +966,102 @@ export class AgentLoop {
     return this.auditLog.getRecent(limit);
   }
 
+  /** Window history to fit the active model's context limit, reporting usage (#141). */
+  private enforceContextBudget(provider: ModelProvider): void {
+    const limit = provider.supportedCapabilities?.maximumContextTokens ?? 32_768;
+    const reserve = Math.max(2048, Math.floor(limit * 0.2));
+    const budget = limit - reserve;
+    const tokensOf = (m: AgentMessage): number =>
+      estimateTokens(m.content) + (m.toolCalls?.length ? estimateTokens(JSON.stringify(m.toolCalls)) : 0);
+
+    let total = this.history.reduce((s, m) => s + tokensOf(m), 0);
+    if (total > budget) {
+      const sys = this.history[0]?.role === "system" ? [this.history[0]] : [];
+      let rest = this.history.slice(sys.length);
+      // Drop oldest non-system messages until under budget (keep the latest turn).
+      while (total > budget && rest.length > 1) {
+        total -= tokensOf(rest[0]);
+        rest = rest.slice(1);
+      }
+      // Never leave an orphaned tool result at the front — providers reject a
+      // tool message without its preceding assistant tool_calls.
+      while (rest.length && rest[0].role === "tool") {
+        total -= tokensOf(rest[0]);
+        rest = rest.slice(1);
+      }
+      this.history = [...sys, ...rest];
+    }
+    this.onContextUsage?.(total, limit);
+  }
+
+  /** Load the project memory/rules file (AGENTS.md/CLAUDE.md/…) if present (#146). */
+  private loadProjectMemory(): { name: string; content: string } | null {
+    for (const rel of PROJECT_MEMORY_FILES) {
+      const abs = join(this.projectRoot, rel);
+      try {
+        if (existsSync(abs)) {
+          let content = readFileSync(abs, "utf8");
+          const MAX = 16_000;
+          if (content.length > MAX) content = content.slice(0, MAX) + "\n…(truncated)";
+          if (content.trim()) return { name: rel, content: content.trim() };
+        }
+      } catch {
+        // unreadable — skip silently
+      }
+    }
+    return null;
+  }
+
+  /** Generate a starter project-memory doc from a lightweight repo scan (#146 /init). */
+  initProjectDoc(): string {
+    const target = join(this.projectRoot, ".metalmind", "MEMORY.md");
+    if (existsSync(target)) return `Project memory already exists at ${target} — edit it directly.`;
+
+    let pkgName = "";
+    let scripts: string[] = [];
+    try {
+      const pkgPath = join(this.projectRoot, "package.json");
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+          name?: string;
+          scripts?: Record<string, string>;
+        };
+        pkgName = pkg.name ?? "";
+        scripts = Object.keys(pkg.scripts ?? {});
+      }
+    } catch {
+      // no/invalid package.json — skip
+    }
+
+    let dirs: string[] = [];
+    try {
+      dirs = readdirSync(this.projectRoot, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules")
+        .map((d) => d.name)
+        .sort();
+    } catch {
+      // unreadable root — skip
+    }
+
+    const doc = [
+      `# Project memory${pkgName ? `: ${pkgName}` : ""}`,
+      "",
+      "> Auto-generated by /init. Edit to capture architecture, conventions, and rules the agent should always follow. Loaded into the system prompt at session start.",
+      "",
+      "## Structure",
+      ...(dirs.length ? dirs.map((d) => `- \`${d}/\``) : ["- (none)"]),
+      ...(scripts.length ? ["", "## Scripts", ...scripts.map((s) => `- \`npm run ${s}\``)] : []),
+      "",
+      "## Conventions",
+      "- (add project-specific rules here)",
+      "",
+    ].join("\n");
+
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, doc, "utf8");
+    return `Created starter project memory at ${target}.\nRun /clear (or restart) to load it into context.`;
+  }
+
   private buildSystemPrompt(): string {
     const userConfig = loadXdgConfig();
     const mcpEntries = Object.entries(userConfig.mcpServers || {});
@@ -972,7 +1080,7 @@ export class AgentLoop {
       ? this.workspaceRoots.map((p) => `  - ${p}`).join("\n")
       : "  (none configured — project directory is always accessible)";
 
-    return [
+    const lines = [
       "You are MetalMind, an agentic AI assistant running in a terminal UI (TUI).",
       `Project directory: ${this.projectRoot}`,
       `Active provider: ${this.config.provider}  Active model: ${this.config.model}`,
@@ -987,7 +1095,20 @@ export class AgentLoop {
       "You have access to the entire filesystem. Sensitive paths (.ssh, .aws, .env, credentials) are blocked automatically.",
       "When the user mentions a directory path, you can read files from it directly without any setup.",
       "When asked about MetalMind configuration, read ~/.config/metalmind/config.json with your file tools.",
-    ].join("\n");
+    ];
+
+    // Inject project-specific standing instructions (AGENTS.md/CLAUDE.md/…) if present (#146).
+    const memory = this.loadProjectMemory();
+    if (memory) {
+      lines.push(
+        "",
+        `--- Project instructions (from ${memory.name}) — follow these unless the user overrides them ---`,
+        memory.content,
+        "--- end project instructions ---",
+      );
+    }
+
+    return lines.join("\n");
   }
 
   clearHistory(): void {
