@@ -101,6 +101,10 @@ vi.mock("@metalmind/tools", async () => {
   runShellTools: [],
   allSymbolTools: [],
   allWebTools: [],
+  RepoMapV2: class {
+    toTreeString() { return "src/\n  index.ts [exports: 2] (function)"; }
+    getSummary() { return "summary"; }
+  },
   createDiagnosticsTool: () => ({
     toolName: "getDiagnostics",
     description: "",
@@ -805,5 +809,55 @@ describe("AgentLoop session & context (M4)", () => {
     expect(lastMessages[0].role).toBe("system"); // system prompt always preserved
     expect(usages.at(-1)!.used).toBeLessThanOrEqual(1000);
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("AgentLoop M5 integration", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("injects a token-bounded repository map into the system prompt (#143)", async () => {
+    const root = join(tmpdir(), `mm-repomap-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const captured: unknown[][] = [];
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: 128000 } as never,
+      async *streamChatCompletion(req: { messages: unknown[] }) {
+        captured.push(req.messages);
+        yield { type: "text", text: "ok" };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("hi"));
+
+    const sys = (captured[0] as Array<{ role: string; content: string }>)[0];
+    expect(sys.content).toContain("Repository map");
+    expect(sys.content).toContain("index.ts [exports: 2]");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("namespaces MCP tools so same-named tools from two servers don't collide (#161)", () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    // Two servers both expose a tool literally named "search".
+    const clientA = { callTool: async () => "A" };
+    const clientB = { callTool: async () => "B" };
+    const mcpTools = (loop as unknown as { mcpTools: Map<string, unknown> }).mcpTools;
+    mcpTools.set("serverA:search", { client: clientA, def: { name: "search", description: "A search", inputSchema: {} } });
+    mcpTools.set("serverB:search", { client: clientB, def: { name: "search", description: "B search", inputSchema: {} } });
+
+    // Neither overwrote the other.
+    expect(mcpTools.size).toBe(2);
+
+    const defs = (loop as unknown as { toolDefs: () => Array<{ name: string }> }).toolDefs();
+    const names = defs.map((d) => d.name);
+    expect(names).toContain("serverA:search");
+    expect(names).toContain("serverB:search");
   });
 });

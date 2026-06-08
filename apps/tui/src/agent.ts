@@ -1,5 +1,5 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, createDiagnosticsTool, AuditLog } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, createDiagnosticsTool, AuditLog, RepoMapV2 } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
@@ -342,7 +342,10 @@ export class AgentLoop {
         await client.initialize();
         const tools = await client.listTools();
         for (const tool of tools) {
-          this.mcpTools.set(tool.name, { client, def: tool });
+          // Namespace by server id so two servers exposing the same tool name
+          // don't collide/overwrite each other (#161). The original name is
+          // preserved in `def.name` for the actual MCP call.
+          this.mcpTools.set(`${id}:${tool.name}`, { client, def: tool });
         }
       } catch (err) {
         console.error(`MCP server "${id}" init failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -428,8 +431,10 @@ export class AgentLoop {
       description: t.description,
       inputSchema: zodToJsonSchema(t.inputSchema),
     }));
-    const mcp = [...this.mcpTools.values()].map(({ def }) => ({
-      name: def.name,
+    // Expose the namespaced key (serverId:toolName) to the model so collisions
+    // across servers stay distinct; dispatch maps it back to the original name.
+    const mcp = [...this.mcpTools.entries()].map(([namespacedName, { def }]) => ({
+      name: namespacedName,
       description: def.description,
       inputSchema: def.inputSchema,
     }));
@@ -823,7 +828,8 @@ export class AgentLoop {
         try {
           const mcpEntry = this.mcpTools.get(call.toolName);
           if (mcpEntry) {
-            output = await this.callMcpAudited(mcpEntry.client, call.toolName, inputObj);
+            // Call the server with the ORIGINAL (un-namespaced) tool name.
+            output = await this.callMcpAudited(mcpEntry.client, mcpEntry.def.name, inputObj);
           } else {
             const result = await this.registry.execute(call.toolName, inputObj, {
               projectRoot: this.projectRoot,
@@ -1010,6 +1016,24 @@ export class AgentLoop {
     this.onContextUsage?.(total, limit);
   }
 
+  /** Build a token-bounded repository map (tree + exports/symbols) for the prompt (#143). */
+  private loadRepoMap(): string | null {
+    try {
+      const map = new RepoMapV2(this.projectRoot, {
+        maxFiles: 120,
+        maxDepth: 4,
+        includeSymbols: true,
+        includeImports: false,
+      });
+      const tree = map.toTreeString();
+      if (!tree.trim()) return null;
+      const MAX_CHARS = 6000; // ~1.5k tokens — bounded so it never dominates the window
+      return tree.length > MAX_CHARS ? `${tree.slice(0, MAX_CHARS)}\n…(map truncated)` : tree;
+    } catch {
+      return null; // never block a turn on map generation
+    }
+  }
+
   /** Load the project memory/rules file (AGENTS.md/CLAUDE.md/…) if present (#146). */
   private loadProjectMemory(): { name: string; content: string } | null {
     for (const rel of PROJECT_MEMORY_FILES) {
@@ -1121,6 +1145,18 @@ export class AgentLoop {
         `--- Project instructions (from ${memory.name}) — follow these unless the user overrides them ---`,
         memory.content,
         "--- end project instructions ---",
+      );
+    }
+
+    // Inject a token-bounded repository map so the model has structural context
+    // without blind grep/glob round-trips (#143).
+    const repoMap = this.loadRepoMap();
+    if (repoMap) {
+      lines.push(
+        "",
+        "--- Repository map (auto-generated: tree with exports/symbols, truncated) ---",
+        repoMap,
+        "--- end repository map ---",
       );
     }
 

@@ -28,3 +28,5 @@ export {
 export { createDiagnosticsTool } from "./code-intel/diagnostics-tool.js";
 export { ReferenceIndex } from "./code-intel/reference-index.js";
 export type { ReferenceInfo } from "./code-intel/reference-index.js";
+export { RepoMapV2 } from "./code-intel/repo-map-v2.js";
+export type { EnhancedEntry, RepoMapV2Options } from "./code-intel/repo-map-v2.js";
