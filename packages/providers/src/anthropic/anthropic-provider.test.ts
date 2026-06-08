@@ -262,4 +262,82 @@ describe("AnthropicProvider", () => {
       expect(events.some((e) => e.type === "done")).toBe(false);
     });
   });
+
+  describe("request-side tool calling (#132)", () => {
+    function captureBody() {
+      const ref: { body: Record<string, unknown> | null } = { body: null };
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+        ref.body = JSON.parse(opts.body as string);
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({ role: "assistant", content: [{ type: "text", text: "ok" }] }),
+        };
+      }));
+      return ref;
+    }
+
+    it("sends tools and hoists the system message", async () => {
+      const ref = captureBody();
+      const p = new AnthropicProvider("claude", "sk-test");
+      await p.completeChat({
+        messages: [
+          { role: "system", content: "be terse" },
+          { role: "user", content: "hi" },
+        ],
+        tools: [{ name: "readFile", description: "read a file", inputSchema: { type: "object", properties: { path: { type: "string" } } } }],
+      });
+
+      expect(ref.body!.system).toBe("be terse");
+      const tools = ref.body!.tools as Array<{ name: string; input_schema: unknown }>;
+      expect(tools[0].name).toBe("readFile");
+      expect(tools[0].input_schema).toEqual({ type: "object", properties: { path: { type: "string" } } });
+      // system message must not remain in the messages array
+      const msgs = ref.body!.messages as Array<{ role: string }>;
+      expect(msgs.every((m) => m.role !== "system")).toBe(true);
+    });
+
+    it("serializes assistant tool calls as tool_use and tool results as tool_result", async () => {
+      const ref = captureBody();
+      const p = new AnthropicProvider("claude", "sk-test");
+      await p.completeChat({
+        messages: [
+          { role: "user", content: "read it" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ toolCallId: "tu_1", toolName: "readFile", argumentsJson: '{"path":"/a.ts"}' }],
+          },
+          { role: "tool", content: "file body", metadata: { toolCallId: "tu_1" } },
+        ],
+      });
+
+      const msgs = ref.body!.messages as Array<{ role: string; content: unknown }>;
+      const assistant = msgs.find((m) => m.role === "assistant")!;
+      const aBlocks = assistant.content as Array<Record<string, unknown>>;
+      const toolUse = aBlocks.find((b) => b.type === "tool_use")!;
+      expect(toolUse).toMatchObject({ id: "tu_1", name: "readFile", input: { path: "/a.ts" } });
+
+      const userWithResult = msgs.find(
+        (m) => m.role === "user" && Array.isArray(m.content) && m.content.some((b) => (b as Record<string, unknown>).type === "tool_result"),
+      )!;
+      const uBlocks = userWithResult.content as Array<Record<string, unknown>>;
+      const toolResult = uBlocks.find((b) => b.type === "tool_result")!;
+      expect(toolResult).toMatchObject({ tool_use_id: "tu_1", content: "file body" });
+    });
+
+    it("decodes tool_use blocks from a completeChat response", async () => {
+      vi.stubGlobal("fetch", mockFetch(200, {
+        role: "assistant",
+        content: [
+          { type: "text", text: "calling" },
+          { type: "tool_use", id: "tu_9", name: "gitStatus", input: {} },
+        ],
+      }));
+      const p = new AnthropicProvider("claude", "sk-test");
+      const res = await p.completeChat({ messages: [{ role: "user", content: "status" }] });
+      expect(res.message.toolCalls?.[0]).toMatchObject({ toolCallId: "tu_9", toolName: "gitStatus" });
+    });
+  });
 });

@@ -39,12 +39,82 @@ interface AnthropicStreamDelta {
   };
 }
 
-function convertToAnthropicMessages(
-  messages: AgentMessage[],
-): Array<{ role: string; content: string | Array<Record<string, unknown>> }> {
-  return messages.map((msg) => ({
-    role: msg.role === "assistant" || msg.role === "user" ? msg.role : "user",
-    content: msg.content,
+type AnthropicMsg = { role: string; content: string | Array<Record<string, unknown>> };
+
+function safeParseInput(json: string): Record<string, unknown> {
+  try {
+    const v = JSON.parse(json) as unknown;
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Build the Anthropic request payload from the neutral history: hoist system
+ * messages into the top-level `system` field, serialize assistant tool calls as
+ * `tool_use` blocks, and tool results as `tool_result` blocks in a user message
+ * (keyed by metadata.toolCallId). Consecutive same-role messages are coalesced
+ * so the user/assistant alternation Anthropic requires is preserved.
+ */
+function buildAnthropicPayload(messages: AgentMessage[]): {
+  system: string | undefined;
+  messages: AnthropicMsg[];
+} {
+  let system: string | undefined;
+  const out: AnthropicMsg[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      system = system ? `${system}\n\n${msg.content}` : msg.content;
+      continue;
+    }
+
+    if (msg.role === "tool") {
+      const toolUseId = typeof msg.metadata?.["toolCallId"] === "string" ? (msg.metadata["toolCallId"] as string) : "";
+      out.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: toolUseId, content: msg.content }],
+      });
+      continue;
+    }
+
+    if (msg.role === "assistant" && msg.toolCalls?.length) {
+      const blocks: Array<Record<string, unknown>> = [];
+      if (msg.content) blocks.push({ type: "text", text: msg.content });
+      for (const tc of msg.toolCalls) {
+        blocks.push({ type: "tool_use", id: tc.toolCallId, name: tc.toolName, input: safeParseInput(tc.argumentsJson) });
+      }
+      out.push({ role: "assistant", content: blocks });
+      continue;
+    }
+
+    out.push({ role: msg.role === "assistant" ? "assistant" : "user", content: msg.content });
+  }
+
+  // Coalesce consecutive same-role messages (e.g. multiple tool_result blocks).
+  const toBlocks = (c: AnthropicMsg["content"]): Array<Record<string, unknown>> =>
+    Array.isArray(c) ? c : [{ type: "text", text: String(c) }];
+  const merged: AnthropicMsg[] = [];
+  for (const m of out) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === m.role) {
+      last.content = [...toBlocks(last.content), ...toBlocks(m.content)];
+    } else {
+      merged.push({ role: m.role, content: m.content });
+    }
+  }
+
+  return { system, messages: merged };
+}
+
+/** Map neutral tool defs to Anthropic's tool schema. */
+function toAnthropicTools(tools: unknown[] | undefined): Array<Record<string, unknown>> | undefined {
+  if (!tools || tools.length === 0) return undefined;
+  return (tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>).map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema,
   }));
 }
 
@@ -68,7 +138,7 @@ export class AnthropicProvider implements ModelProvider {
   async completeChat(
     request: ChatCompletionRequest,
   ): Promise<ChatCompletionResponse> {
-    const messages = convertToAnthropicMessages(request.messages);
+    const { system, messages } = buildAnthropicPayload(request.messages);
 
     const body: Record<string, unknown> = {
       model: this.modelName,
@@ -76,6 +146,9 @@ export class AnthropicProvider implements ModelProvider {
       messages,
       stream: false,
     };
+    if (system) body.system = system;
+    const tools = toAnthropicTools(request.tools);
+    if (tools) body.tools = tools;
 
     const res = await fetch(`${this.baseUrl}/v1/messages`, {
       method: "POST",
@@ -98,13 +171,22 @@ export class AnthropicProvider implements ModelProvider {
       .map((c) => c.text ?? "")
       .join("");
 
-    return { message: { role: "assistant", content: textContent } };
+    const message: AgentMessage = { role: "assistant", content: textContent };
+    const toolUses = data.content.filter((c) => c.type === "tool_use");
+    if (toolUses.length) {
+      message.toolCalls = toolUses.map((c) => ({
+        toolCallId: c.id ?? "",
+        toolName: c.name ?? "",
+        argumentsJson: JSON.stringify(c.input ?? {}),
+      }));
+    }
+    return { message };
   }
 
   async *streamChatCompletion(
     request: ChatCompletionRequest,
   ): AsyncGenerator<ModelStreamEvent, void, undefined> {
-    const messages = convertToAnthropicMessages(request.messages);
+    const { system, messages } = buildAnthropicPayload(request.messages);
 
     const body: Record<string, unknown> = {
       model: this.modelName,
@@ -112,6 +194,9 @@ export class AnthropicProvider implements ModelProvider {
       messages,
       stream: true,
     };
+    if (system) body.system = system;
+    const tools = toAnthropicTools(request.tools);
+    if (tools) body.tools = tools;
 
     const res = await fetch(`${this.baseUrl}/v1/messages`, {
       method: "POST",

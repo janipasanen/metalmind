@@ -19,6 +19,28 @@ export class OllamaWorkerProvider implements WorkerProvider {
     return headers;
   }
 
+  /** Model family is the name before the tag (e.g. "qwen2.5-coder:7b" → "qwen2.5-coder"). */
+  private static familyOf(name: string): string {
+    return name.split(":")[0];
+  }
+
+  /**
+   * Resolve the requested model to an actually-installed name:
+   * 1. exact tag match, else
+   * 2. bare name → its ":latest" tag, else
+   * 3. a same-FAMILY installed tag (exact family equality — not a prefix match,
+   *    which previously let "qwen2.5-coder:1.5b" satisfy a request for ":7b").
+   * Returns null when nothing of that family is installed.
+   */
+  private resolveInstalled(modelNames: string[]): string | null {
+    if (modelNames.includes(this.modelId)) return this.modelId;
+    if (!this.modelId.includes(":") && modelNames.includes(`${this.modelId}:latest`)) {
+      return `${this.modelId}:latest`;
+    }
+    const family = OllamaWorkerProvider.familyOf(this.modelId);
+    return modelNames.find((n) => OllamaWorkerProvider.familyOf(n) === family) ?? null;
+  }
+
   async isAvailable(): Promise<boolean> {
     try {
       const res = await fetch(`${this.baseUrl}/api/tags`, {
@@ -27,7 +49,13 @@ export class OllamaWorkerProvider implements WorkerProvider {
       });
       if (!res.ok) return false;
       const data = (await res.json()) as { models: Array<{ name: string }> };
-      return data.models.some((m) => m.name === this.modelId || m.name.startsWith(this.modelId.split(":")[0]));
+      const resolved = this.resolveInstalled(data.models.map((m) => m.name));
+      // Normalize to the installed tag so sendTask never posts an unavailable id.
+      if (resolved) {
+        this.modelId = resolved;
+        return true;
+      }
+      return false;
     } catch {
       return false;
     }
@@ -48,21 +76,25 @@ export class OllamaWorkerProvider implements WorkerProvider {
       }
       const data = (await res.json()) as { models: Array<{ name: string }> };
       const modelNames = data.models.map((m) => m.name);
-      const exactMatch = modelNames.includes(this.modelId);
-      const prefixMatch = modelNames.some((n) => n.startsWith(this.modelId.split(":")[0]));
+      const requested = this.modelId;
+      const resolved = this.resolveInstalled(modelNames);
 
-      if (!exactMatch && !prefixMatch) {
+      if (!resolved) {
         return {
           available: false,
           models: modelNames,
-          message: `Model "${this.modelId}" not found. Available models: ${modelNames.join(", ") || "(none)"}. Pull it with: ollama pull ${this.modelId}`,
+          message: `Model "${requested}" not found. Available models: ${modelNames.join(", ") || "(none)"}. Pull it with: ollama pull ${requested}`,
         };
       }
 
+      this.modelId = resolved; // normalize so sendTask uses a confirmed-installed id
       return {
         available: true,
         models: modelNames,
-        message: `Model "${this.modelId}" is available`,
+        message:
+          resolved === requested
+            ? `Model "${resolved}" is available`
+            : `Requested "${requested}" not installed; using same-family model "${resolved}". Pull the exact tag with: ollama pull ${requested}`,
       };
     } catch {
       return {
