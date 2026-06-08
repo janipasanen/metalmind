@@ -9,6 +9,7 @@ import type {
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
+import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
 
 const mlxCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -111,12 +112,11 @@ export class MlxProvider implements ModelProvider {
       temperature: 0.7,
     };
 
-    const res = await fetch(`${this.config.baseUrl}/chat`, {
+    const res = await fetchWithTimeout(`${this.config.baseUrl}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "mlx", "MLX chat failed");
@@ -145,12 +145,11 @@ export class MlxProvider implements ModelProvider {
       temperature: 0.7,
     };
 
-    const res = await fetch(`${this.config.baseUrl}/chat`, {
+    const res = await fetchWithTimeout(`${this.config.baseUrl}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "mlx", "MLX stream failed");

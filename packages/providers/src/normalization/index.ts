@@ -11,3 +11,4 @@ export {
   parseRetryAfter,
   providerErrorFromResponse,
 } from "./provider-error.js";
+export { fetchWithTimeout, DEFAULT_CONNECT_TIMEOUT_MS } from "./fetch-with-timeout.js";

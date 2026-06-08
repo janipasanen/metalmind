@@ -7,6 +7,7 @@ import type {
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
+import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
 
 const openaiCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -70,15 +71,14 @@ export class OpenAIProvider implements ModelProvider {
     };
     if (request.tools) body.tools = request.tools;
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "openai", "OpenAI chat failed");
@@ -127,15 +127,14 @@ export class OpenAIProvider implements ModelProvider {
     };
     if (request.tools) body.tools = request.tools;
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "openai", "OpenAI stream failed");

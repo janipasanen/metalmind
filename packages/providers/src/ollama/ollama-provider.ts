@@ -9,6 +9,7 @@ import type {
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
+import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
 
 interface OllamaMessage {
   role: string;
@@ -91,12 +92,11 @@ export class OllamaProvider implements ModelProvider {
       stream: false,
     };
 
-    const res = await fetch(`${this.baseUrl}/api/chat`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/api/chat`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "ollama", "Ollama chat failed");
@@ -129,12 +129,11 @@ export class OllamaProvider implements ModelProvider {
       }));
     }
 
-    const res = await fetch(`${this.baseUrl}/api/chat`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/api/chat`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "ollama", "Ollama stream failed");

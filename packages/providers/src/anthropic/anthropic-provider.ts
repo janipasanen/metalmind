@@ -7,6 +7,7 @@ import type {
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
+import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
 
 const anthropicCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -150,7 +151,7 @@ export class AnthropicProvider implements ModelProvider {
     const tools = toAnthropicTools(request.tools);
     if (tools) body.tools = tools;
 
-    const res = await fetch(`${this.baseUrl}/v1/messages`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
         "x-api-key": this.apiKey,
@@ -158,8 +159,7 @@ export class AnthropicProvider implements ModelProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "anthropic", "Anthropic chat failed");
@@ -198,7 +198,7 @@ export class AnthropicProvider implements ModelProvider {
     const tools = toAnthropicTools(request.tools);
     if (tools) body.tools = tools;
 
-    const res = await fetch(`${this.baseUrl}/v1/messages`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
         "x-api-key": this.apiKey,
@@ -206,8 +206,7 @@ export class AnthropicProvider implements ModelProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    }, request.signal);
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "anthropic", "Anthropic stream failed");
