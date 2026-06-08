@@ -188,6 +188,7 @@ export default function App({ config }: AppProps) {
       }
 
       if (input === "/quit") {
+        agentRef.current?.dispose();
         yield { type: "done" } as const;
         process.exit(0);
       }

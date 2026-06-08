@@ -169,6 +169,7 @@ export class SafetyValidator {
       "gitRestore",
       "gitCreateBranch",
       "runCommand",
+      "runBackground",
     ]);
     return APPROVAL_REQUIRED_TOOLS.has(toolName);
   }

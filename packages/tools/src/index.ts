@@ -12,6 +12,18 @@ export { allGitTools, gitStatusTool, gitDiffTool, gitDiffFileTool, gitAddTool, g
 export { CommitMessageGenerator } from "./git/commit-generator.js";
 export type { CommitSuggestion } from "./git/commit-generator.js";
 export { runShellTools, runCommandTool, runTestsTool, runBuildTool, runLintTool, runFormatTool } from "./shell/shell-tools.js";
+export {
+  backgroundShellTools,
+  runBackgroundTool,
+  pollBackgroundTool,
+  stopBackgroundTool,
+  killAllBackgroundProcesses,
+  startBackgroundProcess,
+  pollBackgroundProcess,
+  stopBackgroundProcess,
+  listBackgroundProcesses,
+  _resetBackgroundRegistry,
+} from "./shell/background-tools.js";
 export { RepoMap } from "./context/repo-map.js";
 export type { RepoMapEntry, RepoMapOptions } from "./context/repo-map.js";
 export { parseSource, SymbolIndex } from "./code-intel/tree-sitter-parser.js";

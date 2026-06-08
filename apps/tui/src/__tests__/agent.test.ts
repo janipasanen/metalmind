@@ -104,6 +104,8 @@ vi.mock("@metalmind/tools", async () => {
   runShellTools: [],
   allSymbolTools: [],
   allWebTools: [],
+  backgroundShellTools: [],
+  killAllBackgroundProcesses: () => {},
   indexFile: () => {},
   getReferenceIndex: () => ({ indexFile: () => {} }),
   RepoMapV2: class {

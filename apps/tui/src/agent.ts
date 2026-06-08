@@ -1,5 +1,5 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, createDiagnosticsTool, AuditLog, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { zodToJsonSchema } from "./zod-to-json.js";
@@ -33,6 +33,8 @@ function buildRegistry(projectRoot: string): ToolRegistry {
   registry.register(createDiagnosticsTool(projectRoot));
   // Web tools: fetch a URL / search the web.
   for (const tool of allWebTools) registry.register(tool);
+  // Background process tools: run/poll/stop long-running commands.
+  for (const tool of backgroundShellTools) registry.register(tool);
   return registry;
 }
 
@@ -879,7 +881,7 @@ export class AgentLoop {
 
   /** Pre-execution safety check: dangerous shell commands, secret/traversal paths. */
   private preflightSafety(toolName: string, input: Record<string, unknown>): SafetyViolation | null {
-    if (toolName === "runCommand" && typeof input.command === "string") {
+    if ((toolName === "runCommand" || toolName === "runBackground") && typeof input.command === "string") {
       return (
         this.safetyValidator.validateShellCommand(input.command) ??
         this.safetyValidator.validateFilePath(input.command)
@@ -1282,5 +1284,10 @@ export class AgentLoop {
   clearHistory(): void {
     this.history = [];
     this.turnCount = 0;
+  }
+
+  /** Release resources: kill any background processes started this session (#153). */
+  dispose(): void {
+    killAllBackgroundProcesses();
   }
 }
