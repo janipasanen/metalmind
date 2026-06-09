@@ -2,7 +2,14 @@ import { z } from "zod";
 import { createTool, type AgentTool } from "../types.js";
 import { parseSource } from "./tree-sitter-parser.js";
 import { ReferenceIndex } from "./reference-index.js";
+import type { LspClient } from "./lsp-client.js";
 import { readFileSync, existsSync } from "node:fs";
+
+/** Optional LSP client; when connected, symbol tools prefer it over the heuristic index (#178). */
+let activeLspClient: LspClient | null = null;
+export function setLspClient(client: LspClient | null): void {
+  activeLspClient = client;
+}
 
 const FindSymbolSchema = z.object({
   name: z.string().min(1).describe("Symbol name to find"),
@@ -104,6 +111,31 @@ export const findReferencesTool: AgentTool = createTool({
   requiresConfirmation: false,
   async execute(input) {
     const index = getReferenceIndex();
+
+    // Prefer real LSP references when a language server is connected (#178);
+    // fall back to the heuristic index otherwise.
+    if (activeLspClient?.isConnected()) {
+      try {
+        const def = index.findSymbol(input.name).definitions[0];
+        if (def) {
+          const locs = await activeLspClient.references(
+            def.filePath,
+            def.symbol.range.startRow,
+            def.symbol.range.startColumn ?? 0,
+          );
+          if (locs.length > 0) {
+            const lines = locs.slice(0, 30).map((l) => `  ${l.filePath}:${l.line + 1}`);
+            return (
+              `References to "${input.name}" via LSP (${locs.length}):\n${lines.join("\n")}` +
+              (locs.length > 30 ? `\n  ... and ${locs.length - 30} more` : "")
+            );
+          }
+        }
+      } catch {
+        // language server hiccup — fall through to the heuristic index
+      }
+    }
+
     const refs = index.findReferences(input.name);
 
     if (refs.length === 0) {

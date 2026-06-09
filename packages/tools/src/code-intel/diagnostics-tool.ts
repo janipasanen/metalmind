@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createTool, type AgentTool } from "../types.js";
 import { LspClient, type LspDiagnostic } from "./lsp-client.js";
+import { setLspClient } from "./symbol-tools.js";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -25,6 +26,8 @@ export function createDiagnosticsTool(projectRoot: string): AgentTool {
         if (!client) {
           client = new LspClient(projectRoot);
           await client.start();
+          // Share the running server so the symbol tools prefer LSP too (#178).
+          setLspClient(client);
         }
 
         let allDiagnostics: Map<string, LspDiagnostic[]>;

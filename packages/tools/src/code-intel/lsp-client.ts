@@ -1,7 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+export interface LspLocation {
+  filePath: string;
+  line: number;
+  character: number;
+}
 
 export interface LspDiagnostic {
   filePath: string;
@@ -42,6 +48,7 @@ export class LspClient {
   private connected = false;
   private rootPath: string;
   private diagnostics = new Map<string, LspDiagnostic[]>();
+  private opened = new Set<string>();
 
   constructor(rootPath: string) {
     this.rootPath = resolve(rootPath);
@@ -129,6 +136,83 @@ export class LspClient {
    */
   getAllDiagnostics(): Map<string, LspDiagnostic[]> {
     return new Map(this.diagnostics);
+  }
+
+  /** Open a document with its real content so position-based requests work. */
+  private ensureOpen(filePath: string): string {
+    const absPath = resolve(this.rootPath, filePath);
+    const uri = `file://${absPath}`;
+    if (!this.opened.has(uri)) {
+      let text = "";
+      try {
+        text = readFileSync(absPath, "utf-8");
+      } catch {
+        text = "";
+      }
+      this.sendNotification("textDocument/didOpen", {
+        textDocument: { uri, languageId: this.getLanguageId(filePath), version: 1, text },
+      });
+      this.opened.add(uri);
+    }
+    return uri;
+  }
+
+  /** textDocument/definition at a 0-based position (#178). */
+  async definition(filePath: string, line: number, character: number): Promise<LspLocation[]> {
+    if (!this.connected) return [];
+    const uri = this.ensureOpen(filePath);
+    await new Promise((r) => setTimeout(r, 200));
+    const result = await this.request("textDocument/definition", {
+      textDocument: { uri },
+      position: { line, character },
+    }).catch(() => null);
+    return this.parseLocations(result);
+  }
+
+  /** textDocument/references at a 0-based position (#178). */
+  async references(filePath: string, line: number, character: number): Promise<LspLocation[]> {
+    if (!this.connected) return [];
+    const uri = this.ensureOpen(filePath);
+    await new Promise((r) => setTimeout(r, 200));
+    const result = await this.request("textDocument/references", {
+      textDocument: { uri },
+      position: { line, character },
+      context: { includeDeclaration: true },
+    }).catch(() => null);
+    return this.parseLocations(result);
+  }
+
+  /** textDocument/hover at a 0-based position; returns the hover text (#178). */
+  async hover(filePath: string, line: number, character: number): Promise<string | null> {
+    if (!this.connected) return null;
+    const uri = this.ensureOpen(filePath);
+    await new Promise((r) => setTimeout(r, 200));
+    const result = (await this.request("textDocument/hover", {
+      textDocument: { uri },
+      position: { line, character },
+    }).catch(() => null)) as { contents?: unknown } | null;
+    return this.parseHover(result);
+  }
+
+  private parseLocations(result: unknown): LspLocation[] {
+    const arr = Array.isArray(result) ? result : result ? [result] : [];
+    return arr
+      .filter((l): l is { uri: string; range?: { start?: { line?: number; character?: number } } } => !!l && typeof (l as { uri?: unknown }).uri === "string")
+      .map((l) => ({
+        filePath: l.uri.replace("file://", ""),
+        line: l.range?.start?.line ?? 0,
+        character: l.range?.start?.character ?? 0,
+      }));
+  }
+
+  private parseHover(result: { contents?: unknown } | null): string | null {
+    const c = result?.contents;
+    if (!c) return null;
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) {
+      return c.map((x) => (typeof x === "string" ? x : (x as { value?: string })?.value ?? "")).filter(Boolean).join("\n") || null;
+    }
+    return (c as { value?: string }).value ?? null;
   }
 
   /**

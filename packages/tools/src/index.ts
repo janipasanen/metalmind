@@ -36,8 +36,11 @@ export {
   getReferenceIndex,
   resetReferenceIndex,
   indexFile,
+  setLspClient,
 } from "./code-intel/symbol-tools.js";
 export { createDiagnosticsTool } from "./code-intel/diagnostics-tool.js";
+export { LspClient } from "./code-intel/lsp-client.js";
+export type { LspDiagnostic, LspLocation } from "./code-intel/lsp-client.js";
 export { ReferenceIndex } from "./code-intel/reference-index.js";
 export type { ReferenceInfo } from "./code-intel/reference-index.js";
 export { RepoMapV2 } from "./code-intel/repo-map-v2.js";

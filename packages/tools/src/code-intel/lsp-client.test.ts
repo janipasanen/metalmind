@@ -30,3 +30,14 @@ describe("createDiagnosticsTool", () => {
     expect(tool.description).toContain("diagnostics");
   });
 });
+
+import { LspClient as LspClient178 } from "./lsp-client.js";
+
+describe("LspClient definition/references/hover (#178)", () => {
+  it("returns empty/null gracefully when no server is connected", async () => {
+    const client = new LspClient178(process.cwd());
+    expect(await client.definition("src/index.ts", 0, 0)).toEqual([]);
+    expect(await client.references("src/index.ts", 0, 0)).toEqual([]);
+    expect(await client.hover("src/index.ts", 0, 0)).toBeNull();
+  });
+});
