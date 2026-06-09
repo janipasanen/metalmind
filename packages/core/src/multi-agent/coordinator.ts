@@ -271,6 +271,48 @@ export class Coordinator {
   }
 
   /**
+   * Run a single local-worker task through the result cache (#181). The cache
+   * key is content-derived (taskType + modelId + sha256 of the input), so a
+   * repeated task on UNCHANGED input (e.g. re-summarizing the same file) hits
+   * the cache instead of re-running the worker. This is what makes the cache
+   * actually useful — previously only classifyUserIntent (keyed on the full
+   * user message) ran through it, so hits never occurred.
+   */
+  async runCachedTask(
+    taskType: LocalWorkerTaskType,
+    input: Record<string, unknown>,
+    modelId = "",
+  ): Promise<AgentResult> {
+    if (this.config.cacheEnabled) {
+      const cached = this.cache.get(taskType, modelId, input);
+      if (cached !== undefined) {
+        return { taskId: `cache-${Date.now()}`, success: true, output: cached, durationMs: 0, modelUsed: "cache" };
+      }
+    }
+
+    const task: LocalWorkerTask = {
+      taskId: `worker-${Date.now()}`,
+      taskType,
+      input,
+      outputSchemaName: `${taskType}Output`,
+      maximumInputTokens: this.config.runner.maxInputTokens ?? 3000,
+      maximumOutputTokens: this.config.runner.maxOutputTokens ?? 800,
+      timeoutMilliseconds: this.config.runner.defaultTimeoutMs ?? 15_000,
+    };
+
+    this.eventBus.emit("coordinator:local-task-started", { taskId: task.taskId, taskType });
+    const result = await this.runner.run(task);
+    this.eventBus.emit(
+      result.success ? "coordinator:local-task-completed" : "coordinator:local-task-failed",
+      { taskId: task.taskId, success: result.success, durationMs: result.durationMs, ...(result.success ? {} : { error: result.error }) },
+    );
+    if (result.success && this.config.cacheEnabled) {
+      this.cache.set(taskType, modelId, input, result.output);
+    }
+    return result;
+  }
+
+  /**
    * Run several independent local-worker tasks concurrently (#180), emitting
    * lifecycle events per task. Results preserve input order; errors are
    * isolated per task.

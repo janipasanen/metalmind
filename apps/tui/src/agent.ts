@@ -1285,6 +1285,19 @@ export class AgentLoop {
     return { ...this.sessionUsage };
   }
 
+  /**
+   * Run a cached local-worker task (e.g. summarizeFile / extractSymbols) via the
+   * coordinator's content-hash result cache (#181). Returns null if no
+   * coordinator/worker is configured.
+   */
+  async runWorkerTask(
+    taskType: string,
+    input: Record<string, unknown>,
+  ): Promise<{ success: boolean; output?: unknown; error?: string; modelUsed?: string } | null> {
+    if (!this.coordinator) return null;
+    return this.coordinator.runCachedTask(taskType as Parameters<Coordinator["runCachedTask"]>[0], input);
+  }
+
   /** Pre-flight health check for the active provider/model (#174). */
   async checkHealth(): Promise<{ ok: boolean; message: string }> {
     try {

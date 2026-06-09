@@ -368,3 +368,33 @@ describe("Coordinator planning (#166) and parallel tasks (#180)", () => {
     expect(started).toEqual(["t1", "t2"]);
   });
 });
+
+describe("Coordinator.runCachedTask (#181 result cache)", () => {
+  it("re-runs the worker on first call and serves a cache hit on unchanged input", async () => {
+    let runs = 0;
+    const counting: WorkerProvider = {
+      providerName: "counting",
+      async isAvailable() { return true; },
+      async sendTask() {
+        runs++;
+        return JSON.stringify({ summary: "the file does X", confidence: 0.9 });
+      },
+    };
+    const coordinator = new Coordinator(createMockCloudProvider(), counting);
+    const input = { filePath: "src/a.ts", fileContent: "export const a = 1;" };
+
+    const first = await coordinator.runCachedTask("summarizeFile", input, "deepseek:1.3b");
+    expect(first.success).toBe(true);
+    expect(first.modelUsed).not.toBe("cache");
+
+    const second = await coordinator.runCachedTask("summarizeFile", input, "deepseek:1.3b");
+    expect(second.success).toBe(true);
+    expect(second.modelUsed).toBe("cache"); // served from cache
+    expect(runs).toBe(1); // worker ran only once
+
+    // Changing the content (content-hash key) misses the cache → re-runs.
+    const changed = await coordinator.runCachedTask("summarizeFile", { ...input, fileContent: "export const a = 2;" }, "deepseek:1.3b");
+    expect(changed.modelUsed).not.toBe("cache");
+    expect(runs).toBe(2);
+  });
+});
