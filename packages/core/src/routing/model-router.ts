@@ -87,9 +87,11 @@ export class ModelRouter {
     this.costTracker = config.costTracker ?? new CostTracker();
   }
 
-  /** Record provider usage so budget-aware routing can react to spend. */
+  /** Record provider usage so budget-aware routing can react to spend (#182). */
   recordUsage(usage: ProviderUsage): void {
-    this.costTracker.recordUsage(usage);
+    // Compute the cost from the rate table when the caller didn't supply one.
+    const costUsd = usage.costUsd || this.costTracker.estimateCost(usage.provider, usage.model, usage.inputTokens, usage.outputTokens);
+    this.costTracker.recordUsage({ ...usage, costUsd });
   }
 
   /** Current session spend vs the configured budget. */
@@ -239,13 +241,21 @@ export class ModelRouter {
   /**
    * Build a route decision targeting a specific tier (used for quality-gate escalation).
    */
-  decisionForTier(tier: TaskTier, reason: string): RouteDecision {
-    return {
+  decisionForTier(tier: TaskTier, reason: string, applyBudget = true): RouteDecision {
+    const decision: RouteDecision = {
       tier,
       modelId: this.modelForTier(tier),
       provider: this.providerForTier(tier),
       reason,
     };
+    // Honor the spend budget on auto-routed tiers; callers that represent an
+    // explicit user choice (forced tier) pass applyBudget=false (#182).
+    return applyBudget ? this.applyBudget(decision) : decision;
+  }
+
+  /** Update the session spend budget at runtime (e.g. via /budget set) (#182). */
+  setBudget(budgetUsd: number | undefined): void {
+    this.config.budgetUsd = budgetUsd;
   }
 
   /**

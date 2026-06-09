@@ -217,6 +217,7 @@ export default function App({ config }: AppProps) {
           "  /compact          - Summarize older turns to reclaim context window",
           "  /export [md|json] - Export the conversation transcript to a file",
           "  /cost             - Show this session's token usage",
+          "  /budget [set <usd>|off] - View or set the session spend cap",
           "  /routes           - Show routing decisions + per-tier hit counts",
           "  /keychain         - save | load | status — macOS keychain key storage",
           "  /undo             - Revert the agent's last edit set (repeatable)",
@@ -356,6 +357,36 @@ export default function App({ config }: AppProps) {
           }
         } catch (err) {
           yield { type: "text", text: `Keychain error: ${err instanceof Error ? err.message : String(err)}` } as const;
+        }
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/budget" || input.startsWith("/budget ")) {
+        const arg = input.slice(7).trim();
+        const agent = agentRef.current;
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+        } else if (arg.startsWith("set ")) {
+          const usd = parseFloat(arg.slice(4));
+          if (Number.isFinite(usd) && usd > 0) {
+            agent.setBudget(usd);
+            yield { type: "text", text: `Session spend budget set to $${usd.toFixed(2)}. Cloud routing downgrades to local once reached.` } as const;
+          } else {
+            yield { type: "text", text: "Usage: /budget set <usd>  (e.g. /budget set 1.50)" } as const;
+          }
+        } else if (arg === "off" || arg === "clear") {
+          agent.setBudget(undefined);
+          yield { type: "text", text: "Spend budget cleared." } as const;
+        } else {
+          const s = agent.getBudgetStatus();
+          if (!s) {
+            yield { type: "text", text: "Budget tracking unavailable (no router configured)." } as const;
+          } else if (s.budgetUsd === undefined) {
+            yield { type: "text", text: `Spent this session: $${s.spentUsd.toFixed(4)} (no budget set — /budget set <usd>)` } as const;
+          } else {
+            yield { type: "text", text: `Spent: $${s.spentUsd.toFixed(4)} / $${s.budgetUsd.toFixed(2)}${s.overBudget ? " — OVER BUDGET: cloud routing is downgraded to local" : ""}` } as const;
+          }
         }
         yield { type: "done" } as const;
         return;

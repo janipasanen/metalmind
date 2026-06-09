@@ -96,6 +96,8 @@ export interface UserConfig {
     /** Formatter command; the changed file path is appended. Default: prettier. */
     formatCommand?: string;
   };
+  /** Soft session spend cap in USD; once reached, cloud routing downgrades to local (#182). */
+  budgetUsd?: number;
 }
 
 export interface McpServerConfig {

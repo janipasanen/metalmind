@@ -279,3 +279,46 @@ describe("ModelRouter budget-aware routing", () => {
     expect(decision.capabilityAdjusted).toBe(true);
   });
 });
+
+describe("spend budget (#182)", () => {
+  function budgetRouter(budgetUsd: number) {
+    return new ModelRouter({
+      tier1Provider: "ollama", tier1Model: "local-small",
+      tier2Provider: "ollama", tier2Model: "local-mid",
+      tier3Provider: "openai", tier3Model: "gpt-4",
+      budgetUsd,
+    });
+  }
+
+  it("downgrades cloud routing to local once the budget is reached", () => {
+    const router = budgetRouter(0.01); // $0.01 cap
+    // Under budget → tier3 stays cloud.
+    expect(router.decisionForTier("tier3-cloud", "complex").tier).toBe("tier3-cloud");
+    expect(router.budgetStatus().overBudget).toBe(false);
+
+    // gpt-4 at $0.03/1k → 1000 tokens = $0.03, exceeds the $0.01 cap.
+    router.recordUsage({ provider: "openai", model: "gpt-4", inputTokens: 600, outputTokens: 400, costUsd: 0, latencyMs: 0, timestamp: "t", success: true });
+    expect(router.budgetStatus().overBudget).toBe(true);
+
+    const downgraded = router.decisionForTier("tier3-cloud", "complex");
+    expect(downgraded.tier).toBe("tier1-local");
+    expect(downgraded.budgetAdjusted).toBe(true);
+  });
+
+  it("does NOT downgrade when applyBudget=false (explicit/forced tier)", () => {
+    const router = budgetRouter(0.01);
+    router.recordUsage({ provider: "openai", model: "gpt-4", inputTokens: 1000, outputTokens: 1000, costUsd: 0, latencyMs: 0, timestamp: "t", success: true });
+    expect(router.budgetStatus().overBudget).toBe(true);
+    const forced = router.decisionForTier("tier3-cloud", "forced", false);
+    expect(forced.tier).toBe("tier3-cloud");
+  });
+
+  it("setBudget(undefined) disables the cap", () => {
+    const router = budgetRouter(0.01);
+    router.recordUsage({ provider: "openai", model: "gpt-4", inputTokens: 1000, outputTokens: 1000, costUsd: 0, latencyMs: 0, timestamp: "t", success: true });
+    expect(router.budgetStatus().overBudget).toBe(true);
+    router.setBudget(undefined);
+    expect(router.budgetStatus().overBudget).toBe(false);
+    expect(router.decisionForTier("tier3-cloud", "complex").tier).toBe("tier3-cloud");
+  });
+});

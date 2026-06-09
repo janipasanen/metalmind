@@ -6,6 +6,7 @@ const SLASH_COMMANDS = [
   { syntax: "/help",        description: "Show available commands" },
   { syntax: "/tier ",       description: "Force a tier: 1|2|3|auto [model]" },
   { syntax: "/cost",        description: "Show this session's token usage" },
+  { syntax: "/budget ",     description: "View or set the session spend cap" },
   { syntax: "/routes",      description: "Routing decisions + per-tier counts" },
   { syntax: "/keychain ",   description: "save/load/status — macOS keychain" },
   { syntax: "/model ",      description: "Switch model  e.g. /model gemma3:27b" },

@@ -260,6 +260,8 @@ export function createDefaultRouter(
       tier3Model: tier3.model,
       localFirst: true,
       capabilities: tierCapabilities([tier1, tier2, tier3]),
+      // Soft spend cap: cloud routing downgrades to local once reached (#182).
+      budgetUsd: loadXdgConfig().budgetUsd,
     });
   })();
 }
@@ -311,6 +313,7 @@ export class AgentLoop {
   private onContextUsage?: (used: number, limit: number) => void;
   private onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
   private sessionUsage = { inputTokens: 0, outputTokens: 0 };
+  private lastRoute = { provider: "", model: "" };
   private routingLog: Array<{ tier: string; provider: string; model: string; reason: string; at: string }> = [];
   private registry: ToolRegistry;
   private history: AgentMessage[] = [];
@@ -738,7 +741,7 @@ export class AgentLoop {
       const override = this.tierOverrides.get(this._forcedTier);
       const decision: RouteDecision = override
         ? { tier: tierKey as import("@metalmind/core").TaskTier, modelId: override.model, provider: override.provider, reason: `forced tier ${this._forcedTier} (model override)` }
-        : this.router.decisionForTier(tierKey, `forced tier ${this._forcedTier}`);
+        : this.router.decisionForTier(tierKey, `forced tier ${this._forcedTier}`, false); // explicit choice → ignore budget
 
       this.recordRoute(decision);
       const provider = this.getProvider(decision.provider, decision.modelId);
@@ -1285,11 +1288,34 @@ export class AgentLoop {
     this.redactor = new Redactor(collectSecrets(xdg.apiKeys, [this.config.apiKey], xdg.mcpServers));
   }
 
-  /** Accumulate real provider token usage and notify the UI meter (#157). */
+  /** Accumulate real provider token usage; feed the router's budget tracker (#157, #182). */
   private recordUsage(usage: { inputTokens?: number; outputTokens?: number }): void {
     if (usage.inputTokens) this.sessionUsage.inputTokens += usage.inputTokens;
     if (usage.outputTokens) this.sessionUsage.outputTokens += usage.outputTokens;
     this.onUsage?.({ ...this.sessionUsage });
+    // Attribute spend to the active provider/model so budget routing can react (#182).
+    this.router?.recordUsage({
+      provider: this.lastRoute.provider || this.config.provider,
+      model: this.lastRoute.model || this.config.model,
+      inputTokens: usage.inputTokens ?? 0,
+      outputTokens: usage.outputTokens ?? 0,
+      costUsd: 0, // router computes from its rate table
+      latencyMs: 0,
+      timestamp: new Date().toISOString(),
+      success: true,
+    });
+  }
+
+  /** Session spend vs the configured budget, for /budget (#182). */
+  getBudgetStatus(): { spentUsd: number; budgetUsd?: number; overBudget: boolean } | null {
+    return this.router?.budgetStatus() ?? null;
+  }
+
+  /** Set the session spend cap at runtime and persist it (#182). */
+  setBudget(budgetUsd: number | undefined): void {
+    this.router?.setBudget(budgetUsd);
+    const xdg = loadXdgConfig();
+    saveXdgConfig({ ...xdg, budgetUsd });
   }
 
   /** Session token usage totals, for the /cost summary (#157). */
@@ -1323,6 +1349,7 @@ export class AgentLoop {
 
   /** Record a routing decision (accumulated, not overwritten) and notify the UI (#165). */
   private recordRoute(decision: RouteDecision): void {
+    this.lastRoute = { provider: decision.provider, model: decision.modelId };
     this.routingLog.push({
       tier: decision.tier,
       provider: decision.provider,
