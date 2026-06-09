@@ -270,6 +270,104 @@ export class Coordinator {
     return { decision, localResult };
   }
 
+  /**
+   * Run several independent local-worker tasks concurrently (#180), emitting
+   * lifecycle events per task. Results preserve input order; errors are
+   * isolated per task.
+   */
+  async runParallelTasks(tasks: LocalWorkerTask[], concurrency = 4): Promise<AgentResult[]> {
+    if (tasks.length === 0) return [];
+    this.setPhase("local-delegation");
+    for (const t of tasks) {
+      this.eventBus.emit("coordinator:local-task-started", { taskId: t.taskId, taskType: t.taskType });
+    }
+
+    const results = await this.runner.runMany(tasks, concurrency);
+
+    results.forEach((r, i) => {
+      this.eventBus.emit(
+        r.success ? "coordinator:local-task-completed" : "coordinator:local-task-failed",
+        {
+          taskId: tasks[i].taskId,
+          success: r.success,
+          durationMs: r.durationMs,
+          ...(r.success ? {} : { error: r.error }),
+        },
+      );
+      if (r.success && this.config.cacheEnabled) {
+        this.cache.set(tasks[i].taskType, r.modelUsed ?? "", tasks[i].input, r.output);
+      }
+    });
+
+    this.setPhase("completed");
+    return results;
+  }
+
+  /**
+   * Decompose a multi-step request into an ordered plan via the planner model,
+   * set it, and emit coordinator:plan so the Plan UI populates (#166).
+   */
+  async buildPlan(userRequest: string, planner: ModelProvider | null = this.cloudProvider): Promise<CoordinatorPlan | null> {
+    if (!planner) return null;
+    this.setPhase("planning");
+    try {
+      const res = await planner.completeChat({
+        messages: [
+          {
+            role: "system",
+            content:
+              'Decompose the user\'s coding request into 2-6 ordered, concrete steps. Respond ONLY with a JSON array of objects: [{"description": string, "type": "local-worker"|"cloud-main"|"direct-tool"}]. Use "cloud-main" for reasoning/code-writing, "local-worker" for summarize/extract/rank, "direct-tool" for a single file/command op. No prose.',
+          },
+          { role: "user", content: userRequest },
+        ],
+      });
+      const steps = this.parseStepsJson(res.message.content);
+      if (steps.length === 0) return null;
+      this.plan = { steps, userRequest, createdAt: new Date().toISOString() };
+      this.eventBus.emit("coordinator:plan", { plan: this.plan, requestId: `plan-${Date.now()}` });
+      return this.plan;
+    } catch {
+      return null;
+    }
+  }
+
+  private parseStepsJson(raw: string): PlanStep[] {
+    try {
+      const match = raw.match(/\[[\s\S]*\]/);
+      const arr = JSON.parse(match ? match[0] : raw) as Array<{ description?: string; type?: string }>;
+      if (!Array.isArray(arr)) return [];
+      return arr.slice(0, 6).map((s, i) => ({
+        id: `step-${i + 1}`,
+        description: String(s.description ?? `Step ${i + 1}`),
+        type: s.type === "local-worker" || s.type === "direct-tool" ? s.type : "cloud-main",
+        status: "pending" as const,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Update one plan step's status and re-emit the plan (#166). */
+  updateStepStatus(id: string, status: PlanStep["status"]): void {
+    if (!this.plan) return;
+    const step = this.plan.steps.find((s) => s.id === id);
+    if (!step) return;
+    step.status = status;
+    this.eventBus.emit("coordinator:plan", { plan: this.plan, requestId: "plan-update" });
+  }
+
+  /** Set every plan step to a status (e.g. all running / all completed) (#166). */
+  markAllSteps(status: PlanStep["status"]): void {
+    if (!this.plan) return;
+    for (const s of this.plan.steps) s.status = status;
+    this.eventBus.emit("coordinator:plan", { plan: this.plan, requestId: "plan-update" });
+  }
+
+  /** Clear the current plan (e.g. for a new turn). */
+  clearPlan(): void {
+    this.plan = null;
+  }
+
   private setPhase(phase: CoordinatorPhase): void {
     this.phase = phase;
     this.eventBus.emit("coordinator:status", { phase, message: `Phase: ${phase}` });

@@ -696,9 +696,19 @@ export class AgentLoop {
     try {
       yield* this.runInner(userInput, signal);
     } finally {
+      // Mark any active plan steps completed once the turn ends (#166).
+      this.coordinator?.markAllSteps("completed");
       // Persist after every turn, including on cancel/abort (#140).
       this.saveSession();
     }
+  }
+
+  /** Heuristic: is this request clearly multi-step and worth a decomposition plan? */
+  private shouldPlan(input: string): boolean {
+    const words = input.trim().split(/\s+/).length;
+    if (words < 12) return false;
+    if (/\b(and then|then|after that|first|second|next|step|also|finally)\b/i.test(input)) return true;
+    return (input.match(/\band\b/gi)?.length ?? 0) >= 2;
   }
 
   private async *runInner(userInput: string, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
@@ -812,6 +822,20 @@ export class AgentLoop {
     if (!this.router) {
       yield* this.agenticLoop([this.getProvider(this.config.provider, this.config.model)], toolDefs, { signal });
       return;
+    }
+
+    // Decompose clearly multi-step requests into a plan for the Plan UI (#166).
+    // Reset any prior plan first; plan on a cheap local tier to avoid cloud cost.
+    this.coordinator!.clearPlan();
+    this.onCoordinatorPlan?.([]);
+    if (this.shouldPlan(userInput)) {
+      try {
+        const pd = this.router.decisionForTier("tier2-medium", "planning");
+        const plan = await this.coordinator!.buildPlan(userInput, this.getProvider(pd.provider, pd.modelId));
+        if (plan) this.coordinator!.markAllSteps("running");
+      } catch {
+        // planning is best-effort — never block the turn on it
+      }
     }
 
     // Quality gate + escalation on the coordinator path (#158): collect the

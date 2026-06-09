@@ -37,6 +37,36 @@ export class LocalWorkerRunner {
     this.provider = provider;
   }
 
+  /**
+   * Run multiple independent worker tasks concurrently with bounded
+   * concurrency (#180). Results preserve input order; an error in one task is
+   * isolated to that task's AgentResult and never rejects the whole batch.
+   */
+  async runMany(tasks: LocalWorkerTask[], concurrency = 4): Promise<AgentResult[]> {
+    const results: AgentResult[] = new Array(tasks.length);
+    let next = 0;
+    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const i = next++;
+        if (i >= tasks.length) return;
+        try {
+          results[i] = await this.run(tasks[i]);
+        } catch (err) {
+          results[i] = {
+            taskId: tasks[i].taskId,
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: limit }, () => worker()));
+    return results;
+  }
+
   async run(task: LocalWorkerTask): Promise<AgentResult> {
     if (FORBIDDEN_LOCAL_WORKER_TASKS.has(task.taskType)) {
       return {

@@ -306,3 +306,65 @@ describe("LocalWorkerResultCache", () => {
     expect(resultB).toBe("result-b");
   });
 });
+describe("Coordinator planning (#166) and parallel tasks (#180)", () => {
+  function plannerProvider(content: string): ModelProvider {
+    return {
+      providerName: "planner",
+      supportedCapabilities: { supportsStreaming: true, supportsToolCalling: false, supportsVision: false, supportsReasoning: true, supportsJsonMode: true, maximumContextTokens: 100000 },
+      async completeChat() { return { message: { role: "assistant", content } }; },
+      async *streamChatCompletion() { yield { type: "done" } as ModelStreamEvent; },
+    };
+  }
+
+  it("buildPlan decomposes a request into steps and emits coordinator:plan (#166)", async () => {
+    const planJson = '[{"description":"Read the config","type":"direct-tool"},{"description":"Refactor the parser","type":"cloud-main"},{"description":"Summarize changes","type":"local-worker"}]';
+    const coordinator = new Coordinator(plannerProvider(planJson), createMockWorkerProvider());
+    let emitted: { steps: unknown[] } | null = null;
+    coordinator.on("coordinator:plan", (e: unknown) => { emitted = (e as { plan: { steps: unknown[] } }).plan; });
+
+    const plan = await coordinator.buildPlan("Do several things");
+    expect(plan).not.toBeNull();
+    expect(plan!.steps).toHaveLength(3);
+    expect(plan!.steps[0]).toMatchObject({ description: "Read the config", type: "direct-tool", status: "pending" });
+    expect(plan!.steps[1].type).toBe("cloud-main");
+    expect(emitted).not.toBeNull();
+    expect(coordinator.getPlan()?.steps).toHaveLength(3);
+  });
+
+  it("tolerates JSON wrapped in prose and updates step status", async () => {
+    const coordinator = new Coordinator(
+      plannerProvider('Here is the plan:\n[{"description":"step one","type":"cloud-main"}]\nDone.'),
+      createMockWorkerProvider(),
+    );
+    const plan = await coordinator.buildPlan("two part task");
+    expect(plan!.steps).toHaveLength(1);
+    coordinator.markAllSteps("running");
+    expect(coordinator.getPlan()!.steps[0].status).toBe("running");
+    coordinator.updateStepStatus("step-1", "completed");
+    expect(coordinator.getPlan()!.steps[0].status).toBe("completed");
+  });
+
+  it("buildPlan returns null on unparseable planner output", async () => {
+    const coordinator = new Coordinator(plannerProvider("I cannot make a plan."), createMockWorkerProvider());
+    expect(await coordinator.buildPlan("x")).toBeNull();
+  });
+
+  it("runParallelTasks runs worker tasks concurrently and emits lifecycle events (#180)", async () => {
+    const coordinator = new Coordinator(createMockCloudProvider(), createMockWorkerProvider());
+    const started: string[] = [];
+    coordinator.on("coordinator:local-task-started", (e: unknown) => started.push((e as { taskId: string }).taskId));
+
+    const tasks = ["t1", "t2"].map((id) => ({
+      taskId: id,
+      taskType: "summarizeFile",
+      input: { filePath: `${id}.ts`, fileContent: "x" },
+      outputSchemaName: "summarizeFileOutput",
+      maximumInputTokens: 3000,
+      maximumOutputTokens: 800,
+      timeoutMilliseconds: 5000,
+    }));
+    const results = await coordinator.runParallelTasks(tasks as never, 4);
+    expect(results).toHaveLength(2);
+    expect(started).toEqual(["t1", "t2"]);
+  });
+});
