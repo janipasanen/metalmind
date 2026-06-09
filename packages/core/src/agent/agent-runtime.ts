@@ -45,4 +45,6 @@ export interface ModelProvider {
   ): AsyncIterable<ModelStreamEvent>;
   completeChat(request: ChatCompletionRequest): Promise<ChatCompletionResponse>;
   countTokens?(request: TokenCountRequest): Promise<TokenCountResponse>;
+  /** Pre-flight check: key validity / model availability / reachability (#174). */
+  health?(): Promise<{ ok: boolean; message: string }>;
 }

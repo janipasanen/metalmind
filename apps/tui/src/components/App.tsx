@@ -87,6 +87,7 @@ export default function App({ config }: AppProps) {
   const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | undefined>(undefined);
   const [pendingApproval, setPendingApproval] = useState<{ req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null>(null);
   const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number } | undefined>(undefined);
+  const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
   const [localWorkerAvailable, setLocalWorkerAvailable] = useState(false);
@@ -169,6 +170,11 @@ export default function App({ config }: AppProps) {
           replaceMessages(restoredToChatMessages(restored));
         }
 
+        // Non-blocking pre-flight: warn up front on a bad key/missing model (#174).
+        void agent.checkHealth().then((h) => {
+          if (!cancelled) setHealthWarning(h.ok ? null : h.message);
+        });
+
         const coordinator = agent.coordinatorInstance;
         if (coordinator) {
           const wp = coordinator.getRunner();
@@ -210,7 +216,9 @@ export default function App({ config }: AppProps) {
           "  /compact          - Summarize older turns to reclaim context window",
           "  /export [md|json] - Export the conversation transcript to a file",
           "  /cost             - Show this session's token usage",
-          "  /undo             - Revert the agent's last applied edit set",
+          "  /routes           - Show routing decisions + per-tier hit counts",
+          "  /undo             - Revert the agent's last edit set (repeatable)",
+          "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
@@ -265,6 +273,13 @@ export default function App({ config }: AppProps) {
         return;
       }
 
+      if (input === "/redo") {
+        const report = agentRef.current?.redoLastEdit() ?? "Agent not initialised.";
+        yield { type: "text", text: report } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
       if (input === "/compact") {
         const msg = (await agentRef.current?.compactHistory()) ?? "Agent not initialised.";
         yield { type: "text", text: msg } as const;
@@ -308,6 +323,13 @@ export default function App({ config }: AppProps) {
         const text = u
           ? `Session token usage:\n  input:  ${u.inputTokens.toLocaleString()}\n  output: ${u.outputTokens.toLocaleString()}\n  total:  ${(u.inputTokens + u.outputTokens).toLocaleString()}`
           : "Agent not initialised.";
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/routes") {
+        const text = agentRef.current?.getRoutingSummary() ?? "Agent not initialised.";
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;
@@ -470,6 +492,11 @@ export default function App({ config }: AppProps) {
         currentRouting={currentRouting}
         planSteps={planSteps}
       />
+      {healthWarning && (
+        <Box>
+          <Text color="yellow">⚠ {healthWarning}</Text>
+        </Box>
+      )}
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
       <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} />

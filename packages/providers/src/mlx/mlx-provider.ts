@@ -206,4 +206,16 @@ export class MlxProvider implements ModelProvider {
     // MLX sidecar has no count endpoint; estimate instead of 0 (#170).
     return { tokenCount: roughTokenCountMessages(request.messages) };
   }
+
+  async health(): Promise<{ ok: boolean; message: string }> {
+    try {
+      const res = await fetch(`${this.config.baseUrl}/health`, { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) return { ok: false, message: "MLX sidecar not running" };
+      const body = (await res.json().catch(() => ({}))) as { model_loaded?: boolean };
+      if (body.model_loaded === false) return { ok: false, message: "MLX sidecar up but no model loaded" };
+      return { ok: true, message: "mlx: ready" };
+    } catch {
+      return { ok: false, message: "MLX sidecar not running" };
+    }
+  }
 }

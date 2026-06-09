@@ -1243,3 +1243,67 @@ describe("AgentLoop token usage (M6 #157)", () => {
     expect(usageCb).toHaveBeenLastCalledWith({ inputTokens: 200, outputTokens: 50 });
   });
 });
+
+describe("AgentLoop undo/redo, routes, health (M6 #176, #165, #174)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function writeTurn(file: string, content: string) {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "t1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: file, content }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("undo then redo round-trips an edit (#176)", async () => {
+    const root = join(tmpdir(), `mm-redo-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "f.ts");
+    writeFileSync(file, "ORIGINAL");
+
+    mockCreateProvider.mockReturnValue(writeTurn(file, "EDITED"));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("edit it"));
+    expect(readFileSync(file, "utf-8")).toBe("EDITED");
+
+    expect(loop.undoLastEdit()).toMatch(/Undid an edit set/);
+    expect(readFileSync(file, "utf-8")).toBe("ORIGINAL");
+
+    expect(loop.redoLastEdit()).toMatch(/Redid an edit set/);
+    expect(readFileSync(file, "utf-8")).toBe("EDITED");
+
+    expect(loop.redoLastEdit()).toMatch(/Nothing to redo/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("records routing decisions for /routes via the forced-tier path (#165)", async () => {
+    const router = await createDefaultRouter({ provider: "ollama", model: "x", explicit: false } as never);
+    const loop = new AgentLoop({ provider: "ollama", model: "x", explicit: false }, { projectRoot: tmpdir(), router });
+    mockCreateProvider.mockReturnValue(makeProvider([{ type: "text", text: "ok" }, { type: "done" }]) as never);
+    loop.setForcedTier(3); // deterministic route, no network classification
+    await collect(loop.run("hello"));
+    expect(loop.getRoutingSummary()).toMatch(/Routing hit counts/);
+  });
+
+  it("checkHealth returns ok:true when the provider has no health hook", async () => {
+    mockCreateProvider.mockReturnValue(makeProvider([{ type: "done" }]) as never);
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: tmpdir() });
+    const h = await loop.checkHealth();
+    expect(h.ok).toBe(true);
+  });
+});

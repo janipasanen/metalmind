@@ -192,6 +192,29 @@ export class AnthropicProvider implements ModelProvider {
     return { message };
   }
 
+  async health(): Promise<{ ok: boolean; message: string }> {
+    // A free, real validation: count_tokens on a tiny message verifies the key.
+    if (!this.apiKey) return { ok: false, message: "Anthropic API key not set" };
+    try {
+      const res = await fetchWithTimeout(`${this.baseUrl}/v1/messages/count_tokens`, {
+        method: "POST",
+        headers: {
+          "x-api-key": this.apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "token-counting-2024-11-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ model: this.modelName, messages: [{ role: "user", content: "hi" }] }),
+      });
+      if (res.status === 401) return { ok: false, message: "Invalid Anthropic API key" };
+      if (res.status === 404) return { ok: false, message: `Anthropic model "${this.modelName}" not found` };
+      if (!res.ok) return { ok: false, message: `Anthropic not reachable (${res.status})` };
+      return { ok: true, message: "anthropic: key + model valid" };
+    } catch {
+      return { ok: false, message: "Anthropic not reachable" };
+    }
+  }
+
   /** Real token count via Anthropic's free count_tokens endpoint (#170). */
   async countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
     try {

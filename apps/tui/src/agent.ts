@@ -310,6 +310,7 @@ export class AgentLoop {
   private onContextUsage?: (used: number, limit: number) => void;
   private onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
   private sessionUsage = { inputTokens: 0, outputTokens: 0 };
+  private routingLog: Array<{ tier: string; provider: string; model: string; reason: string; at: string }> = [];
   private registry: ToolRegistry;
   private history: AgentMessage[] = [];
   private projectRoot: string;
@@ -324,6 +325,7 @@ export class AgentLoop {
   private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
+  private redoStack: EditSet[] = [];
   private onApprovalRequest?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   private alwaysAllow = new Set<string>();
   private autoApprove = false;
@@ -725,7 +727,7 @@ export class AgentLoop {
         ? { tier: tierKey as import("@metalmind/core").TaskTier, modelId: override.model, provider: override.provider, reason: `forced tier ${this._forcedTier} (model override)` }
         : this.router.decisionForTier(tierKey, `forced tier ${this._forcedTier}`);
 
-      this.onRoute?.(decision);
+      this.recordRoute(decision);
       const provider = this.getProvider(decision.provider, decision.modelId);
       // Forced tier: respect the user's explicit choice — retry, but no auto-fallback.
       yield* this.agenticLoop([provider], toolDefs, { signal });
@@ -745,7 +747,7 @@ export class AgentLoop {
       { conversationDepth: this.turnCount, historyTokens },
       this.buildTriage(),
     );
-    this.onRoute?.(decision);
+    this.recordRoute(decision);
 
     let provider = this.getProvider(decision.provider, decision.modelId);
     let attempt = await this.collectAttempt(provider, toolDefs, signal);
@@ -758,7 +760,7 @@ export class AgentLoop {
     while (!verdict.passed && decision.tier !== "tier3-cloud") {
       const nextTier = this.router.escalateTier(decision.tier);
       decision = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
-      this.onRoute?.(decision);
+      this.recordRoute(decision);
       yield {
         type: "text",
         text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n`,
@@ -817,7 +819,7 @@ export class AgentLoop {
     // tier if it's weak/empty/errored — instead of returning a poor tier-1
     // answer as-is. recordFailure feeds escalation thresholds + telemetry.
     let decision = this.router.decisionForTier(targetTierKey, `coordinator classified: ${targetTierKey}`);
-    this.onRoute?.(decision);
+    this.recordRoute(decision);
     let provider = this.getProvider(decision.provider, decision.modelId);
     let attempt = await this.collectAttempt(provider, toolDefs, signal);
     let verdict = evaluateQuality({ text: attempt.text, toolCalls: attempt.toolCalls, errored: attempt.errored });
@@ -826,7 +828,7 @@ export class AgentLoop {
       this.router.recordFailure(decision.tier);
       const nextTier = this.router.escalateTier(decision.tier);
       decision = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
-      this.onRoute?.(decision);
+      this.recordRoute(decision);
       yield { type: "text", text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n` };
       provider = this.getProvider(decision.provider, decision.modelId);
       attempt = await this.collectAttempt(provider, toolDefs, signal);
@@ -1156,38 +1158,67 @@ export class AgentLoop {
     });
     if (files.length === 0) return;
 
+    // A fresh agent edit invalidates the redo history (#176).
+    this.redoStack = [];
     const top = this.editStack[this.editStack.length - 1];
     if (top && top.turn === turn) top.files.push(...files);
     else this.editStack.push({ turn, files });
   }
 
-  /** Revert the most recent agent edit set, restoring pre-edit snapshots (#144). */
-  undoLastEdit(): string {
-    const set = this.editStack.pop();
-    if (!set) return "Nothing to undo — no agent edits recorded this session.";
-
-    // Earliest snapshot per path holds the pre-turn content.
+  /**
+   * Restore one edit set, capturing the current state as the inverse onto
+   * `pushInverseTo` — so undo and redo are symmetric (#144, #176).
+   */
+  private restoreSet(set: EditSet, pushInverseTo: EditSet[]): string {
+    // Earliest snapshot per path holds the target content for this direction.
     const earliest = new Map<string, string | null>();
     for (const f of set.files) if (!earliest.has(f.path)) earliest.set(f.path, f.before);
 
-    const reverted: string[] = [];
+    const inverse: EditSet = { turn: set.turn, files: [] };
+    const changed: string[] = [];
     for (const [path, before] of earliest) {
+      // Capture the current content as the inverse snapshot (for redo/undo back).
+      let current: string | null = null;
+      try {
+        current = existsSync(path) ? readFileSync(path, "utf8") : null;
+      } catch {
+        current = null;
+      }
+      inverse.files.push({ path, before: current });
+
       try {
         if (before === null) {
           if (existsSync(path)) {
             rmSync(path);
-            reverted.push(`deleted ${path} (was newly created)`);
+            changed.push(`deleted ${path}`);
           }
         } else {
           mkdirSync(dirname(path), { recursive: true });
           writeFileSync(path, before, "utf8");
-          reverted.push(`restored ${path}`);
+          changed.push(`restored ${path}`);
         }
       } catch (err) {
-        reverted.push(`FAILED ${path}: ${errText(err)}`);
+        changed.push(`FAILED ${path}: ${errText(err)}`);
       }
     }
-    return `Undid last edit set:\n${reverted.map((r) => `  • ${r}`).join("\n")}`;
+    pushInverseTo.push(inverse);
+    return changed.map((r) => `  • ${r}`).join("\n");
+  }
+
+  /** Revert the most recent agent edit set; repeatable for multi-level undo (#144, #176). */
+  undoLastEdit(): string {
+    const set = this.editStack.pop();
+    if (!set) return "Nothing to undo — no agent edits recorded this session.";
+    const report = this.restoreSet(set, this.redoStack);
+    return `Undid an edit set (${this.editStack.length} more undo level(s) available):\n${report}`;
+  }
+
+  /** Re-apply the most recently undone edit set (#176). */
+  redoLastEdit(): string {
+    const set = this.redoStack.pop();
+    if (!set) return "Nothing to redo.";
+    const report = this.restoreSet(set, this.editStack);
+    return `Redid an edit set:\n${report}`;
   }
 
   /** Invoke an MCP tool, recording the call in the audit log (#147). */
@@ -1228,6 +1259,42 @@ export class AgentLoop {
   /** Session token usage totals, for the /cost summary (#157). */
   getSessionUsage(): { inputTokens: number; outputTokens: number } {
     return { ...this.sessionUsage };
+  }
+
+  /** Pre-flight health check for the active provider/model (#174). */
+  async checkHealth(): Promise<{ ok: boolean; message: string }> {
+    try {
+      const provider = this.getProvider(this.config.provider, this.config.model);
+      if (provider.health) return await provider.health();
+      return { ok: true, message: "" };
+    } catch (err) {
+      return { ok: false, message: errText(err) };
+    }
+  }
+
+  /** Record a routing decision (accumulated, not overwritten) and notify the UI (#165). */
+  private recordRoute(decision: RouteDecision): void {
+    this.routingLog.push({
+      tier: decision.tier,
+      provider: decision.provider,
+      model: decision.modelId,
+      reason: decision.reason,
+      at: new Date().toISOString(),
+    });
+    this.onRoute?.(decision);
+  }
+
+  /** Routing history + per-tier hit counts, for /routes (#165). */
+  getRoutingSummary(limit = 20): string {
+    if (this.routingLog.length === 0) return "No routing decisions yet this session.";
+    const counts = new Map<string, number>();
+    for (const r of this.routingLog) counts.set(r.tier, (counts.get(r.tier) ?? 0) + 1);
+    const tally = [...counts.entries()].map(([tier, n]) => `  ${tier}: ${n}`).join("\n");
+    const recent = this.routingLog
+      .slice(-limit)
+      .map((r) => `  ${r.at.slice(11, 19)}  ${r.tier} → ${r.provider}/${r.model}  (${r.reason})`)
+      .join("\n");
+    return `Routing hit counts (this session):\n${tally}\n\nRecent decisions:\n${recent}`;
   }
 
   /** Window history to fit the active model's context limit, reporting usage (#141). */

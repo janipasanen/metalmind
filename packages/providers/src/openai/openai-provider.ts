@@ -258,4 +258,19 @@ export class OpenAIProvider implements ModelProvider {
   async countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
     return { tokenCount: roughTokenCountMessages(request.messages) };
   }
+
+  async health(): Promise<{ ok: boolean; message: string }> {
+    if (!this.apiKey) return { ok: false, message: "OpenAI API key not set" };
+    try {
+      const res = await fetch(`${this.baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.status === 401) return { ok: false, message: "Invalid OpenAI API key" };
+      if (!res.ok) return { ok: false, message: `OpenAI not reachable (${res.status})` };
+      return { ok: true, message: "openai: key valid" };
+    } catch {
+      return { ok: false, message: "OpenAI not reachable" };
+    }
+  }
 }

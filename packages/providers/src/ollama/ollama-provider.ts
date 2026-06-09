@@ -256,6 +256,22 @@ export class OllamaProvider implements ModelProvider {
     return { tokenCount: roughTokenCountMessages(request.messages) };
   }
 
+  async health(): Promise<{ ok: boolean; message: string }> {
+    try {
+      const res = await fetch(`${this.baseUrl}/api/tags`, { headers: this.headers(), signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return { ok: false, message: `Ollama not reachable (${res.status}) at ${this.baseUrl}` };
+      const data = (await res.json()) as { models?: Array<{ name: string }> };
+      const names = (data.models ?? []).map((m) => m.name);
+      const family = this.modelName.split(":")[0];
+      if (names.includes(this.modelName) || names.some((n) => n.split(":")[0] === family)) {
+        return { ok: true, message: `ollama: ${this.modelName} available` };
+      }
+      return { ok: false, message: `Model "${this.modelName}" not pulled. Run: ollama pull ${this.modelName}` };
+    } catch {
+      return { ok: false, message: `Ollama not reachable at ${this.baseUrl} (is it running?)` };
+    }
+  }
+
   private convertMessages(messages: AgentMessage[]): OllamaMessage[] {
     return messages.map((msg) => {
       const out: OllamaMessage = { role: msg.role, content: msg.content };
