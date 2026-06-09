@@ -20,6 +20,7 @@ import McpConfig from "./McpConfig.js";
 import ThemeSelection from "./ThemeSelection.js";
 import TierModelPicker from "./TierModelPicker.js";
 import { loadXdgConfig, saveXdgConfig, switchTheme, loadTheme } from "@metalmind/config";
+import { KeychainConfig } from "@metalmind/apple";
 import { resolveConfig } from "../config.js";
 
 export interface ChatMessage {
@@ -217,6 +218,7 @@ export default function App({ config }: AppProps) {
           "  /export [md|json] - Export the conversation transcript to a file",
           "  /cost             - Show this session's token usage",
           "  /routes           - Show routing decisions + per-tier hit counts",
+          "  /keychain         - save | load | status — macOS keychain key storage",
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
@@ -324,6 +326,37 @@ export default function App({ config }: AppProps) {
           ? `Session token usage:\n  input:  ${u.inputTokens.toLocaleString()}\n  output: ${u.outputTokens.toLocaleString()}\n  total:  ${(u.inputTokens + u.outputTokens).toLocaleString()}`
           : "Agent not initialised.";
         yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/keychain" || input.startsWith("/keychain ")) {
+        const sub = input.slice(9).trim() || "status";
+        const kc = new KeychainConfig();
+        const cfg = loadXdgConfig();
+        try {
+          if (sub === "save") {
+            const saved: string[] = [];
+            for (const [provider, key] of Object.entries(cfg.apiKeys)) {
+              if (key && (await kc.setKey(provider, key))) saved.push(provider);
+            }
+            yield { type: "text", text: saved.length ? `Saved to macOS keychain: ${saved.join(", ")}` : "No keys saved (keychain unavailable or no keys set)." } as const;
+          } else if (sub === "load") {
+            const merged = { ...cfg.apiKeys };
+            const loaded: string[] = [];
+            for (const provider of await kc.listProviders()) {
+              const key = await kc.getKey(provider);
+              if (key) { merged[provider] = key; loaded.push(provider); }
+            }
+            if (loaded.length) saveXdgConfig({ ...cfg, apiKeys: merged });
+            yield { type: "text", text: loaded.length ? `Loaded from keychain: ${loaded.join(", ")}` : "Nothing to load from keychain." } as const;
+          } else {
+            const providers = await kc.listProviders();
+            yield { type: "text", text: providers.length ? `Keys in keychain: ${providers.join(", ")}` : "No keys in keychain (or keychain unavailable). Use /keychain save." } as const;
+          }
+        } catch (err) {
+          yield { type: "text", text: `Keychain error: ${err instanceof Error ? err.message : String(err)}` } as const;
+        }
         yield { type: "done" } as const;
         return;
       }

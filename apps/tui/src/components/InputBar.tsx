@@ -7,6 +7,7 @@ const SLASH_COMMANDS = [
   { syntax: "/tier ",       description: "Force a tier: 1|2|3|auto [model]" },
   { syntax: "/cost",        description: "Show this session's token usage" },
   { syntax: "/routes",      description: "Routing decisions + per-tier counts" },
+  { syntax: "/keychain ",   description: "save/load/status — macOS keychain" },
   { syntax: "/model ",      description: "Switch model  e.g. /model gemma3:27b" },
   { syntax: "/apikey ",     description: "Update API key for current provider" },
   { syntax: "/workspace ",  description: "Allow AI to access a directory" },

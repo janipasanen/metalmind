@@ -30,6 +30,7 @@ import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
 import type { ModelRoutingDecision } from "@metalmind/schemas";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
+import { Redactor, collectSecrets } from "./redact.js";
 
 interface BufferedAttempt {
   text: string;
@@ -326,6 +327,7 @@ export class AgentLoop {
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
   private redoStack: EditSet[] = [];
+  private redactor = new Redactor([]);
   private onApprovalRequest?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   private alwaysAllow = new Set<string>();
   private autoApprove = false;
@@ -345,6 +347,7 @@ export class AgentLoop {
     this.onUsage = options.onUsage;
     this.onApprovalRequest = options.onApprovalRequest;
     this.autoApprove = loadXdgConfig().permissions?.autoApprove ?? false;
+    this.rebuildRedactor();
     this.projectRoot = options.projectRoot ?? process.cwd();
     this.registry = buildRegistry(this.projectRoot);
     this.safetyValidator = new SafetyValidator(this.projectRoot);
@@ -1037,6 +1040,9 @@ export class AgentLoop {
           output = `Error: ${errText(err)}`;
         }
 
+        // Scrub any secret values before the output reaches the model or UI (#168).
+        output = this.redactor.redact(output);
+
         yield { type: "tool-result", output };
 
         this.history.push({
@@ -1271,6 +1277,12 @@ export class AgentLoop {
   /** Recent tool-call audit entries for the in-session /audit view (#147). */
   getAuditEntries(limit = 30): ToolAuditEntry[] {
     return this.auditLog.getRecent(limit);
+  }
+
+  /** (Re)build the secret redactor from current config api keys + MCP headers (#168). */
+  private rebuildRedactor(): void {
+    const xdg = loadXdgConfig();
+    this.redactor = new Redactor(collectSecrets(xdg.apiKeys, [this.config.apiKey], xdg.mcpServers));
   }
 
   /** Accumulate real provider token usage and notify the UI meter (#157). */
