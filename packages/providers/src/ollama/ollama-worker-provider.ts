@@ -1,5 +1,6 @@
 import type { WorkerProvider } from "@metalmind/core";
 import type { LocalWorkerTask } from "@metalmind/schemas";
+import { zodToJsonSchema } from "../normalization/zod-to-json-schema.js";
 
 export class OllamaWorkerProvider implements WorkerProvider {
   readonly providerName = "ollama-worker";
@@ -112,12 +113,9 @@ export class OllamaWorkerProvider implements WorkerProvider {
       throw new Error(`Unknown task type: ${task.taskType}`);
     }
 
-    const jsonSchema = taskSchema.output;
-    const shape = jsonSchema._def?.shape ?? {};
-    const properties: Record<string, string> = {};
-    for (const key of Object.keys(shape)) {
-      properties[key] = typeof shape[key] === "object" && shape[key]?._def?.typeName === "ZodNumber" ? "number" : "string";
-    }
+    // Send a faithful JSON Schema (enums, nested objects/arrays, required) so
+    // the worker matches the real output shape, not a flat string map (#175).
+    const jsonSchema = zodToJsonSchema(taskSchema.output);
 
     const prompt = this.buildPrompt(task);
 
@@ -126,7 +124,7 @@ export class OllamaWorkerProvider implements WorkerProvider {
       messages: [
         {
           role: "system",
-          content: `You are a helpful coding assistant. Respond ONLY with valid JSON matching this schema. Do not include any text before or after the JSON object.\n\nSchema properties: ${JSON.stringify(properties)}`,
+          content: `You are a helpful coding assistant. Respond ONLY with valid JSON matching this JSON Schema. Do not include any text before or after the JSON object.\n\nJSON Schema: ${JSON.stringify(jsonSchema)}`,
         },
         { role: "user", content: prompt },
       ],

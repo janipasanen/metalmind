@@ -467,4 +467,26 @@ describe("OllamaProvider message conversion", () => {
     // ...and the tool result must echo it back so Gemini can match the pair.
     expect(msgs[2].tool_call_id).toBe("srv-xyz");
   });
+
+  it("repairs malformed tool-call argument JSON instead of coercing to {} (#175)", async () => {
+    let requestBody: { messages: Array<Record<string, unknown>> } | null = null;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, opts) => {
+      requestBody = JSON.parse(opts.body as string);
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ message: { role: "assistant", content: "ok" } }) };
+    }));
+    const p = new OllamaProvider("test");
+    await p.completeChat({
+      messages: [
+        { role: "user", content: "x" },
+        {
+          role: "assistant",
+          content: "",
+          // Trailing comma + single quotes — malformed JSON a small model might emit.
+          toolCalls: [{ toolCallId: "t1", toolName: "readFile", argumentsJson: "{'path': '/a.ts',}" }],
+        },
+      ],
+    });
+    const assistant = requestBody!.messages[1] as { tool_calls?: Array<{ function: { arguments: Record<string, unknown> } }> };
+    expect(assistant.tool_calls![0].function.arguments).toEqual({ path: "/a.ts" });
+  });
 });

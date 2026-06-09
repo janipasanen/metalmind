@@ -12,3 +12,4 @@ export {
   providerErrorFromResponse,
 } from "./provider-error.js";
 export { fetchWithTimeout, DEFAULT_CONNECT_TIMEOUT_MS } from "./fetch-with-timeout.js";
+export { roughTokenCount, roughTokenCountMessages } from "./token-estimate.js";

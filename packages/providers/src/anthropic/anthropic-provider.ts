@@ -4,10 +4,13 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
   ModelStreamEvent,
+  TokenCountRequest,
+  TokenCountResponse,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
 import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
+import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 
 const anthropicCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -147,15 +150,21 @@ export class AnthropicProvider implements ModelProvider {
       messages,
       stream: false,
     };
-    if (system) body.system = system;
+    // Prompt caching (#173): mark the stable prefix (system + tools) with
+    // cache_control breakpoints so it isn't re-billed at full rate every turn.
+    if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
     const tools = toAnthropicTools(request.tools);
-    if (tools) body.tools = tools;
+    if (tools && tools.length) {
+      tools[tools.length - 1].cache_control = { type: "ephemeral" };
+      body.tools = tools;
+    }
 
     const res = await fetchWithTimeout(`${this.baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
         "x-api-key": this.apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
@@ -183,6 +192,30 @@ export class AnthropicProvider implements ModelProvider {
     return { message };
   }
 
+  /** Real token count via Anthropic's free count_tokens endpoint (#170). */
+  async countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
+    try {
+      const { system, messages } = buildAnthropicPayload(request.messages);
+      const body: Record<string, unknown> = { model: this.modelName, messages };
+      if (system) body.system = system;
+      const res = await fetchWithTimeout(`${this.baseUrl}/v1/messages/count_tokens`, {
+        method: "POST",
+        headers: {
+          "x-api-key": this.apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "token-counting-2024-11-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) return { tokenCount: roughTokenCountMessages(request.messages) };
+      const data = (await res.json()) as { input_tokens?: number };
+      return { tokenCount: data.input_tokens ?? roughTokenCountMessages(request.messages) };
+    } catch {
+      return { tokenCount: roughTokenCountMessages(request.messages) };
+    }
+  }
+
   async *streamChatCompletion(
     request: ChatCompletionRequest,
   ): AsyncGenerator<ModelStreamEvent, void, undefined> {
@@ -194,15 +227,21 @@ export class AnthropicProvider implements ModelProvider {
       messages,
       stream: true,
     };
-    if (system) body.system = system;
+    // Prompt caching (#173): mark the stable prefix (system + tools) with
+    // cache_control breakpoints so it isn't re-billed at full rate every turn.
+    if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
     const tools = toAnthropicTools(request.tools);
-    if (tools) body.tools = tools;
+    if (tools && tools.length) {
+      tools[tools.length - 1].cache_control = { type: "ephemeral" };
+      body.tools = tools;
+    }
 
     const res = await fetchWithTimeout(`${this.baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
         "x-api-key": this.apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),

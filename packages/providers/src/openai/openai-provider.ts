@@ -4,10 +4,13 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
   ModelStreamEvent,
+  TokenCountRequest,
+  TokenCountResponse,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
 import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
+import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 
 const openaiCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -244,5 +247,15 @@ export class OpenAIProvider implements ModelProvider {
 
     for (const event of flushToolCalls()) yield event;
     yield { type: "done" };
+  }
+
+  /**
+   * Token estimate (#170). OpenAI has no free count endpoint and an exact
+   * tiktoken tokenizer would add ~1.5MB of BPE data to the bundle, so we use a
+   * blended estimate rather than a hard-coded 0; real output counts still flow
+   * from the streamed usage chunk.
+   */
+  async countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
+    return { tokenCount: roughTokenCountMessages(request.messages) };
   }
 }

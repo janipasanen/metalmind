@@ -10,6 +10,7 @@ import type {
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
 import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
+import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 
 const mlxCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -201,7 +202,8 @@ export class MlxProvider implements ModelProvider {
     yield { type: "done" };
   }
 
-  async countTokens(_request: TokenCountRequest): Promise<TokenCountResponse> {
-    return { tokenCount: 0 };
+  async countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
+    // MLX sidecar has no count endpoint; estimate instead of 0 (#170).
+    return { tokenCount: roughTokenCountMessages(request.messages) };
   }
 }

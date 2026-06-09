@@ -289,10 +289,15 @@ describe("AnthropicProvider", () => {
         tools: [{ name: "readFile", description: "read a file", inputSchema: { type: "object", properties: { path: { type: "string" } } } }],
       });
 
-      expect(ref.body!.system).toBe("be terse");
-      const tools = ref.body!.tools as Array<{ name: string; input_schema: unknown }>;
+      // System is hoisted into a cache_control-marked text block for prompt caching (#173).
+      const sys = ref.body!.system as Array<{ type: string; text: string; cache_control?: unknown }>;
+      expect(sys[0].text).toBe("be terse");
+      expect(sys[0].cache_control).toEqual({ type: "ephemeral" });
+      const tools = ref.body!.tools as Array<{ name: string; input_schema: unknown; cache_control?: unknown }>;
       expect(tools[0].name).toBe("readFile");
       expect(tools[0].input_schema).toEqual({ type: "object", properties: { path: { type: "string" } } });
+      // The last tool carries a cache_control breakpoint for the stable prefix.
+      expect(tools[tools.length - 1].cache_control).toEqual({ type: "ephemeral" });
       // system message must not remain in the messages array
       const msgs = ref.body!.messages as Array<{ role: string }>;
       expect(msgs.every((m) => m.role !== "system")).toBe(true);

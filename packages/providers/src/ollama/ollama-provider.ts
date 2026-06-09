@@ -10,6 +10,8 @@ import type {
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
 import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
+import { roughTokenCountMessages } from "../normalization/token-estimate.js";
+import { JsonRepair } from "../normalization/json-repair.js";
 
 interface OllamaMessage {
   role: string;
@@ -25,11 +27,19 @@ interface OllamaMessage {
 }
 
 function safeParseArgs(json: string): Record<string, unknown> {
+  if (!json || !json.trim()) return {};
   try {
     const parsed = JSON.parse(json) as unknown;
     return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   } catch {
-    return {};
+    // Don't silently coerce malformed args to {} — try repairing common model
+    // JSON quirks (trailing commas, single quotes, unquoted keys) first (#175).
+    try {
+      const parsed = JSON.parse(JsonRepair.repair(json)) as unknown;
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
   }
 }
 
@@ -241,8 +251,9 @@ export class OllamaProvider implements ModelProvider {
     yield { type: "done" };
   }
 
-  async countTokens(_request: TokenCountRequest): Promise<TokenCountResponse> {
-    return { tokenCount: 0 };
+  async countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
+    // Ollama exposes no count endpoint; use an estimate instead of 0 (#170).
+    return { tokenCount: roughTokenCountMessages(request.messages) };
   }
 
   private convertMessages(messages: AgentMessage[]): OllamaMessage[] {
