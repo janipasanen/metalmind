@@ -416,6 +416,7 @@ export class AgentLoop {
   private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
   private remoteBrain = false;
   private subagentDepth = 0;
+  private pendingImages: string[] = [];
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
   private redoStack: EditSet[] = [];
@@ -537,6 +538,16 @@ export class AgentLoop {
     } catch {
       // best-effort
     }
+  }
+
+  /** Stage an image (data URL or https URL) to attach to the next user turn (#177). */
+  stageImage(url: string): void {
+    this.pendingImages.push(url);
+  }
+
+  /** How many images are staged for the next turn (#177). */
+  pendingImageCount(): number {
+    return this.pendingImages.length;
   }
 
   get safety(): SafetyValidator {
@@ -847,7 +858,10 @@ export class AgentLoop {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     }
-    this.history.push({ role: "user", content: userInput });
+    // Attach any staged image(s) to this user turn for vision models (#177).
+    const images = this.pendingImages.length > 0 ? [...this.pendingImages] : undefined;
+    this.pendingImages = [];
+    this.history.push({ role: "user", content: userInput, images });
     this.turnCount++;
     const toolDefs = this.toolDefs();
 

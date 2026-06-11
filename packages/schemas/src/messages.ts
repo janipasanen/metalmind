@@ -15,6 +15,9 @@ export const AgentMessageSchema = z.object({
   content: z.string(),
   toolCalls: z.array(AgentToolCallSchema).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  /** Optional image attachments for vision models — data URLs ("data:image/png;base64,…")
+   *  or remote https URLs. Serialized into multimodal content parts by the providers (#177). */
+  images: z.array(z.string()).optional(),
 });
 export type AgentMessage = z.infer<typeof AgentMessageSchema>;
 

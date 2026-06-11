@@ -11,6 +11,7 @@ import ApprovalView from "./ApprovalView.js";
 import { handleMcpCommand } from "../mcp-command.js";
 import { listModelsText, deleteModelText, pullModelProgress } from "../model-command.js";
 import { handlePromptCommand } from "../prompt-command.js";
+import { buildImageUrl } from "../image-command.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -229,6 +230,7 @@ export default function App({ config }: AppProps) {
           "  /audit            - Show this session's tool-call log",
           "  /mcp              - MCP servers: list | presets | add <preset> k=v | remove <id>",
           "  /models           - Local Ollama models: list | pull <name> | delete <name>",
+          "  /image            - Attach an image (path or https URL) for a vision model",
           "  /prompt           - Prompt library: save <name> <tmpl> | list | delete | <name> k=v",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
@@ -455,6 +457,23 @@ export default function App({ config }: AppProps) {
       if (input === "/mcp" || input.startsWith("/mcp ")) {
         const text = handleMcpCommand(input.slice(4));
         yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/image" || input.startsWith("/image ")) {
+        const agent = agentRef.current;
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+        } else {
+          const { url, error } = buildImageUrl(input.slice(6));
+          if (error) {
+            yield { type: "text", text: error } as const;
+          } else if (url) {
+            agent.stageImage(url);
+            yield { type: "text", text: `Attached image (${agent.pendingImageCount()} staged). Ask your question about it next — needs a vision-capable model.` } as const;
+          }
+        }
         yield { type: "done" } as const;
         return;
       }

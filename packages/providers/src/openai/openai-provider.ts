@@ -26,6 +26,13 @@ function convertToOpenAIMessage(msg: AgentMessage) {
     role: msg.role,
     content: msg.content,
   };
+  // Vision: serialize image attachments as multimodal content parts (#177).
+  if (msg.images?.length && msg.role === "user") {
+    m.content = [
+      ...(msg.content ? [{ type: "text", text: msg.content }] : []),
+      ...msg.images.map((url) => ({ type: "image_url", image_url: { url } })),
+    ];
+  }
   if (msg.toolCalls?.length) {
     m.tool_calls = msg.toolCalls.map((tc) => ({
       id: tc.toolCallId,

@@ -1525,3 +1525,14 @@ describe("M12 — latency is attributed per-attempt tier, not a stale one (#209 
     for (const s of loop.getLatencyStats()) expect(s.samples).toBe(1);
   });
 });
+
+describe("M14 — image staging (#177)", () => {
+  it("stages an image and clears it after attaching to the next turn", async () => {
+    mockCreateProvider.mockReturnValue(makeProvider([{ type: "text", text: "ok" }, { type: "done" }]) as never);
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    loop.stageImage("data:image/png;base64,AAAA");
+    expect(loop.pendingImageCount()).toBe(1);
+    await collect(loop.run("describe the image"));
+    expect(loop.pendingImageCount()).toBe(0); // attached to the turn + cleared
+  });
+});

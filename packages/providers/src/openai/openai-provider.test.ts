@@ -342,3 +342,22 @@ describe("OpenAIProvider.listModels (#214)", () => {
     expect(await p.listModels()).toEqual([]);
   });
 });
+
+describe("OpenAIProvider vision serialization (#177)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  it("serializes a user message's images into multimodal content parts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { role: "assistant", content: "a cat" } }] }),
+      text: async () => "{}",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new OpenAIProvider("gpt-4o", "sk-test");
+    await p.completeChat({ messages: [{ role: "user", content: "what is this?", images: ["data:image/png;base64,AAAA"] }] });
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    const userMsg = body.messages.find((m: { role: string }) => m.role === "user");
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    expect(userMsg.content).toContainEqual({ type: "text", text: "what is this?" });
+    expect(userMsg.content).toContainEqual({ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } });
+  });
+});

@@ -359,3 +359,22 @@ describe("AnthropicProvider.listModels (#214)", () => {
     expect(await p.listModels()).toEqual([]);
   });
 });
+
+describe("AnthropicProvider vision serialization (#177)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  it("serializes data-URL and https images into image blocks", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ content: [{ type: "text", text: "a cat" }] }),
+      text: async () => "{}",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new AnthropicProvider("claude-sonnet-4-6", "sk-ant-test");
+    await p.completeChat({ messages: [{ role: "user", content: "describe", images: ["data:image/png;base64,QUJD", "https://x/y.jpg"] }] });
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    const userMsg = body.messages.find((m: { role: string }) => m.role === "user");
+    expect(userMsg.content).toContainEqual({ type: "text", text: "describe" });
+    expect(userMsg.content).toContainEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } });
+    expect(userMsg.content).toContainEqual({ type: "image", source: { type: "url", url: "https://x/y.jpg" } });
+  });
+});

@@ -93,6 +93,15 @@ function buildAnthropicPayload(messages: AgentMessage[]): {
       continue;
     }
 
+    // Vision: serialize a user message's image attachments as image blocks (#177).
+    if (msg.role === "user" && msg.images?.length) {
+      const blocks: Array<Record<string, unknown>> = [];
+      if (msg.content) blocks.push({ type: "text", text: msg.content });
+      for (const img of msg.images) blocks.push(toAnthropicImageBlock(img));
+      out.push({ role: "user", content: blocks });
+      continue;
+    }
+
     out.push({ role: msg.role === "assistant" ? "assistant" : "user", content: msg.content });
   }
 
@@ -110,6 +119,15 @@ function buildAnthropicPayload(messages: AgentMessage[]): {
   }
 
   return { system, messages: merged };
+}
+
+/** Convert a data-URL or https image into an Anthropic image content block (#177). */
+function toAnthropicImageBlock(img: string): Record<string, unknown> {
+  const dataMatch = img.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
+  if (dataMatch) {
+    return { type: "image", source: { type: "base64", media_type: dataMatch[1], data: dataMatch[2] } };
+  }
+  return { type: "image", source: { type: "url", url: img } };
 }
 
 /** Map neutral tool defs to Anthropic's tool schema. */
