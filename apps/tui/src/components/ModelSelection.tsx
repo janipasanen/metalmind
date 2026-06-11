@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
 import { loadXdgConfig, saveXdgConfig, normalizeModelName } from "@metalmind/config";
+import { discoverModels } from "../model-discovery.js";
 
 export interface ModelSelectionProps {
   providerId: string;
@@ -11,8 +12,19 @@ export interface ModelSelectionProps {
 
 export default function ModelSelection({ providerId, onSelect, onCancel, accent = "cyan" }: ModelSelectionProps) {
   const config = loadXdgConfig();
-  const availableModels = config.models[providerId] || [];
-  
+  const [availableModels, setAvailableModels] = useState<string[]>(config.models[providerId] || []);
+  const [discovering, setDiscovering] = useState(true);
+
+  // Auto-discover live models from the provider's API/daemon, merged with the
+  // static list — degrades silently to the static list on failure (#214).
+  useEffect(() => {
+    let cancelled = false;
+    discoverModels(providerId)
+      .then((models) => { if (!cancelled && models.length) setAvailableModels(models); })
+      .finally(() => { if (!cancelled) setDiscovering(false); });
+    return () => { cancelled = true; };
+  }, [providerId]);
+
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isCustom, setIsCustom] = useState(false);
   const [customModel, setCustomModel] = useState("");
@@ -79,7 +91,7 @@ export default function ModelSelection({ providerId, onSelect, onCancel, accent 
 
   return (
     <Box flexDirection="column" borderColor={accent} paddingX={1} paddingY={1} width="60%">
-      <Text bold color={accent}>Select Model for {providerId}</Text>
+      <Text bold color={accent}>Select Model for {providerId}{discovering ? " (discovering…)" : ""}</Text>
       {isCustom ? (
         <Box flexDirection="column" paddingY={1}>
           <Text color="yellow">Enter custom model name:</Text>

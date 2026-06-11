@@ -259,6 +259,25 @@ export class OpenAIProvider implements ModelProvider {
     return { tokenCount: roughTokenCountMessages(request.messages) };
   }
 
+  /** Discover available chat models from the OpenAI API (#214). Returns [] on failure. */
+  async listModels(): Promise<string[]> {
+    if (!this.apiKey) return [];
+    try {
+      const res = await fetch(`${this.baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return [];
+      const data = (await res.json()) as { data?: Array<{ id: string }> };
+      return (data.data ?? [])
+        .map((m) => m.id)
+        .filter((id) => /^(gpt|o1|o3|chatgpt)/i.test(id))
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
   async health(): Promise<{ ok: boolean; message: string }> {
     if (!this.apiKey) return { ok: false, message: "OpenAI API key not set" };
     try {

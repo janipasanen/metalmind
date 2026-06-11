@@ -192,6 +192,22 @@ export class AnthropicProvider implements ModelProvider {
     return { message };
   }
 
+  /** Discover available models from the Anthropic API (#214). Returns [] on failure. */
+  async listModels(): Promise<string[]> {
+    if (!this.apiKey) return [];
+    try {
+      const res = await fetchWithTimeout(`${this.baseUrl}/v1/models`, {
+        method: "GET",
+        headers: { "x-api-key": this.apiKey, "anthropic-version": "2023-06-01" },
+      });
+      if (!res.ok) return [];
+      const data = (await res.json()) as { data?: Array<{ id: string }> };
+      return (data.data ?? []).map((m) => m.id);
+    } catch {
+      return [];
+    }
+  }
+
   async health(): Promise<{ ok: boolean; message: string }> {
     // A free, real validation: count_tokens on a tiny message verifies the key.
     if (!this.apiKey) return { ok: false, message: "Anthropic API key not set" };

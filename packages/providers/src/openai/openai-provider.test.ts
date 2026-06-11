@@ -326,3 +326,19 @@ describe("OpenAIProvider", () => {
     });
   });
 });
+
+describe("OpenAIProvider.listModels (#214)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  it("returns chat models, filtered + sorted", async () => {
+    vi.stubGlobal("fetch", mockFetch(200, { data: [
+      { id: "gpt-4o" }, { id: "gpt-3.5-turbo" }, { id: "text-embedding-3-large" }, { id: "dall-e-3" }, { id: "o1-mini" },
+    ] }));
+    const p = new OpenAIProvider("gpt-4o", "sk-test");
+    const models = await p.listModels();
+    expect(models).toEqual(["gpt-3.5-turbo", "gpt-4o", "o1-mini"]);
+  });
+  it("returns [] without an API key", async () => {
+    const p = new OpenAIProvider("gpt-4o", "");
+    expect(await p.listModels()).toEqual([]);
+  });
+});

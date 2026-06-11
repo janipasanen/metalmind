@@ -346,3 +346,16 @@ describe("AnthropicProvider", () => {
     });
   });
 });
+
+describe("AnthropicProvider.listModels (#214)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  it("returns model ids from the API", async () => {
+    vi.stubGlobal("fetch", mockFetch(200, { data: [{ id: "claude-sonnet-4-6" }, { id: "claude-opus-4" }] }));
+    const p = new AnthropicProvider("claude-sonnet-4-6", "sk-ant-test");
+    expect(await p.listModels()).toEqual(["claude-sonnet-4-6", "claude-opus-4"]);
+  });
+  it("returns [] without an API key", async () => {
+    const p = new AnthropicProvider("claude-sonnet-4-6", "");
+    expect(await p.listModels()).toEqual([]);
+  });
+});
