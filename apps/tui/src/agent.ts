@@ -244,8 +244,8 @@ export function createDefaultRouter(
     // Tier 2: local Ollama fallback (named via defaultFallbackModel in yaml,
     // or a sensible built-in default).
     const tier2 = routing?.defaultFallbackModel
-      ? (resolveNamedTier(routing.defaultFallbackModel, models) ?? { provider: "ollama", model: "gemma3:4b" })
-      : { provider: "ollama", model: "gemma3:4b" };
+      ? (resolveNamedTier(routing.defaultFallbackModel, models) ?? { provider: "ollama", model: "ministral-3:3b" })
+      : { provider: "ollama", model: "ministral-3:3b" };
 
     // Tier 3: cloud model for complex tasks.
     const defaultReasoning = { provider: config.provider, model: config.model };
@@ -512,7 +512,7 @@ export class AgentLoop {
   ): Promise<OllamaWorkerProvider | null> {
     const candidateModels = preferredModel
       ? [preferredModel]
-      : ["deepseek-coder:1.3b", "deepseek-coder:6.7b", "qwen2.5-coder:1.5b", "qwen2.5-coder:7b", "codellama:7b"];
+      : ["ministral-3:3b", "deepseek-coder:1.3b", "deepseek-coder:6.7b", "qwen2.5-coder:1.5b", "qwen2.5-coder:7b", "codellama:7b"];
 
     for (const modelId of candidateModels) {
       const provider = new OllamaWorkerProvider(modelId, baseUrl, apiKey);

@@ -8,10 +8,11 @@ models:
     provider: mlx
     model: /Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-12b-it-qat-4bit
 
-  # Tier 2 — Local Ollama worker, MLX-optimised 2B model (~1.2 GB RAM)
+  # Tier 2 — Local Ollama model (Mistral Ministral 3B, ~2 GB RAM)
+  # https://ollama.com/library/ministral-3 — pull with: ollama pull ministral-3:3b
   local-ollama:
     provider: ollama
-    model: gemma4:e2b-mlx
+    model: ministral-3:3b
 
   # Tier 3 — Cloud brain: plans, coordinates, handles complex reasoning
   cloud-reasoning:
