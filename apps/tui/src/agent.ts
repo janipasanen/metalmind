@@ -433,6 +433,7 @@ export class AgentLoop {
   private providerCache = new Map<string, ModelProvider>();
   private mcpTools = new Map<string, { client: McpToolClient; def: McpToolDef }>();
   private mcpStdioClients: McpClient[] = [];
+  private mcpServerStatus = new Map<string, { connected: boolean; toolCount: number; error?: string }>();
   private workspaceRoots: string[] = [];
   private coordinator: Coordinator | null = null;
   private safetyValidator: SafetyValidator;
@@ -641,10 +642,13 @@ export class AgentLoop {
           }
           const client = new McpHttpClient(srv.url, headers);
           await client.initialize();
+          let count = 0;
           for (const tool of await client.listTools()) {
             // Namespace by server id so two servers' same-named tools don't collide (#161).
             this.mcpTools.set(`${id}:${tool.name}`, { client, def: tool });
+            count++;
           }
+          this.mcpServerStatus.set(id, { connected: true, toolCount: count });
         } else if (srv.command) {
           // Stdio transport — spawn a command-based MCP server (#155).
           const stdio = new McpClient({ name: id, command: srv.command, args: srv.args, env: srv.env, cwd: srv.cwd });
@@ -654,15 +658,34 @@ export class AgentLoop {
             callTool: async (name, input) =>
               normalizeMcpResult(await stdio.callTool(name, (input ?? {}) as Record<string, unknown>)),
           };
+          let count = 0;
           for (const tool of stdio.tools) {
             this.mcpTools.set(`${id}:${tool.name}`, { client: adapter, def: tool });
+            count++;
           }
+          this.mcpServerStatus.set(id, { connected: true, toolCount: count });
         }
         // else: neither url nor command configured — nothing to connect.
       } catch (err) {
-        console.error(`MCP server "${id}" init failed: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        this.mcpServerStatus.set(id, { connected: false, toolCount: 0, error: message });
+        logError(`mcp:${id}`, err);
       }
     }
+  }
+
+  /** Per-server MCP connection status for /mcp status (#169). */
+  getMcpStatus(): Array<{ id: string; connected: boolean; toolCount: number; error?: string }> {
+    return [...this.mcpServerStatus.entries()].map(([id, s]) => ({ id, ...s }));
+  }
+
+  /** Tear down and re-establish all MCP connections (#169). */
+  async reconnectMcp(): Promise<void> {
+    for (const c of this.mcpStdioClients) await c.disconnect?.().catch(() => undefined);
+    this.mcpStdioClients = [];
+    this.mcpTools.clear();
+    this.mcpServerStatus.clear();
+    await this.initMcp();
   }
 
   /** Initialize the multi-agent coordinator with a local worker provider. */

@@ -36,6 +36,26 @@ export function handleMcpCommand(rawArgs: string): string {
   }
 }
 
+export interface McpServerLiveStatus {
+  id: string;
+  connected: boolean;
+  toolCount: number;
+  error?: string;
+}
+
+/** Format live MCP connection status for /mcp status (#169). */
+export function formatMcpStatus(statuses: McpServerLiveStatus[]): string {
+  if (statuses.length === 0) {
+    return "No MCP servers have been connected this session. Configure one with `/mcp add`, then reconnect.";
+  }
+  const lines = statuses.map((s) =>
+    s.connected
+      ? `  ● ${s.id} — connected, ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`
+      : `  ✗ ${s.id} — error: ${s.error ?? "unknown"}`,
+  );
+  return ["MCP connection status:", ...lines].join("\n");
+}
+
 function listPresets(): string {
   const lines = MCP_PRESETS.map((p) => `  ${p.id.padEnd(12)} ${p.name} — ${p.description}`);
   return ["Available MCP presets (add with `/mcp add <id> key=value`):", ...lines].join("\n");

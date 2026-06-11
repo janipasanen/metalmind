@@ -113,3 +113,19 @@ describe("/mcp command (#192)", () => {
     expect(out).not.toContain("supersecret");
   });
 });
+
+import { formatMcpStatus } from "../mcp-command.js";
+
+describe("formatMcpStatus (#169)", () => {
+  it("renders connected and errored servers distinctly", () => {
+    const out = formatMcpStatus([
+      { id: "github", connected: true, toolCount: 12 },
+      { id: "jira", connected: false, toolCount: 0, error: "401 Unauthorized" },
+    ]);
+    expect(out).toContain("● github — connected, 12 tools");
+    expect(out).toContain("✗ jira — error: 401 Unauthorized");
+  });
+  it("handles the empty case", () => {
+    expect(formatMcpStatus([])).toContain("No MCP servers");
+  });
+});

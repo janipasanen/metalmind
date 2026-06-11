@@ -8,7 +8,7 @@ import MultiAgentStatus from "./MultiAgentStatus.js";
 import { useChat } from "../hooks/useChat.js";
 import { AgentLoop, createDefaultRouter, type ForcedTier, type ApprovalRequest, type ApprovalDecision } from "../agent.js";
 import ApprovalView from "./ApprovalView.js";
-import { handleMcpCommand } from "../mcp-command.js";
+import { handleMcpCommand, formatMcpStatus } from "../mcp-command.js";
 import { listModelsText, deleteModelText, pullModelProgress } from "../model-command.js";
 import { handlePromptCommand } from "../prompt-command.js";
 import { buildImageUrl } from "../image-command.js";
@@ -241,7 +241,7 @@ export default function App({ config }: AppProps) {
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
           "  /diagnostics      - Show recent errors / crash log (persisted across sessions)",
-          "  /mcp              - MCP: list|presets|add|remove | resources|prompts|read <srv> | auth <srv>",
+          "  /mcp              - MCP: list|presets|add|remove|status|reconnect | resources|prompts|read|auth <srv>",
           "  /models           - Local Ollama models: list | pull <name> | delete <name>",
           "  /image            - Attach an image (path or https URL) for a vision model",
           "  /rag              - Retrieval: add <path> | search <q> | status | clear (queries auto-retrieve)",
@@ -474,8 +474,15 @@ export default function App({ config }: AppProps) {
         const args = input.slice(4).trim();
         const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
         const agent = agentRef.current;
-        // Live-client subcommands (resources/prompts) need a connected client (#219).
-        if (agent && (sub === "resources" || sub === "prompts" || sub === "read")) {
+        // Live status / reconnect need the connected agent (#169).
+        if (agent && sub === "status") {
+          yield { type: "text", text: formatMcpStatus(agent.getMcpStatus()) } as const;
+        } else if (agent && sub === "reconnect") {
+          yield { type: "text", text: "Reconnecting MCP servers…" } as const;
+          await agent.reconnectMcp();
+          yield { type: "text", text: formatMcpStatus(agent.getMcpStatus()) } as const;
+        } else if (agent && (sub === "resources" || sub === "prompts" || sub === "read")) {
+          // Live-client subcommands (resources/prompts) need a connected client (#219).
           let text: string;
           if (sub === "resources") text = await agent.mcpResourcesReport(rest[0] ?? "");
           else if (sub === "prompts") text = await agent.mcpPromptsReport(rest[0] ?? "");
