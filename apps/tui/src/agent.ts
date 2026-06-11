@@ -41,6 +41,7 @@ import type { ModelRoutingDecision } from "@metalmind/schemas";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
 import { Redactor, collectSecrets } from "./redact.js";
+import { retrieveContext } from "./rag/manager.js";
 
 interface BufferedAttempt {
   text: string;
@@ -499,6 +500,11 @@ export class AgentLoop {
     return this.coordinator;
   }
 
+  /** The project root the agent operates in (for the /rag index path) (#200). */
+  get projectRootPath(): string {
+    return this.projectRoot;
+  }
+
   /** Force every subsequent turn to use a specific tier (1=MLX, 2=local Ollama, 3=cloud).
    *  Pass null to restore automatic routing. */
   setForcedTier(tier: ForcedTier): void {
@@ -858,6 +864,11 @@ export class AgentLoop {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     }
+    // RAG: if documents have been indexed, retrieve and inject the most relevant
+    // chunks as context for this turn (#200). No-ops cheaply when no index exists.
+    const ragContext = await retrieveContext(this.projectRoot, userInput).catch(() => null);
+    if (ragContext) this.history.push({ role: "system", content: ragContext });
+
     // Attach any staged image(s) to this user turn for vision models (#177).
     const images = this.pendingImages.length > 0 ? [...this.pendingImages] : undefined;
     this.pendingImages = [];

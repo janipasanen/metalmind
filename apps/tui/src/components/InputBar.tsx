@@ -18,6 +18,7 @@ const SLASH_COMMANDS = [
   { syntax: "/skill ",      description: "list / activate / deactivate skills" },
   { syntax: "/prompt ",     description: "Prompt library: save|list|delete|<name>" },
   { syntax: "/image ",      description: "Attach an image for a vision model" },
+  { syntax: "/rag ",        description: "Document retrieval: add|search|status|clear" },
   { syntax: "/mcp ",        description: "MCP servers: list|presets|add|remove" },
   { syntax: "/resume",      description: "List or resume a saved session" },
   { syntax: "/compact",     description: "Summarize older turns to save context" },

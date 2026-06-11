@@ -12,6 +12,7 @@ import { handleMcpCommand } from "../mcp-command.js";
 import { listModelsText, deleteModelText, pullModelProgress } from "../model-command.js";
 import { handlePromptCommand } from "../prompt-command.js";
 import { buildImageUrl } from "../image-command.js";
+import { handleRagCommand } from "../rag/manager.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -231,6 +232,7 @@ export default function App({ config }: AppProps) {
           "  /mcp              - MCP servers: list | presets | add <preset> k=v | remove <id>",
           "  /models           - Local Ollama models: list | pull <name> | delete <name>",
           "  /image            - Attach an image (path or https URL) for a vision model",
+          "  /rag              - Retrieval: add <path> | search <q> | status | clear (queries auto-retrieve)",
           "  /prompt           - Prompt library: save <name> <tmpl> | list | delete | <name> k=v",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
@@ -456,6 +458,14 @@ export default function App({ config }: AppProps) {
 
       if (input === "/mcp" || input.startsWith("/mcp ")) {
         const text = handleMcpCommand(input.slice(4));
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/rag" || input.startsWith("/rag ")) {
+        const root = agentRef.current?.projectRootPath ?? process.cwd();
+        const text = await handleRagCommand(input.slice(4), root);
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;
