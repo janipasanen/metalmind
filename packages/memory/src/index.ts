@@ -8,6 +8,7 @@ export interface SessionRecord {
   title: string;
   created_at: string;
   updated_at: string;
+  tags: string;
 }
 
 export class SqliteSessionStore {
@@ -21,6 +22,15 @@ export class SqliteSessionStore {
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
     this.initSchema();
+    this.migrate();
+  }
+
+  /** Add columns introduced after the initial schema, idempotently (#202). */
+  private migrate(): void {
+    const cols = this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "tags")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   private initSchema(): void {
@@ -110,15 +120,41 @@ export class SqliteSessionStore {
   listSessions(): SessionRecord[] {
     return this.db
       .prepare(
-        "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
+        "SELECT id, title, created_at, updated_at, tags FROM sessions ORDER BY updated_at DESC",
       )
       .all() as SessionRecord[];
   }
 
   getSession(sessionId: string): SessionRecord | undefined {
     return this.db
-      .prepare("SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?")
+      .prepare("SELECT id, title, created_at, updated_at, tags FROM sessions WHERE id = ?")
       .get(sessionId) as SessionRecord | undefined;
+  }
+
+  /** Full-text search across session titles, tags, and message content (#202). */
+  searchSessions(query: string): SessionRecord[] {
+    const like = `%${query}%`;
+    return this.db
+      .prepare(
+        `SELECT DISTINCT s.id, s.title, s.created_at, s.updated_at, s.tags
+         FROM sessions s
+         LEFT JOIN messages m ON m.session_id = s.id
+         WHERE s.title LIKE ? OR s.tags LIKE ? OR m.content LIKE ?
+         ORDER BY s.updated_at DESC`,
+      )
+      .all(like, like, like) as SessionRecord[];
+  }
+
+  /** Rename a session (#202). */
+  renameSession(sessionId: string, title: string): void {
+    this.db
+      .prepare("UPDATE sessions SET title = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(title, sessionId);
+  }
+
+  /** Set (replace) a session's tags — comma-separated (#202). */
+  tagSession(sessionId: string, tags: string): void {
+    this.db.prepare("UPDATE sessions SET tags = ? WHERE id = ?").run(tags, sessionId);
   }
 
   deleteSession(sessionId: string): void {

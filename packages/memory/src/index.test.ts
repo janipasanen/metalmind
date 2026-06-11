@@ -143,4 +143,44 @@ describe("SqliteSessionStore", () => {
     expect(store.getSession("nonexistent")).toBeUndefined();
     store.close();
   });
+
+  describe("search, rename, tags (#202)", () => {
+    it("searches across message content, titles, and tags", () => {
+      const store = new SqliteSessionStore(dbPath);
+      const a = store.createSession("Refactor auth");
+      store.saveMessages(a, [{ role: "user", content: "rewrite the login flow with JWT" }]);
+      const b = store.createSession("Docs work");
+      store.saveMessages(b, [{ role: "user", content: "update the README" }]);
+
+      expect(store.searchSessions("JWT").map((s) => s.id)).toEqual([a]);
+      expect(store.searchSessions("README").map((s) => s.id)).toEqual([b]);
+      expect(store.searchSessions("Refactor").map((s) => s.id)).toEqual([a]); // title match
+      expect(store.searchSessions("nothinghere")).toHaveLength(0);
+      store.close();
+    });
+
+    it("renames a session", () => {
+      const store = new SqliteSessionStore(dbPath);
+      const id = store.createSession("old");
+      store.renameSession(id, "new name");
+      expect(store.getSession(id)!.title).toBe("new name");
+      store.close();
+    });
+
+    it("tags a session and finds it by tag", () => {
+      const store = new SqliteSessionStore(dbPath);
+      const id = store.createSession("Tagged");
+      store.tagSession(id, "work,urgent");
+      expect(store.getSession(id)!.tags).toBe("work,urgent");
+      expect(store.searchSessions("urgent").map((s) => s.id)).toEqual([id]);
+      store.close();
+    });
+
+    it("defaults tags to an empty string for new sessions", () => {
+      const store = new SqliteSessionStore(dbPath);
+      const id = store.createSession("Untagged");
+      expect(store.getSession(id)!.tags).toBe("");
+      store.close();
+    });
+  });
 });

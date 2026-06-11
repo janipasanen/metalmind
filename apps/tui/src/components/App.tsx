@@ -216,7 +216,7 @@ export default function App({ config }: AppProps) {
           "  /workspace <path> - Allow AI to access an additional directory",
           "  /init             - Generate a starter project memory file (.metalmind/MEMORY.md)",
           "  /skill            - list | activate <name> | deactivate <name>",
-          "  /resume [id]      - List saved sessions, or resume one by id (also --continue/--resume on launch)",
+          "  /resume [id]      - List/resume sessions; search <text> | rename <id> <title> | tag <id> <tags>",
           "  /compact          - Summarize older turns to reclaim context window",
           "  /export [md|json] - Export the conversation transcript to a file",
           "  /cost             - Show this session's token usage",
@@ -253,24 +253,52 @@ export default function App({ config }: AppProps) {
       }
 
       if (input === "/resume" || input.startsWith("/resume ")) {
-        const id = input.slice(7).trim();
+        const arg = input.slice(7).trim();
+        const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
         const agent = agentRef.current;
+        const fmt = (s: { id: string; updated_at: string; title?: string; tags?: string }) =>
+          `  ${s.id}  (updated ${s.updated_at})${s.title ? ` — ${s.title}` : ""}${s.tags ? `  [${s.tags}]` : ""}`;
         if (!agent) {
           yield { type: "text", text: "Agent not initialised." } as const;
-        } else if (!id) {
-          const sessions = agent.listSessions();
-          if (sessions.length === 0) {
-            yield { type: "text", text: "No saved sessions yet." } as const;
+        } else if (sub === "search") {
+          const q = rest.join(" ");
+          if (!q) {
+            yield { type: "text", text: "Usage: /resume search <text>" } as const;
           } else {
-            const lines = sessions
-              .slice(0, 15)
-              .map((s) => `  ${s.id}  (updated ${s.updated_at})${s.title ? ` — ${s.title}` : ""}`);
-            yield { type: "text", text: `Recent sessions — resume with /resume <id>:\n${lines.join("\n")}` } as const;
+            const found = agent.searchSessions(q);
+            yield {
+              type: "text",
+              text: found.length
+                ? `Sessions matching "${q}":\n${found.slice(0, 15).map(fmt).join("\n")}`
+                : `No sessions matching "${q}".`,
+            } as const;
           }
+        } else if (sub === "rename") {
+          const id = rest[0];
+          const title = rest.slice(1).join(" ");
+          yield {
+            type: "text",
+            text: !id || !title ? "Usage: /resume rename <id> <title>" : agent.renameSession(id, title) ? `Renamed ${id} → "${title}".` : `Couldn't rename ${id}.`,
+          } as const;
+        } else if (sub === "tag") {
+          const id = rest[0];
+          const tags = rest.slice(1).join(" ");
+          yield {
+            type: "text",
+            text: !id ? "Usage: /resume tag <id> <tag1,tag2>" : agent.tagSession(id, tags) ? `Tagged ${id}: ${tags || "(cleared)"}` : `Couldn't tag ${id}.`,
+          } as const;
+        } else if (!sub) {
+          const sessions = agent.listSessions();
+          yield {
+            type: "text",
+            text: sessions.length
+              ? `Recent sessions — resume with /resume <id>:\n${sessions.slice(0, 15).map(fmt).join("\n")}`
+              : "No saved sessions yet.",
+          } as const;
         } else {
-          const restored = agent.resumeSession(id);
+          const restored = agent.resumeSession(sub);
           replaceMessages(restoredToChatMessages(restored));
-          yield { type: "text", text: `Resumed session ${id} (${restored.length} messages).` } as const;
+          yield { type: "text", text: `Resumed session ${sub} (${restored.length} messages).` } as const;
         }
         yield { type: "done" } as const;
         return;

@@ -7,11 +7,21 @@ import { SkillLoader, SkillManager } from "@metalmind/skills";
 
 /** Structural view of the session store — imported lazily so a missing native
  *  better-sqlite3 addon degrades to no-persistence instead of crashing launch. */
+interface SessionRecordLite {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  tags?: string;
+}
 interface SessionStore {
   createSession(title?: string): string;
   saveMessages(id: string, messages: AgentMessage[]): void;
   loadMessages(id: string): AgentMessage[];
-  listSessions(): Array<{ id: string; title: string; created_at: string; updated_at: string }>;
+  listSessions(): SessionRecordLite[];
+  searchSessions(query: string): SessionRecordLite[];
+  renameSession(id: string, title: string): void;
+  tagSession(id: string, tags: string): void;
 }
 
 /** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
@@ -1811,12 +1821,44 @@ export class AgentLoop {
   }
 
   /** List persisted sessions (most-recent first) for /resume (#140). */
-  listSessions(): Array<{ id: string; title: string; updated_at: string }> {
+  listSessions(): Array<{ id: string; title: string; updated_at: string; tags?: string }> {
     if (!this.sessionStore) return [];
     try {
       return this.sessionStore.listSessions();
     } catch {
       return [];
+    }
+  }
+
+  /** Full-text search across persisted sessions (title, tags, message content) (#202). */
+  searchSessions(query: string): Array<{ id: string; title: string; updated_at: string; tags?: string }> {
+    if (!this.sessionStore) return [];
+    try {
+      return this.sessionStore.searchSessions(query);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Rename a persisted session (#202). */
+  renameSession(id: string, title: string): boolean {
+    if (!this.sessionStore) return false;
+    try {
+      this.sessionStore.renameSession(id, title);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Set a persisted session's tags (comma-separated) (#202). */
+  tagSession(id: string, tags: string): boolean {
+    if (!this.sessionStore) return false;
+    try {
+      this.sessionStore.tagSession(id, tags);
+      return true;
+    } catch {
+      return false;
     }
   }
 
