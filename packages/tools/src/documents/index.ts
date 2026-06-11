@@ -17,6 +17,13 @@ import {
   pandocTargetFor,
   runPandoc,
 } from "./convert.js";
+import {
+  allSpreadsheetTools,
+  buildXlsx,
+  buildOds,
+  csvToRows,
+} from "./spreadsheet.js";
+import { writeFileSync as writeBin } from "node:fs";
 
 /** Formats writeDocument can produce, grouped by how they're generated. */
 const PANDOC_EXTS = new Set([".docx", ".odt", ".pptx", ".rtf", ".epub", ".pdf"]);
@@ -56,6 +63,19 @@ export const writeDocumentTool: AgentTool<z.input<typeof writeDocSchema>, string
       writeFileSync(safePath, buildLatexDocument(input.title, input.content), "utf-8");
       return `Created LaTeX document at ${input.path}.`;
     }
+    if (ext === ".csv") {
+      // Content may be CSV text already, or rows we re-serialize for consistent quoting.
+      writeFileSync(safePath, input.content, "utf-8");
+      return `Wrote CSV to ${input.path}.`;
+    }
+    if (ext === ".xlsx" || ext === ".ods") {
+      // Interpret the content as CSV (or TSV if tabs dominate) and build the workbook.
+      const delimiter = input.content.includes("\t") && !input.content.includes(",") ? "\t" : ",";
+      const rows = csvToRows(input.content, delimiter);
+      const data = ext === ".xlsx" ? buildXlsx([{ name: "Sheet1", rows }]) : buildOds([{ name: "Sheet1", rows }]);
+      writeBin(safePath, data);
+      return `Created ${ext.slice(1)} spreadsheet at ${input.path} (${rows.length} row(s)).`;
+    }
     if (ext === ".odp") {
       return createOdpTool.execute(input, ctx);
     }
@@ -79,7 +99,20 @@ export const allDocumentTools: AgentTool<unknown, string>[] = [
   createLatexTool,
   createMarkdownTool,
   ...allConvertTools,
+  ...allSpreadsheetTools,
 ] as AgentTool<unknown, string>[];
+
+export {
+  buildXlsx,
+  buildOds,
+  rowsToCsv,
+  csvToRows,
+  columnLetter,
+  createXlsxTool,
+  createOdsTool,
+  createCsvTool,
+} from "./spreadsheet.js";
+export { buildZip, crc32 } from "./zip.js";
 
 export {
   buildHtmlDocument,
