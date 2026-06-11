@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { highlightLine } from "../highlight.js";
 
 interface Props {
   text: string;
@@ -55,12 +56,28 @@ function parseInline(raw: string, accent: string): React.ReactNode {
 export default function MarkdownText({ text, accent = "cyan" }: Props) {
   const lines = text.split("\n");
 
+  // Track fenced code-block state so lines inside a block get syntax highlighting (#171).
+  let inCode = false;
+  let codeLang = "";
+
   return (
     <Box flexDirection="column">
       {lines.map((line, i) => {
-        // Fenced code block marker — just show dimmed
+        // Fenced code block marker — toggle state and capture the language.
         if (line.startsWith("```")) {
+          if (!inCode) { inCode = true; codeLang = line.slice(3).trim(); }
+          else { inCode = false; codeLang = ""; }
           return <Text key={i} dimColor>{line}</Text>;
+        }
+
+        // Inside a fenced block: render with syntax highlighting.
+        if (inCode) {
+          const spans = highlightLine(line, codeLang);
+          return (
+            <Text key={i}>
+              {spans.map((s, j) => <Text key={j} color={s.color}>{s.text}</Text>)}
+            </Text>
+          );
         }
 
         // H1 / H2
