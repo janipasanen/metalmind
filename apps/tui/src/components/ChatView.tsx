@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { ChatMessage } from "./App.js";
 import MarkdownText from "./MarkdownText.js";
+import { pageWindow } from "../paging.js";
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -13,6 +14,10 @@ interface ChatViewProps {
   }>;
   isStreaming: boolean;
   accent?: string;
+  /** Messages scrolled up from the live tail (#159). */
+  scrollOffset?: number;
+  /** How many messages fit on screen (#159). */
+  pageSize?: number;
 }
 
 const roleLabel: Record<string, string> = {
@@ -32,13 +37,20 @@ export default function ChatView({
   activeToolCalls,
   isStreaming,
   accent = "cyan",
+  scrollOffset = 0,
+  pageSize = 12,
 }: ChatViewProps) {
-  const visibleMessages = messages.slice(-12);
+  const win = pageWindow(messages.length, scrollOffset, pageSize);
+  const visibleMessages = messages.slice(win.start, win.end);
 
   return (
     <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} flexGrow={1}>
       {visibleMessages.length === 0 && !isStreaming && (
         <Text dimColor>Welcome to Metalmind. Type a message below.</Text>
+      )}
+
+      {win.hiddenAbove > 0 && (
+        <Text dimColor>↑ {win.hiddenAbove} earlier message{win.hiddenAbove === 1 ? "" : "s"} (PgUp/PgDn to scroll)</Text>
       )}
 
       {visibleMessages.map((msg) => (
@@ -75,6 +87,10 @@ export default function ChatView({
           ) : null}
         </Box>
       ))}
+
+      {win.hiddenBelow > 0 && (
+        <Text dimColor>↓ {win.hiddenBelow} newer message{win.hiddenBelow === 1 ? "" : "s"} (PgDn / End to jump to latest)</Text>
+      )}
 
       {isStreaming && streamingContent ? (
         <Box flexDirection="row" marginBottom={0}>

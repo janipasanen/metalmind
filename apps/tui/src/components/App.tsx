@@ -47,6 +47,9 @@ interface AppProps {
   config: TuiConfig;
 }
 
+/** Messages shown per screen in the scrollback pager (#159). */
+const CHAT_PAGE_SIZE = 12;
+
 /** Convert restored persisted messages into chat-view messages (#140). */
 function restoredToChatMessages(msgs: Array<{ role: string; content: string }>): ChatMessage[] {
   return msgs.map((m, i) => ({
@@ -61,6 +64,7 @@ export default function App({ config }: AppProps) {
   const [activeProvider, setActiveProvider] = useState(config.provider);
   const [activeModel, setActiveModel] = useState<string>(`${config.provider}/${config.model}`);
   const [focusPanel, setFocusPanel] = useState<"chat" | "input">("input");
+  const [scrollOffset, setScrollOffset] = useState(0);
   const [projectName] = useState(() => {
     const parts = process.cwd().split("/");
     return parts[parts.length - 1] || "metalmind";
@@ -677,7 +681,10 @@ export default function App({ config }: AppProps) {
     },
   });
 
-  const handleSend = useCallback((text: string) => sendMessage(text), [sendMessage]);
+  const handleSend = useCallback((text: string) => {
+    setScrollOffset(0); // jump back to the live tail on a new turn (#159)
+    sendMessage(text);
+  }, [sendMessage]);
 
   useInput((input, key) => {
     // Approval prompt takes priority over all other input while it's open (#138).
@@ -701,6 +708,10 @@ export default function App({ config }: AppProps) {
     }
     if (key.tab) setFocusPanel(prev => prev === "chat" ? "input" : "chat");
     if (key.ctrl && input === "p") setShowCommandPalette(prev => !prev);
+    // Scrollback: PgUp/PgDn page the transcript; End jumps back to the latest (#159).
+    if (key.pageUp) setScrollOffset(prev => prev + CHAT_PAGE_SIZE);
+    if (key.pageDown) setScrollOffset(prev => Math.max(0, prev - CHAT_PAGE_SIZE));
+    if (input === "G") setScrollOffset(0);
   });
 
   const getActiveModel = () => {
@@ -716,7 +727,7 @@ export default function App({ config }: AppProps) {
   return (
     <Box flexDirection="column" padding={1} height="100%">
       <Header projectName={projectName} modelName={getActiveModel()} accent={theme.colors.accent} />
-      <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} />
+      <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} scrollOffset={scrollOffset} pageSize={CHAT_PAGE_SIZE} />
       <MultiAgentStatus
         mainModel={config.model}
         mainProvider={config.provider}
