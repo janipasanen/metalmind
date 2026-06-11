@@ -6,7 +6,27 @@ export type { DiffPreview } from "./ui/diff-generator.js";
 export type { ToolExecutionContext, ToolAuditEntry, AgentTool } from "./types.js";
 export { createTool } from "./types.js";
 export { allReadOnlyTools } from "./filesystem/readonly-tools.js";
-export { allWriteTools, multiEditTool, replaceInProjectTool } from "./filesystem/write-tools.js";
+export { allWriteTools, multiEditTool, replaceInProjectTool, deleteDirectoryTool } from "./filesystem/write-tools.js";
+export {
+  allDocumentTools,
+  writeDocumentTool,
+  createHtmlTool,
+  createLatexTool,
+  createMarkdownTool,
+  createDocxTool,
+  createOdtTool,
+  createPptxTool,
+  createOdpTool,
+  buildHtmlDocument,
+  buildLatexDocument,
+  escapeHtml,
+  escapeLatex,
+  detectTexEngine,
+  pandocPath,
+  sofficePath,
+  pandocTargetFor,
+  runPandoc,
+} from "./documents/index.js";
 export { allWebTools, webFetchTool, webSearchTool } from "./web/web-tools.js";
 export { allGitTools, gitStatusTool, gitDiffTool, gitDiffFileTool, gitAddTool, gitCommitTool } from "./git/git-tools.js";
 export { CommitMessageGenerator } from "./git/commit-generator.js";

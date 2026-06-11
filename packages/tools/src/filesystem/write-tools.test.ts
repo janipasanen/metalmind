@@ -9,6 +9,7 @@ import {
   deleteFileTool,
   moveFileTool,
   createDirectoryTool,
+  deleteDirectoryTool,
 } from "./write-tools.js";
 
 describe("writeFileTool", () => {
@@ -214,6 +215,45 @@ describe("createDirectoryTool", () => {
         { projectRoot: testDir },
       ),
     ).rejects.toThrow(/already exists/);
+  });
+});
+
+describe("deleteDirectoryTool (#191)", () => {
+  const testDir = join(tmpdir(), `metalmind-dd-${Date.now()}`);
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(testDir, { recursive: true });
+  });
+  afterEach(() => rmSync(testDir, { recursive: true, force: true }));
+
+  it("deletes an empty directory", async () => {
+    mkdirSync(join(testDir, "empty"));
+    await deleteDirectoryTool.execute({ path: "empty", recursive: false }, { projectRoot: testDir });
+    expect(existsSync(join(testDir, "empty"))).toBe(false);
+  });
+
+  it("refuses a non-empty directory unless recursive", async () => {
+    mkdirSync(join(testDir, "full"));
+    writeFileSync(join(testDir, "full", "f.txt"), "x");
+    await expect(
+      deleteDirectoryTool.execute({ path: "full", recursive: false }, { projectRoot: testDir }),
+    ).rejects.toThrow();
+    expect(existsSync(join(testDir, "full"))).toBe(true);
+  });
+
+  it("removes a non-empty directory recursively", async () => {
+    mkdirSync(join(testDir, "tree", "sub"), { recursive: true });
+    writeFileSync(join(testDir, "tree", "sub", "f.txt"), "x");
+    await deleteDirectoryTool.execute({ path: "tree", recursive: true }, { projectRoot: testDir });
+    expect(existsSync(join(testDir, "tree"))).toBe(false);
+  });
+
+  it("errors on a path that is a file, not a directory", async () => {
+    writeFileSync(join(testDir, "file.txt"), "x");
+    await expect(
+      deleteDirectoryTool.execute({ path: "file.txt", recursive: true }, { projectRoot: testDir }),
+    ).rejects.toThrow(/Not a directory/);
   });
 });
 

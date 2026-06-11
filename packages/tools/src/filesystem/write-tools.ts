@@ -7,6 +7,8 @@ import {
   existsSync,
   statSync,
   readFileSync,
+  rmSync,
+  rmdirSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -159,6 +161,31 @@ export const createDirectoryTool: AgentTool<z.input<typeof createDirectorySchema
     if (existsSync(safePath)) throw new Error(`Path already exists: ${input.path}`);
     mkdirSync(safePath, { recursive: true });
     return `Created directory ${input.path}`;
+  },
+});
+
+const deleteDirectorySchema = z.object({
+  path: z.string().min(1),
+  recursive: z.boolean().default(false).describe("Delete a non-empty directory and its contents"),
+});
+
+export const deleteDirectoryTool: AgentTool<z.input<typeof deleteDirectorySchema>, string> = createTool({
+  toolName: "deleteDirectory",
+  description: "Delete a directory. Set recursive=true to remove a non-empty directory and all its contents.",
+  inputSchema: deleteDirectorySchema,
+  requiresConfirmation: true,
+  async execute(input: z.output<typeof deleteDirectorySchema>, ctx: ToolExecutionContext): Promise<string> {
+    const validator = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
+    const safePath = validator.resolveSafePath(input.path);
+    if (!existsSync(safePath)) throw new Error(`Directory not found: ${input.path}`);
+    if (!statSync(safePath).isDirectory()) throw new Error(`Not a directory: ${input.path}`);
+    if (input.recursive) {
+      rmSync(safePath, { recursive: true, force: true });
+    } else {
+      // rmdirSync removes an empty directory and throws ENOTEMPTY otherwise.
+      rmdirSync(safePath);
+    }
+    return `Deleted directory ${input.path}${input.recursive ? " (recursively)" : ""}`;
   },
 });
 
@@ -323,4 +350,5 @@ export const allWriteTools = [
   deleteFileTool,
   moveFileTool,
   createDirectoryTool,
+  deleteDirectoryTool,
 ];

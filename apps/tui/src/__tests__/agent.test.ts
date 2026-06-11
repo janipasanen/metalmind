@@ -104,6 +104,7 @@ vi.mock("@metalmind/tools", async () => {
   runShellTools: [],
   allSymbolTools: [],
   allWebTools: [],
+  allDocumentTools: [],
   backgroundShellTools: [],
   killAllBackgroundProcesses: () => {},
   indexFile: () => {},

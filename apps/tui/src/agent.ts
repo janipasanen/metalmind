@@ -1,5 +1,5 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
 import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
@@ -50,6 +50,8 @@ function buildRegistry(projectRoot: string): ToolRegistry {
   registry.register(createDiagnosticsTool(projectRoot));
   // Web tools: fetch a URL / search the web.
   for (const tool of allWebTools) registry.register(tool);
+  // Document tools: write Office/ODF/HTML/LaTeX/Markdown via writeDocument + format-specific tools.
+  for (const tool of allDocumentTools) registry.register(tool);
   // Background process tools: run/poll/stop long-running commands.
   for (const tool of backgroundShellTools) registry.register(tool);
   return registry;
