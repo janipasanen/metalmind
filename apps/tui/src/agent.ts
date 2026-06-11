@@ -47,6 +47,7 @@ import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
 import { Redactor, collectSecrets } from "./redact.js";
 import { retrieveContext } from "./rag/manager.js";
+import { mentionsContextBlock } from "./mentions.js";
 import { isAllowlisted } from "./approval-allowlist.js";
 import { logError } from "./error-log.js";
 import { loadTokens } from "./mcp/oauth.js";
@@ -926,6 +927,10 @@ export class AgentLoop {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     }
+    // @-file mentions: pull referenced files into context for this turn (#167).
+    const mentionBlock = mentionsContextBlock(userInput, this.projectRoot);
+    if (mentionBlock) this.history.push({ role: "system", content: mentionBlock });
+
     // RAG: if documents have been indexed, retrieve and inject the most relevant
     // chunks as context for this turn (#200). No-ops cheaply when no index exists.
     const ragContext = await retrieveContext(this.projectRoot, userInput).catch(() => null);

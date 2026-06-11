@@ -15,6 +15,7 @@ import { buildImageUrl } from "../image-command.js";
 import { handleRagCommand } from "../rag/manager.js";
 import { handleAllowCommand } from "../approval-allowlist.js";
 import { diagnosticsReport } from "../error-log.js";
+import { handleCopyCommand } from "../copy-command.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -235,6 +236,7 @@ export default function App({ config }: AppProps) {
           "  /retry            - Re-run the last prompt (drops the prior answer)",
           "  /edit <text>      - Replace + re-run the last prompt",
           "  /branch           - Fork this conversation into a new session",
+          "  /copy [last|code] - Copy the last message (or its code block) to the clipboard",
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
@@ -532,6 +534,12 @@ export default function App({ config }: AppProps) {
         }
         yield { type: "text", text: `↻ ${newText}\n` } as const;
         yield* agent.run(newText, signal);
+        return;
+      }
+
+      if (input === "/copy" || input.startsWith("/copy ")) {
+        yield { type: "text", text: handleCopyCommand(input.slice(5), messages.map((m) => ({ role: m.role, content: m.content }))) } as const;
+        yield { type: "done" } as const;
         return;
       }
 
