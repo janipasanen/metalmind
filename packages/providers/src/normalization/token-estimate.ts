@@ -22,3 +22,43 @@ export function roughTokenCountMessages(messages: AgentMessage[]): number {
   }
   return total;
 }
+
+// Exact BPE tokenizer (gpt-tokenizer), lazily loaded so it never costs startup
+// time and degrades to the heuristic if the package isn't installed (#212).
+let bpeEncode: ((text: string) => number[]) | null | undefined;
+
+async function getEncoder(): Promise<((text: string) => number[]) | null> {
+  if (bpeEncode === undefined) {
+    try {
+      const mod = (await import("gpt-tokenizer")) as { encode?: (t: string) => number[] };
+      bpeEncode = typeof mod.encode === "function" ? mod.encode : null;
+    } catch {
+      bpeEncode = null;
+    }
+  }
+  return bpeEncode;
+}
+
+/** Exact token count for OpenAI models via BPE; null if the tokenizer is unavailable (#212). */
+export async function exactTokenCount(text: string): Promise<number | null> {
+  if (!text) return 0;
+  const encode = await getEncoder();
+  if (!encode) return null;
+  try {
+    return encode(text).length;
+  } catch {
+    return null;
+  }
+}
+
+/** Exact token count across a message list, falling back to the heuristic if unavailable (#212). */
+export async function exactTokenCountMessages(messages: AgentMessage[]): Promise<number> {
+  const encode = await getEncoder();
+  if (!encode) return roughTokenCountMessages(messages);
+  let total = 0;
+  for (const m of messages) {
+    total += encode(m.content ?? "").length + 4;
+    if (m.toolCalls?.length) total += encode(JSON.stringify(m.toolCalls)).length;
+  }
+  return total;
+}

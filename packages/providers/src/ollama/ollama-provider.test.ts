@@ -129,6 +129,15 @@ describe("OllamaProvider", () => {
       expect(result.message.content).toBe("Hello from Ollama!");
     });
 
+    it("sends keep_alive so the model stays resident between turns (#213)", async () => {
+      const fetchMock = mockFetch(200, { message: { role: "assistant", content: "ok" } });
+      vi.stubGlobal("fetch", fetchMock);
+      const p = new OllamaProvider("test");
+      await p.completeChat({ messages: [{ role: "user", content: "hi" }] });
+      const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+      expect(body.keep_alive).toBe("10m");
+    });
+
     it("throwss on HTTP error", async () => {
       vi.stubGlobal(
         "fetch",

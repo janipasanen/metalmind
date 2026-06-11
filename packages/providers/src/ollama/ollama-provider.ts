@@ -49,7 +49,12 @@ interface OllamaChatRequest {
   stream: boolean;
   options?: Record<string, unknown>;
   tools?: Array<Record<string, unknown>>;
+  /** Keep the model resident between turns so repeat requests skip the reload (#213). */
+  keep_alive?: string;
 }
+
+/** How long Ollama keeps the model loaded after a request (avoids cold reloads). */
+const OLLAMA_KEEP_ALIVE = "10m";
 
 interface OllamaChatResponse {
   message: OllamaMessage;
@@ -152,6 +157,7 @@ export class OllamaProvider implements ModelProvider {
       model: this.modelName,
       messages: ollamaMessages,
       stream: false,
+      keep_alive: OLLAMA_KEEP_ALIVE,
     };
 
     const res = await fetchWithTimeout(`${this.baseUrl}/api/chat`, {
@@ -181,6 +187,7 @@ export class OllamaProvider implements ModelProvider {
       model: this.modelName,
       messages: ollamaMessages,
       stream: true,
+      keep_alive: OLLAMA_KEEP_ALIVE,
     };
 
     if (request.tools && request.tools.length > 0) {

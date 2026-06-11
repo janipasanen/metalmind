@@ -10,7 +10,7 @@ import type {
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse } from "../normalization/provider-error.js";
 import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
-import { roughTokenCountMessages } from "../normalization/token-estimate.js";
+import { exactTokenCountMessages } from "../normalization/token-estimate.js";
 
 const openaiCapabilities: ModelCapabilities = {
   supportsStreaming: true,
@@ -263,7 +263,9 @@ export class OpenAIProvider implements ModelProvider {
    * from the streamed usage chunk.
    */
   async countTokens(request: TokenCountRequest): Promise<TokenCountResponse> {
-    return { tokenCount: roughTokenCountMessages(request.messages) };
+    // Exact BPE count for OpenAI models; falls back to the heuristic if the
+    // tokenizer isn't installed (#212).
+    return { tokenCount: await exactTokenCountMessages(request.messages) };
   }
 
   /** Discover available chat models from the OpenAI API (#214). Returns [] on failure. */
