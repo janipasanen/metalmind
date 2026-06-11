@@ -8,6 +8,7 @@ import MultiAgentStatus from "./MultiAgentStatus.js";
 import { useChat } from "../hooks/useChat.js";
 import { AgentLoop, createDefaultRouter, type ForcedTier, type ApprovalRequest, type ApprovalDecision } from "../agent.js";
 import ApprovalView from "./ApprovalView.js";
+import { handleMcpCommand } from "../mcp-command.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -224,6 +225,7 @@ export default function App({ config }: AppProps) {
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
+          "  /mcp              - MCP servers: list | presets | add <preset> k=v | remove <id>",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
           "",
@@ -413,6 +415,13 @@ export default function App({ config }: AppProps) {
 
       if (input === "/routes") {
         const text = agentRef.current?.getRoutingSummary() ?? "Agent not initialised.";
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/mcp" || input.startsWith("/mcp ")) {
+        const text = handleMcpCommand(input.slice(4));
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;
