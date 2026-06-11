@@ -4,6 +4,19 @@ export interface McpToolDef {
   inputSchema: Record<string, unknown>;
 }
 
+export interface McpResource {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface McpPrompt {
+  name: string;
+  description?: string;
+  arguments?: Array<{ name: string; description?: string; required?: boolean }>;
+}
+
 interface JsonRpcResponse {
   result?: unknown;
   error?: { code: number; message: string };
@@ -63,6 +76,42 @@ export class McpHttpClient {
     return (result?.content ?? [])
       .filter((c) => c.type === "text")
       .map((c) => c.text ?? "")
+      .join("\n");
+  }
+
+  /** List the resources a server exposes (#219). */
+  async listResources(): Promise<McpResource[]> {
+    const result = (await this.rpc("resources/list", {})) as { resources?: McpResource[] };
+    return result?.resources ?? [];
+  }
+
+  /** Read a resource's text content by uri (#219). */
+  async readResource(uri: string): Promise<string> {
+    const result = (await this.rpc("resources/read", { uri })) as {
+      contents?: Array<{ text?: string; blob?: string; mimeType?: string }>;
+    };
+    return (result?.contents ?? [])
+      .map((c) => c.text ?? (c.blob ? `[binary ${c.mimeType ?? "data"}]` : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  /** List the prompts a server exposes (#219). */
+  async listPrompts(): Promise<McpPrompt[]> {
+    const result = (await this.rpc("prompts/list", {})) as { prompts?: McpPrompt[] };
+    return result?.prompts ?? [];
+  }
+
+  /** Fetch a prompt's messages, rendered to text (#219). */
+  async getPrompt(name: string, args: Record<string, unknown> = {}): Promise<string> {
+    const result = (await this.rpc("prompts/get", { name, arguments: args })) as {
+      messages?: Array<{ role: string; content?: { type: string; text?: string } | string }>;
+    };
+    return (result?.messages ?? [])
+      .map((m) => {
+        const text = typeof m.content === "string" ? m.content : m.content?.text ?? "";
+        return `${m.role}: ${text}`;
+      })
       .join("\n");
   }
 }

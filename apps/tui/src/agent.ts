@@ -27,6 +27,11 @@ interface SessionStore {
 /** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
 interface McpToolClient {
   callTool(name: string, input: unknown): Promise<string>;
+  // Optional resource/prompt support (#219) — present on the HTTP client.
+  listResources?(): Promise<Array<{ uri: string; name?: string; description?: string }>>;
+  readResource?(uri: string): Promise<string>;
+  listPrompts?(): Promise<Array<{ name: string; description?: string }>>;
+  getPrompt?(name: string, args?: Record<string, unknown>): Promise<string>;
 }
 import { zodToJsonSchema } from "./zod-to-json.js";
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
@@ -588,6 +593,38 @@ export class AgentLoop {
   }
 
   /** Connect to all enabled HTTP MCP servers and discover their tools. */
+  /** Find a connected client for a server id (matches namespaced tool keys) (#219). */
+  private mcpClientFor(id: string): McpToolClient | null {
+    for (const [key, { client }] of this.mcpTools) {
+      if (key.startsWith(`${id}:`)) return client;
+    }
+    return null;
+  }
+
+  /** List an MCP server's resources, read one, or list its prompts (#219). */
+  async mcpResourcesReport(id: string): Promise<string> {
+    const c = this.mcpClientFor(id);
+    if (!c?.listResources) return `No connected MCP server "${id}" exposing resources.`;
+    const resources = await c.listResources().catch((e) => { throw e; });
+    if (resources.length === 0) return `"${id}" exposes no resources.`;
+    return [`Resources on "${id}":`, ...resources.map((r) => `  ${r.uri}${r.name ? ` — ${r.name}` : ""}`)].join("\n");
+  }
+
+  async mcpReadResource(id: string, uri: string): Promise<string> {
+    const c = this.mcpClientFor(id);
+    if (!c?.readResource) return `No connected MCP server "${id}" exposing resources.`;
+    const text = await c.readResource(uri);
+    return this.redactor.redact(text || "(empty resource)");
+  }
+
+  async mcpPromptsReport(id: string): Promise<string> {
+    const c = this.mcpClientFor(id);
+    if (!c?.listPrompts) return `No connected MCP server "${id}" exposing prompts.`;
+    const prompts = await c.listPrompts();
+    if (prompts.length === 0) return `"${id}" exposes no prompts.`;
+    return [`Prompts on "${id}":`, ...prompts.map((p) => `  ${p.name}${p.description ? ` — ${p.description}` : ""}`)].join("\n");
+  }
+
   async initMcp(): Promise<void> {
     const userConfig = loadXdgConfig();
     for (const [id, srv] of Object.entries(userConfig.mcpServers || {})) {

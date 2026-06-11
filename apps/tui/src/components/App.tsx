@@ -462,8 +462,19 @@ export default function App({ config }: AppProps) {
       }
 
       if (input === "/mcp" || input.startsWith("/mcp ")) {
-        const text = handleMcpCommand(input.slice(4));
-        yield { type: "text", text } as const;
+        const args = input.slice(4).trim();
+        const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
+        const agent = agentRef.current;
+        // Live-client subcommands (resources/prompts) need a connected client (#219).
+        if (agent && (sub === "resources" || sub === "prompts" || sub === "read")) {
+          let text: string;
+          if (sub === "resources") text = await agent.mcpResourcesReport(rest[0] ?? "");
+          else if (sub === "prompts") text = await agent.mcpPromptsReport(rest[0] ?? "");
+          else text = rest[1] ? await agent.mcpReadResource(rest[0], rest[1]) : "Usage: /mcp read <server> <uri>";
+          yield { type: "text", text } as const;
+        } else {
+          yield { type: "text", text: handleMcpCommand(args) } as const;
+        }
         yield { type: "done" } as const;
         return;
       }
