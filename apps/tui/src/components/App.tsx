@@ -232,7 +232,7 @@ export default function App({ config }: AppProps) {
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
           "  /diagnostics      - Show recent errors / crash log (persisted across sessions)",
-          "  /mcp              - MCP servers: list | presets | add <preset> k=v | remove <id>",
+          "  /mcp              - MCP: list|presets|add|remove | resources|prompts|read <srv> | auth <srv>",
           "  /models           - Local Ollama models: list | pull <name> | delete <name>",
           "  /image            - Attach an image (path or https URL) for a vision model",
           "  /rag              - Retrieval: add <path> | search <q> | status | clear (queries auto-retrieve)",
@@ -472,6 +472,15 @@ export default function App({ config }: AppProps) {
           else if (sub === "prompts") text = await agent.mcpPromptsReport(rest[0] ?? "");
           else text = rest[1] ? await agent.mcpReadResource(rest[0], rest[1]) : "Usage: /mcp read <server> <uri>";
           yield { type: "text", text } as const;
+        } else if (sub === "auth") {
+          // Interactive OAuth authorization-code + PKCE flow (#199).
+          if (!rest[0]) {
+            yield { type: "text", text: "Usage: /mcp auth <server>" } as const;
+          } else {
+            yield { type: "text", text: `Opening your browser to authorize "${rest[0]}"…` } as const;
+            const { runMcpOAuth } = await import("../mcp/oauth-flow.js");
+            yield { type: "text", text: await runMcpOAuth(rest[0]) } as const;
+          }
         } else {
           yield { type: "text", text: handleMcpCommand(args) } as const;
         }

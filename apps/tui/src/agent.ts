@@ -49,6 +49,7 @@ import { Redactor, collectSecrets } from "./redact.js";
 import { retrieveContext } from "./rag/manager.js";
 import { isAllowlisted } from "./approval-allowlist.js";
 import { logError } from "./error-log.js";
+import { loadTokens } from "./mcp/oauth.js";
 
 interface BufferedAttempt {
   text: string;
@@ -631,8 +632,13 @@ export class AgentLoop {
       if (!srv.enabled) continue;
       try {
         if (srv.url) {
-          // HTTP/SSE transport.
-          const client = new McpHttpClient(srv.url, srv.headers ?? {});
+          // HTTP/SSE transport. For OAuth servers, attach a stored bearer token (#199).
+          const headers = { ...(srv.headers ?? {}) };
+          if (srv.authType === "oauth2") {
+            const tokens = await loadTokens(id).catch(() => null);
+            if (tokens?.accessToken) headers.Authorization = `${tokens.tokenType ?? "Bearer"} ${tokens.accessToken}`;
+          }
+          const client = new McpHttpClient(srv.url, headers);
           await client.initialize();
           for (const tool of await client.listTools()) {
             // Namespace by server id so two servers' same-named tools don't collide (#161).

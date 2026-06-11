@@ -104,6 +104,9 @@ export interface UserConfig {
   remoteBrain?: boolean;
   /** Saved, reusable prompt templates by name; {{vars}} are filled at use time (#201). */
   prompts?: Record<string, string>;
+  /** OAuth tokens for authenticated MCP servers, keyed by server id (#199).
+   *  Used as a fallback store when the macOS keychain helper is unavailable. */
+  mcpTokens?: Record<string, { accessToken: string; refreshToken?: string; expiresAt?: number; tokenType?: string }>;
   /** Persisted, granular auto-approval allowlist so trusted ops don't re-prompt (#220). */
   approvalAllowlist?: {
     /** Tool names always allowed (e.g. "writeFile"). */
@@ -127,6 +130,13 @@ export interface McpServerConfig {
   // HTTP/SSE transport (URL-based MCP server)
   url?: string;
   headers?: Record<string, string>;
+  // OAuth 2.0 endpoints for authType: "oauth2" servers, used by /mcp auth (#199).
+  oauth?: {
+    authEndpoint: string;
+    tokenEndpoint: string;
+    clientId: string;
+    scope?: string;
+  };
 }
 
 const DEFAULT_XDG_CONFIG: UserConfig = {
