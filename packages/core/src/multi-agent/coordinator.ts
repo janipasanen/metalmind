@@ -398,6 +398,35 @@ export class Coordinator {
     this.eventBus.emit("coordinator:plan", { plan: this.plan, requestId: "plan-update" });
   }
 
+  /**
+   * Execute the current plan step-by-step, driving real per-step status (#205).
+   * `shouldRun` selects which steps this pass owns (e.g. only "local-worker");
+   * each selected step is marked running, executed, then completed/failed.
+   * Unselected steps are left untouched for another owner (e.g. the main loop).
+   * Steps run in order; a failed step does not abort the rest.
+   */
+  async runPlan(
+    shouldRun: (step: PlanStep) => boolean,
+    executor: (step: PlanStep) => Promise<{ success: boolean; result?: AgentResult }>,
+  ): Promise<Array<{ id: string; success: boolean }>> {
+    if (!this.plan) return [];
+    const outcomes: Array<{ id: string; success: boolean }> = [];
+    for (const step of this.plan.steps) {
+      if (step.status !== "pending" || !shouldRun(step)) continue;
+      this.updateStepStatus(step.id, "running");
+      try {
+        const { success, result } = await executor(step);
+        if (result) step.result = result;
+        this.updateStepStatus(step.id, success ? "completed" : "failed");
+        outcomes.push({ id: step.id, success });
+      } catch {
+        this.updateStepStatus(step.id, "failed");
+        outcomes.push({ id: step.id, success: false });
+      }
+    }
+    return outcomes;
+  }
+
   /** Set every plan step to a status (e.g. all running / all completed) (#166). */
   markAllSteps(status: PlanStep["status"]): void {
     if (!this.plan) return;

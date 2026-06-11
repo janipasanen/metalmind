@@ -344,6 +344,41 @@ describe("Coordinator planning (#166) and parallel tasks (#180)", () => {
     expect(coordinator.getPlan()!.steps[0].status).toBe("completed");
   });
 
+  it("runPlan executes only the selected steps with per-step status transitions (#205)", async () => {
+    const coordinator = new Coordinator(
+      plannerProvider('[{"description":"summarize files","type":"local-worker"},{"description":"write the code","type":"cloud-main"}]'),
+      createMockWorkerProvider(),
+    );
+    await coordinator.buildPlan("summarize then write");
+
+    const ran: string[] = [];
+    const outcomes = await coordinator.runPlan(
+      (s) => s.type === "local-worker",
+      async (s) => { ran.push(s.id); return { success: true }; },
+    );
+
+    expect(ran).toEqual(["step-1"]); // only the local-worker step ran this pass
+    expect(outcomes).toEqual([{ id: "step-1", success: true }]);
+    const final = coordinator.getPlan()!;
+    expect(final.steps[0].status).toBe("completed"); // local-worker executed
+    expect(final.steps[1].status).toBe("pending"); // cloud-main left for the main loop
+  });
+
+  it("runPlan marks a throwing step failed and continues (#205)", async () => {
+    const coordinator = new Coordinator(
+      plannerProvider('[{"description":"a","type":"local-worker"},{"description":"b","type":"local-worker"}]'),
+      createMockWorkerProvider(),
+    );
+    await coordinator.buildPlan("two local steps");
+    await coordinator.runPlan(
+      () => true,
+      async (s) => { if (s.id === "step-1") throw new Error("boom"); return { success: true }; },
+    );
+    const final = coordinator.getPlan()!;
+    expect(final.steps[0].status).toBe("failed");
+    expect(final.steps[1].status).toBe("completed");
+  });
+
   it("buildPlan returns null on unparseable planner output", async () => {
     const coordinator = new Coordinator(plannerProvider("I cannot make a plan."), createMockWorkerProvider());
     expect(await coordinator.buildPlan("x")).toBeNull();

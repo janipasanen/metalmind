@@ -95,6 +95,9 @@ vi.mock("@metalmind/tools", async () => {
         fs.writeFileSync(String(input.path), String(input.content ?? ""));
         return `wrote ${input.path}`;
       }
+      if (name === "readFile") {
+        return `read:${input.path}`;
+      }
       throw new Error("tool not found");
     }
   },
@@ -1344,5 +1347,181 @@ describe("M7 — model orchestration: persisted local/cloud selection + remote b
 
     next.setRemoteBrain(false);
     expect(new AgentLoop({ provider: "stub", model: "test", explicit: true }).isRemoteBrain()).toBe(false);
+  });
+});
+
+describe("M12 — parallel read-only tool execution (#206)", () => {
+  // Provider that emits two read-only tool calls on the first stream, then text+done.
+  function twoReadsThenDone() {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "r1", toolName: "readFile", argumentsJson: JSON.stringify({ path: "a.ts" }) } };
+          yield { type: "tool-call", toolCall: { toolCallId: "r2", toolName: "readFile", argumentsJson: JSON.stringify({ path: "b.ts" }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done reading" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never;
+  }
+
+  it("runs a batch of read-only calls and returns all results in order", async () => {
+    mockCreateProvider.mockReturnValue(twoReadsThenDone());
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    const events = await collect(loop.run("read both files"));
+    const outputs = events
+      .filter((e) => e.type === "tool-result")
+      .map((e) => (e as { type: "tool-result"; output: string }).output);
+    expect(outputs).toEqual(["read:a.ts", "read:b.ts"]);
+  });
+});
+
+describe("M12 — per-tier latency tracking (#209)", () => {
+  it("feeds latency from usage events and surfaces it in /routes", async () => {
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: "hi" };
+        yield { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } };
+        yield { type: "done" };
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+
+    const router = new ModelRouter();
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { router });
+    loop.setForcedTier(1); // forces a recorded route so lastTier is set
+    await collect(loop.run("hello"));
+
+    const stats = loop.getLatencyStats();
+    expect(stats.length).toBeGreaterThan(0);
+    expect(stats[0].samples).toBeGreaterThanOrEqual(1);
+    expect(stats[0].tier).toBe("tier1-local");
+    expect(loop.getRoutingSummary()).toContain("Latency per tier");
+  });
+});
+
+describe("M12 — general sub-agent / task delegation (#210)", () => {
+  // calls: 1=parent delegates, 2=sub-agent answers, 3=parent finalizes.
+  function taskFlowProvider() {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "tk1", toolName: "task", argumentsJson: JSON.stringify({ objective: "find the answer" }) } };
+          yield { type: "done" };
+        } else if (calls === 2) {
+          yield { type: "text", text: "the answer is 42" };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done: 42" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never;
+  }
+
+  it("runs a sub-agent and returns its result without leaking its text to the parent stream", async () => {
+    mockCreateProvider.mockReturnValue(taskFlowProvider());
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    const events = await collect(loop.run("delegate it"));
+
+    const toolResult = events.find((e) => e.type === "tool-result") as { type: "tool-result"; output: string } | undefined;
+    expect(toolResult?.output).toContain("Sub-agent result:");
+    expect(toolResult?.output).toContain("the answer is 42");
+
+    // The sub-agent's internal text must NOT appear as parent-visible text events.
+    const parentText = events
+      .filter((e) => e.type === "text")
+      .map((e) => (e as { type: "text"; text: string }).text)
+      .join("");
+    expect(parentText).toContain("done: 42");
+    expect(parentText).not.toContain("the answer is 42");
+  });
+});
+
+describe("M12 — coordinator-path streaming (#211)", () => {
+  let backup: string | null = null;
+  beforeEach(() => {
+    backup = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null;
+  });
+  afterEach(() => {
+    if (backup !== null) writeFileSync(XDG_CONFIG_FILE, backup);
+    else if (existsSync(XDG_CONFIG_FILE)) rmSync(XDG_CONFIG_FILE);
+  });
+
+  function makeCoordRouter() {
+    return new ModelRouter({
+      tier1Model: "local-small", tier1Provider: "mlx",
+      tier2Model: "local-small", tier2Provider: "mlx",
+      tier3Model: "claude", tier3Provider: "anthropic",
+      localFirst: true,
+    });
+  }
+  const worker = {
+    providerName: "w",
+    async isAvailable() { return true; },
+    async sendTask() { return JSON.stringify({ suggestedTier: "cloud-main" }); },
+  };
+
+  it("streams tier-3 token-by-token instead of buffering, in remote-brain mode", async () => {
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: "Hel" };
+        yield { type: "text", text: "lo" };
+        yield { type: "done" };
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "anthropic", model: "claude", explicit: false }, { router: makeCoordRouter() });
+    await loop.initCoordinator(worker as never);
+    loop.setRemoteBrain(true);
+
+    const events = await collect(loop.run("hi there")); // short input → no plan path
+    const textEvents = events.filter((e) => e.type === "text") as Array<{ type: "text"; text: string }>;
+    expect(textEvents.length).toBeGreaterThanOrEqual(2); // streamed in chunks, not one blob
+    expect(textEvents.map((e) => e.text).join("")).toContain("Hello");
+  });
+});
+
+describe("M12 — latency is attributed per-attempt tier, not a stale one (#209 review fix)", () => {
+  it("records distinct tiers across forced-tier turns", async () => {
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: "x" };
+        yield { type: "usage", usage: { inputTokens: 3, outputTokens: 2 } };
+        yield { type: "done" };
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { router: new ModelRouter() });
+    loop.setForcedTier(1);
+    await collect(loop.run("first"));
+    loop.setForcedTier(3);
+    await collect(loop.run("second"));
+
+    const tiers = loop.getLatencyStats().map((s) => s.tier).sort();
+    expect(tiers).toContain("tier1-local");
+    expect(tiers).toContain("tier3-cloud");
+    // Each tier got exactly its own turn's sample — not both lumped onto one tier.
+    for (const s of loop.getLatencyStats()) expect(s.samples).toBe(1);
   });
 });

@@ -35,7 +35,7 @@ import { execSync } from "node:child_process";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent, SafetyViolation } from "@metalmind/core";
 import type { ToolAuditEntry } from "@metalmind/tools";
-import { ModelRouter, estimateTokens, evaluateQuality, Coordinator, SafetyValidator } from "@metalmind/core";
+import { ModelRouter, estimateTokens, evaluateQuality, Coordinator, SafetyValidator, LatencyTracker } from "@metalmind/core";
 import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
 import type { ModelRoutingDecision } from "@metalmind/schemas";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
@@ -84,8 +84,41 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Map over items with bounded concurrency, preserving input order in the result. */
+async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker()));
+  return results;
+}
+
 /** File-mutating tools whose targets are snapshotted before execution for /undo. */
 const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "deleteFile"]);
+
+/** Side-effect-free built-in tools that are safe to execute concurrently in one turn (#206). */
+const READ_ONLY_PARALLEL_TOOLS = new Set([
+  "readFile",
+  "listDirectory",
+  "findFiles",
+  "searchInFiles",
+  "findSymbol",
+  "findReferences",
+  "getCallGraph",
+  "getDiagnostics",
+  "webFetch",
+  "webSearch",
+  "gitStatus",
+  "gitDiff",
+  "gitDiffFile",
+  "gitCurrentBranch",
+]);
 
 /** Project memory/rules files auto-loaded into the system prompt, in priority order. */
 const PROJECT_MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", ".metalmind/MEMORY.md", "CONVENTIONS.md", ".cursorrules"];
@@ -115,6 +148,23 @@ const DELEGATE_TO_LOCAL_DEF = {
       },
     },
     required: ["taskType", "inputs"],
+  },
+};
+
+/** Model-facing definition for the general sub-agent delegation tool (#210). */
+const TASK_TOOL_DEF = {
+  name: "task",
+  description:
+    "Delegate a focused, self-contained subtask to a fresh sub-agent that has its own short tool loop and " +
+    "an isolated history, and returns a concise result. Use this to keep your main context clean — e.g. " +
+    '"find where X is configured and summarize", "investigate why test Y fails". The sub-agent cannot spawn ' +
+    "further sub-agents. Give it a complete, unambiguous objective; it cannot ask follow-up questions.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      objective: { type: "string", description: "A complete, self-contained description of the subtask." },
+    },
+    required: ["objective"],
   },
 };
 
@@ -348,6 +398,9 @@ export class AgentLoop {
   private onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
   private sessionUsage = { inputTokens: 0, outputTokens: 0 };
   private lastRoute = { provider: "", model: "" };
+  private attemptTier = "";
+  private attemptStartMs = 0;
+  private latencyByTier = new Map<string, LatencyTracker>();
   private routingLog: Array<{ tier: string; provider: string; model: string; reason: string; at: string }> = [];
   private registry: ToolRegistry;
   private history: AgentMessage[] = [];
@@ -362,6 +415,7 @@ export class AgentLoop {
   private _forcedTier: ForcedTier = null;
   private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
   private remoteBrain = false;
+  private subagentDepth = 0;
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
   private redoStack: EditSet[] = [];
@@ -622,7 +676,10 @@ export class AgentLoop {
     // In remote-brain mode the cloud model can offload bounded subtasks to the
     // small local model in parallel (cached) via this tool (#186/#187).
     const delegate = this.remoteBrain && this.coordinator ? [DELEGATE_TO_LOCAL_DEF] : [];
-    return [...builtIn, ...mcp, ...delegate];
+    // General sub-agent delegation, but only at the top level — a sub-agent can't
+    // spawn more sub-agents (prevents unbounded recursion) (#210).
+    const task = this.subagentDepth === 0 ? [TASK_TOOL_DEF] : [];
+    return [...builtIn, ...mcp, ...delegate, ...task];
   }
 
   /** A triage function that buckets a request by complexity.
@@ -767,6 +824,7 @@ export class AgentLoop {
   }
 
   async *run(userInput: string, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
+    this.beginAttempt(""); // reset latency context; real tiers set it at recordRoute/plan-step time
     try {
       yield* this.runInner(userInput, signal);
     } finally {
@@ -909,7 +967,15 @@ export class AgentLoop {
       try {
         const pd = this.router.decisionForTier("tier2-medium", "planning");
         const plan = await this.coordinator!.buildPlan(userInput, this.getProvider(pd.provider, pd.modelId));
-        if (plan) this.coordinator!.markAllSteps("running");
+        if (plan) {
+          if (this.remoteBrain) {
+            // Cloud is the brain: auto-run the local-worker steps on the small local
+            // model first (real per-step status), then let the cloud reason over them (#205/#208).
+            await this.executeLocalPlanSteps(signal);
+          } else {
+            this.coordinator!.markAllSteps("running"); // advisory plan (default path unchanged)
+          }
+        }
       } catch {
         // planning is best-effort — never block the turn on it
       }
@@ -922,6 +988,17 @@ export class AgentLoop {
     let decision = this.router.decisionForTier(targetTierKey, `coordinator classified: ${targetTierKey}`);
     this.recordRoute(decision);
     let provider = this.getProvider(decision.provider, decision.modelId);
+
+    // The top tier can't escalate up, so there's nothing to quality-gate against —
+    // stream it directly (token-by-token) over the fallback chain instead of
+    // buffering via collectAttempt (#211). This covers the cloud-brain and
+    // remote-brain paths, which always resolve to tier3.
+    if (decision.tier === "tier3-cloud") {
+      const chain = this.buildFallbackChain(decision, "tier3-cloud");
+      yield* this.agenticLoop(chain, toolDefs, { signal });
+      return;
+    }
+
     let attempt = await this.collectAttempt(provider, toolDefs, signal);
     let verdict = evaluateQuality({ text: attempt.text, toolCalls: attempt.toolCalls, errored: attempt.errored });
 
@@ -990,11 +1067,11 @@ export class AgentLoop {
   private async *agenticLoop(
     providers: ModelProvider[],
     toolDefs: unknown[],
-    opts: { primed?: BufferedAttempt; signal?: AbortSignal } = {},
+    opts: { primed?: BufferedAttempt; signal?: AbortSignal; maxIterations?: number } = {},
   ): AsyncGenerator<ChatStreamEvent> {
     const signal = opts.signal;
     let iterations = 0;
-    const maxIterations = 10;
+    const maxIterations = opts.maxIterations ?? 10;
     let pending = opts.primed;
 
     while (iterations < maxIterations) {
@@ -1014,6 +1091,8 @@ export class AgentLoop {
         }
         pending = undefined;
       } else {
+        // Time each model request from here so latency is per-request, not cumulative (#209).
+        this.attemptStartMs = Date.now();
         let sawError = false;
         for await (const event of this.streamResilient(providers, toolDefs, signal)) {
           if (event.type === "text") {
@@ -1050,6 +1129,25 @@ export class AgentLoop {
       }
 
       this.history.push({ role: "assistant", content: assistantText, toolCalls: pendingToolCalls });
+
+      // Parallel fast-path: when every pending call is a side-effect-free read-only
+      // tool (and not an MCP tool), run them concurrently instead of one-by-one (#206).
+      // Mutating/approval-gated/MCP batches fall through to the ordered path below.
+      if (
+        pendingToolCalls.length > 1 &&
+        pendingToolCalls.every((c) => READ_ONLY_PARALLEL_TOOLS.has(c.toolName) && !this.mcpTools.has(c.toolName))
+      ) {
+        const outputs = await this.runReadOnlyBatch(pendingToolCalls);
+        for (let i = 0; i < pendingToolCalls.length; i++) {
+          yield { type: "tool-result", output: outputs[i] };
+          this.history.push({
+            role: "tool",
+            content: outputs[i],
+            metadata: { toolCallId: pendingToolCalls[i].toolCallId },
+          });
+        }
+        continue;
+      }
 
       for (const call of pendingToolCalls) {
         const inputObj = this.safeParseArgs(call.argumentsJson);
@@ -1100,6 +1198,9 @@ export class AgentLoop {
           if (call.toolName === "delegateToLocal") {
             // Cloud brain offloads bounded subtasks to the local model (#187).
             output = await this.handleDelegateToLocal(inputObj);
+          } else if (call.toolName === "task") {
+            // Spawn a focused sub-agent with its own bounded loop (#210).
+            output = await this.handleTaskDelegation(inputObj, signal);
           } else if (mcpEntry) {
             // Call the server with the ORIGINAL (un-namespaced) tool name.
             output = await this.callMcpAudited(mcpEntry.client, mcpEntry.def.name, inputObj);
@@ -1141,6 +1242,42 @@ export class AgentLoop {
     } catch {
       return {};
     }
+  }
+
+  /** Execute a batch of read-only tool calls concurrently (bounded), preserving order (#206).
+   *  Read-only tools need no approval, snapshot, or post-edit hook, so this is a safe parallelization. */
+  private async runReadOnlyBatch(
+    calls: Array<{ toolCallId: string; toolName: string; argumentsJson: string }>,
+  ): Promise<string[]> {
+    const run = async (call: { toolCallId: string; toolName: string; argumentsJson: string }): Promise<string> => {
+      const inputObj = this.safeParseArgs(call.argumentsJson);
+      const violation = this.preflightSafety(call.toolName, inputObj);
+      if (violation) {
+        const output = `Blocked: ${violation.message}`;
+        this.auditLog.log({
+          timestamp: new Date().toISOString(),
+          toolName: call.toolName,
+          input: inputObj,
+          output,
+          success: false,
+          error: violation.message,
+        });
+        return this.redactor.redact(output);
+      }
+      let output: string;
+      try {
+        const result = await this.registry.execute(call.toolName, inputObj, {
+          projectRoot: this.projectRoot,
+          workspaceRoots: this.workspaceRoots,
+          auditLog: this.auditLog.log,
+        });
+        output = typeof result === "string" ? result : JSON.stringify(result);
+      } catch (err) {
+        output = `Error: ${errText(err)}`;
+      }
+      return this.redactor.redact(output);
+    };
+    return mapBounded(calls, 6, run);
   }
 
   /** Pre-execution safety check: dangerous shell commands, secret/traversal paths. */
@@ -1362,11 +1499,16 @@ export class AgentLoop {
     this.redactor = new Redactor(collectSecrets(xdg.apiKeys, [this.config.apiKey], xdg.mcpServers));
   }
 
-  /** Accumulate real provider token usage; feed the router's budget tracker (#157, #182). */
+  /** Accumulate real provider token usage; feed the router's budget tracker (#157, #182)
+   *  and the per-tier latency tracker (#209). */
   private recordUsage(usage: { inputTokens?: number; outputTokens?: number }): void {
     if (usage.inputTokens) this.sessionUsage.inputTokens += usage.inputTokens;
     if (usage.outputTokens) this.sessionUsage.outputTokens += usage.outputTokens;
     this.onUsage?.({ ...this.sessionUsage });
+    // Per-attempt latency: measured from the current attempt's start and attributed
+    // to that attempt's tier, so escalation/fallback/plan-step work isn't mis-counted (#209).
+    const latencyMs = this.attemptStartMs > 0 ? Date.now() - this.attemptStartMs : 0;
+    this.recordLatency(this.attemptTier, latencyMs);
     // Attribute spend to the active provider/model so budget routing can react (#182).
     this.router?.recordUsage({
       provider: this.lastRoute.provider || this.config.provider,
@@ -1374,10 +1516,37 @@ export class AgentLoop {
       inputTokens: usage.inputTokens ?? 0,
       outputTokens: usage.outputTokens ?? 0,
       costUsd: 0, // router computes from its rate table
-      latencyMs: 0,
+      latencyMs,
       timestamp: new Date().toISOString(),
       success: true,
     });
+  }
+
+  /** Start timing a new model attempt for tier `tier` (#209). */
+  private beginAttempt(tier: string): void {
+    this.attemptTier = tier;
+    this.attemptStartMs = Date.now();
+  }
+
+  /** Feed a per-tier latency sample (#209). */
+  private recordLatency(tier: string, ms: number): void {
+    if (!tier || ms < 0) return;
+    let tracker = this.latencyByTier.get(tier);
+    if (!tracker) {
+      tracker = new LatencyTracker();
+      this.latencyByTier.set(tier, tracker);
+    }
+    tracker.record(ms);
+  }
+
+  /** Per-tier latency stats (avg/p95 in ms) for /routes (#209). */
+  getLatencyStats(): Array<{ tier: string; avgMs: number; p95Ms: number; samples: number }> {
+    return [...this.latencyByTier.entries()].map(([tier, t]) => ({
+      tier,
+      avgMs: Math.round(t.getAverage()),
+      p95Ms: Math.round(t.getP95()),
+      samples: t.getCount(),
+    }));
   }
 
   /** Session spend vs the configured budget, for /budget (#182). */
@@ -1434,6 +1603,85 @@ export class AgentLoop {
     return `Delegated ${tasks.length} "${taskType}" task(s) to the local model:\n${lines.join("\n")}`.slice(0, 8000);
   }
 
+  /**
+   * Run a focused sub-agent for a self-contained objective (#210). The sub-agent
+   * gets a fresh, isolated history and its own short tool loop; its tool calls go
+   * through the same safety/approval gates. It cannot spawn further sub-agents.
+   * Returns the sub-agent's final text as the tool result for the parent turn.
+   */
+  private async handleTaskDelegation(input: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+    const objective = typeof input.objective === "string" ? input.objective.trim() : "";
+    if (!objective) return "task requires an { objective } string.";
+    if (this.subagentDepth >= 1) return "Sub-agents cannot spawn further sub-agents.";
+    try {
+      const provider = this.getProvider(this.config.provider, this.config.model);
+      const text = await this.runSubagent(objective, provider, signal);
+      return text ? `Sub-agent result:\n${text}`.slice(0, 8000) : "(sub-agent produced no output)";
+    } catch (err) {
+      return `Sub-agent failed: ${errText(err)}`;
+    }
+  }
+
+  /**
+   * Run a focused sub-agent on `provider` for `objective` with an isolated history
+   * and a short tool loop, returning its final text. Used by the `task` tool (#210)
+   * and by auto-executed local-worker plan steps (#208).
+   */
+  private async runSubagent(objective: string, provider: ModelProvider, signal?: AbortSignal): Promise<string> {
+    if (this.subagentDepth >= 1) return "";
+    const savedHistory = this.history;
+    const savedTurn = this.turnCount;
+    this.subagentDepth++;
+    this.history = [
+      {
+        role: "system",
+        content:
+          "You are a focused sub-agent. Accomplish the objective below using the available tools, then reply " +
+          "with a concise result for the calling agent. Do not ask questions — make reasonable assumptions.\n\n" +
+          `Objective:\n${objective}`,
+      },
+      { role: "user", content: objective },
+    ];
+    try {
+      let finalText = "";
+      for await (const ev of this.agenticLoop([provider], this.toolDefs(), { signal, maxIterations: 6 })) {
+        if (ev.type === "text") finalText += ev.text;
+      }
+      return finalText.trim();
+    } finally {
+      this.history = savedHistory;
+      this.turnCount = savedTurn;
+      this.subagentDepth--;
+    }
+  }
+
+  /**
+   * Auto-execute the plan's local-worker steps on the small local model before the
+   * cloud brain responds (#205/#208). Drives real per-step status via runPlan and
+   * injects the findings into context. Only used in remote-brain mode.
+   */
+  private async executeLocalPlanSteps(signal?: AbortSignal): Promise<void> {
+    if (!this.coordinator || !this.router) return;
+    const localDecision = this.router.decisionForTier("tier2-medium", "plan local-worker step", false);
+    const localProvider = this.getProvider(localDecision.provider, localDecision.modelId);
+    const notes: string[] = [];
+    await this.coordinator.runPlan(
+      (step) => step.type === "local-worker",
+      async (step) => {
+        this.beginAttempt("tier2-medium"); // local-worker steps run on the local tier (#209)
+        const out = await this.runSubagent(step.description, localProvider, signal).catch(() => "");
+        if (out) notes.push(`- ${step.description}: ${out}`);
+        return { success: out.length > 0 };
+      },
+    );
+    if (notes.length > 0) {
+      this.history.push({
+        role: "system",
+        content: `Pre-computed by local sub-agents (use these results):\n${notes.join("\n")}`,
+      });
+    }
+  }
+
   /** Pre-flight health check for the active provider/model (#174). */
   async checkHealth(): Promise<{ ok: boolean; message: string }> {
     try {
@@ -1448,6 +1696,8 @@ export class AgentLoop {
   /** Record a routing decision (accumulated, not overwritten) and notify the UI (#165). */
   private recordRoute(decision: RouteDecision): void {
     this.lastRoute = { provider: decision.provider, model: decision.modelId };
+    // Reset the latency clock for this attempt and attribute to its tier (#209).
+    this.beginAttempt(decision.tier);
     this.routingLog.push({
       tier: decision.tier,
       provider: decision.provider,
@@ -1468,7 +1718,13 @@ export class AgentLoop {
       .slice(-limit)
       .map((r) => `  ${r.at.slice(11, 19)}  ${r.tier} → ${r.provider}/${r.model}  (${r.reason})`)
       .join("\n");
-    return `Routing hit counts (this session):\n${tally}\n\nRecent decisions:\n${recent}`;
+    const latency = this.getLatencyStats();
+    const latencyBlock = latency.length
+      ? `\n\nLatency per tier (avg / p95):\n${latency
+          .map((l) => `  ${l.tier}: ${l.avgMs}ms / ${l.p95Ms}ms  (${l.samples} sample${l.samples === 1 ? "" : "s"})`)
+          .join("\n")}`
+      : "";
+    return `Routing hit counts (this session):\n${tally}\n\nRecent decisions:\n${recent}${latencyBlock}`;
   }
 
   /** Window history to fit the active model's context limit, reporting usage (#141). */

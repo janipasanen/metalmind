@@ -119,6 +119,10 @@ export class LatencyTracker {
     return this.samples.length === 0 ? 0 : Math.max(...this.samples);
   }
 
+  getCount(): number {
+    return this.samples.length;
+  }
+
   reset(): void {
     this.samples = [];
   }
