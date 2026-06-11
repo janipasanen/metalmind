@@ -104,6 +104,8 @@ export interface UserConfig {
   remoteBrain?: boolean;
   /** Saved, reusable prompt templates by name; {{vars}} are filled at use time (#201). */
   prompts?: Record<string, string>;
+  /** Enable vim modal editing in the input bar (#184). */
+  vimMode?: boolean;
   /** OAuth tokens for authenticated MCP servers, keyed by server id (#199).
    *  Used as a fallback store when the macOS keychain helper is unavailable. */
   mcpTokens?: Record<string, { accessToken: string; refreshToken?: string; expiresAt?: number; tokenType?: string }>;

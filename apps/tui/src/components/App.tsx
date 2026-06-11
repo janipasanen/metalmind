@@ -16,6 +16,7 @@ import { handleRagCommand } from "../rag/manager.js";
 import { handleAllowCommand } from "../approval-allowlist.js";
 import { diagnosticsReport } from "../error-log.js";
 import { handleCopyCommand } from "../copy-command.js";
+import { VIM_HELP } from "../vim.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -66,6 +67,7 @@ export default function App({ config }: AppProps) {
   const [activeModel, setActiveModel] = useState<string>(`${config.provider}/${config.model}`);
   const [focusPanel, setFocusPanel] = useState<"chat" | "input">("input");
   const [scrollOffset, setScrollOffset] = useState(0);
+  const [vimMode, setVimMode] = useState(() => loadXdgConfig().vimMode ?? false);
   const [projectName] = useState(() => {
     const parts = process.cwd().split("/");
     return parts[parts.length - 1] || "metalmind";
@@ -237,6 +239,7 @@ export default function App({ config }: AppProps) {
           "  /edit <text>      - Replace + re-run the last prompt",
           "  /branch           - Fork this conversation into a new session",
           "  /copy [last|code] - Copy the last message (or its code block) to the clipboard",
+          "  /vim [on|off|help]- Toggle vim modal editing in the input bar",
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
@@ -499,6 +502,21 @@ export default function App({ config }: AppProps) {
           }
         } else {
           yield { type: "text", text: handleMcpCommand(args) } as const;
+        }
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/vim" || input.startsWith("/vim ")) {
+        const arg = input.slice(4).trim();
+        if (arg === "help") {
+          yield { type: "text", text: VIM_HELP } as const;
+        } else {
+          const cfg = loadXdgConfig();
+          const next = arg === "on" ? true : arg === "off" ? false : !cfg.vimMode;
+          saveXdgConfig({ ...cfg, vimMode: next });
+          setVimMode(next);
+          yield { type: "text", text: `Vim mode ${next ? "ON" : "OFF"}.${next ? " (/vim help for keys)" : ""}` } as const;
         }
         yield { type: "done" } as const;
         return;
@@ -796,7 +814,7 @@ export default function App({ config }: AppProps) {
         </Box>
       )}
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
-      <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null} />
+      <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null} vimMode={vimMode} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} />
 
       {showCommandPalette && (

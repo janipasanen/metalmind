@@ -1,6 +1,8 @@
 import React, { useState, useCallback, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
+import { parseBracketedPaste, endsWithContinuation, applyContinuation } from "../multiline.js";
+import { vimKey, initialVimState } from "../vim.js";
 
 const SLASH_COMMANDS = [
   { syntax: "/help",        description: "Show available commands" },
@@ -33,6 +35,7 @@ const SLASH_COMMANDS = [
   { syntax: "/redo",        description: "Re-apply the last undone edit set" },
   { syntax: "/audit",       description: "Show this session's tool-call log" },
   { syntax: "/diagnostics", description: "Show recent errors / crash log" },
+  { syntax: "/vim ",        description: "Toggle vim modal editing (on|off|help)" },
   { syntax: "/clear",       description: "Clear chat history" },
   { syntax: "/quit",        description: "Exit" },
 ];
@@ -41,10 +44,13 @@ interface InputBarProps {
   onSubmit: (text: string) => void;
   disabled?: boolean;
   accent?: string;
+  /** Vim modal editing in the input bar (#184). */
+  vimMode?: boolean;
 }
 
-export default function InputBar({ onSubmit, disabled = false, accent = "cyan" }: InputBarProps) {
+export default function InputBar({ onSubmit, disabled = false, accent = "cyan", vimMode = false }: InputBarProps) {
   const [value, setValue] = useState("");
+  const [vim, setVim] = useState(() => initialVimState(""));
   const [suggestionIdx, setSuggestionIdx] = useState(0);
   const history = useRef<string[]>([]);
   const historyIdx = useRef(-1);
@@ -56,6 +62,18 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan" }
   const showSuggestions = !disabled && filtered.length > 0;
 
   useInput((_input, key) => {
+    // Vim modal editing drives the buffer when enabled and no slash menu is open (#184).
+    if (vimMode && !showSuggestions) {
+      const r = vimKey(vim, _input, key);
+      if (r.submit) {
+        handleSubmit(vim.value);
+        setVim(initialVimState(""));
+      } else {
+        setVim(r.state);
+        setValue(r.state.value);
+      }
+      return;
+    }
     if (showSuggestions) {
       if (key.upArrow) {
         setSuggestionIdx((p) => Math.max(p - 1, 0));
@@ -95,14 +113,21 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan" }
   }, { isActive: !disabled });
 
   const handleChange = (v: string) => {
-    setValue(v);
+    // Strip bracketed-paste markers; multi-line pastes stay in the buffer (#160).
+    const { text } = parseBracketedPaste(v);
+    setValue(text);
     setSuggestionIdx(0);
-    if (!v.startsWith("/")) historyIdx.current = -1;
+    if (!text.startsWith("/")) historyIdx.current = -1;
   };
 
   const handleSubmit = useCallback(
     (text: string) => {
       if (disabled) return;
+      // A line ending in a single backslash continues onto the next line (#160).
+      if (endsWithContinuation(text)) {
+        setValue(applyContinuation(text));
+        return;
+      }
       const trimmed = text.trim();
       if (!trimmed) return;
       if (history.current[history.current.length - 1] !== trimmed) {
@@ -137,14 +162,35 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan" }
           <Text dimColor>↑↓ select  Tab complete  Esc dismiss</Text>
         </Box>
       )}
+      {value.includes("\n") && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {value.split("\n").slice(0, -1).map((l, i) => (
+            <Text key={i} dimColor>{l || " "}</Text>
+          ))}
+        </Box>
+      )}
       <Box borderStyle="single" borderColor="gray" paddingX={1}>
         <Box marginRight={1}>
-          <Text color={disabled ? "gray" : "green"} bold>&gt;</Text>
+          {vimMode && !disabled ? (
+            <Text color={vim.mode === "insert" ? "green" : "yellow"} bold>[{vim.mode === "insert" ? "I" : "N"}]</Text>
+          ) : (
+            <Text color={disabled ? "gray" : "green"} bold>{value.includes("\n") ? "…" : ">"}</Text>
+          )}
         </Box>
         {disabled ? (
           <Text dimColor>… streaming response</Text>
+        ) : vimMode ? (
+          <Text>
+            {value.slice(0, vim.cursor)}
+            <Text inverse>{value[vim.cursor] ?? " "}</Text>
+            {value.slice(vim.cursor + 1)}
+          </Text>
         ) : (
-          <TextInput value={value} onChange={handleChange} onSubmit={handleSubmit} />
+          <TextInput
+            value={value.includes("\n") ? value.slice(value.lastIndexOf("\n") + 1) : value}
+            onChange={(v) => handleChange(value.includes("\n") ? value.slice(0, value.lastIndexOf("\n") + 1) + v : v)}
+            onSubmit={() => handleSubmit(value)}
+          />
         )}
       </Box>
     </Box>
