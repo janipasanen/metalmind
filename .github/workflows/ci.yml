@@ -13,20 +13,22 @@ concurrency:
 
 jobs:
   build-test:
-    name: build & test (node ${{ matrix.node }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [20, 22]
+    name: build & test (macOS)
+    # MetalMind targets macOS only, so CI runs on macOS to match the runtime and
+    # the tests that depend on macOS path semantics.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node ${{ matrix.node }}
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 22
           cache: npm
+
+      - name: Install ripgrep
+        # Required by the search / findFiles / replaceInProject tools and their tests.
+        run: brew install ripgrep
 
       - name: Install dependencies
         run: npm ci

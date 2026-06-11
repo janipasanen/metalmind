@@ -68,6 +68,50 @@ describe("OllamaProvider", () => {
     });
   });
 
+  describe("model management (#203)", () => {
+    it("listModelsDetailed returns name + size", async () => {
+      vi.stubGlobal(
+        "fetch",
+        mockFetch(200, { models: [{ name: "ministral-3:3b", size: 3_000_000_000, modified_at: "2026-06-11" }] }),
+      );
+      const p = new OllamaProvider("test");
+      const models = await p.listModelsDetailed();
+      expect(models).toEqual([{ name: "ministral-3:3b", size: 3_000_000_000, modified: "2026-06-11" }]);
+    });
+
+    it("pullModel yields streamed NDJSON progress events", async () => {
+      const ndjson =
+        JSON.stringify({ status: "pulling", completed: 50, total: 100 }) +
+        "\n" +
+        JSON.stringify({ status: "success" }) +
+        "\n";
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(ndjson));
+          controller.close();
+        },
+      });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200, body: stream }));
+
+      const p = new OllamaProvider("test");
+      const events: Array<{ status: string }> = [];
+      for await (const ev of p.pullModel("ministral-3:3b")) events.push(ev);
+      expect(events[0]).toEqual({ status: "pulling", completed: 50, total: 100 });
+      expect(events.at(-1)).toEqual({ status: "success" });
+    });
+
+    it("deleteModel issues a DELETE and resolves on 200", async () => {
+      const fetchMock = mockFetch(200, {});
+      vi.stubGlobal("fetch", fetchMock);
+      const p = new OllamaProvider("test");
+      await expect(p.deleteModel("old-model")).resolves.toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/delete"),
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    });
+  });
+
   describe("completeChat", () => {
     it("returns assistant message from Ollama API", async () => {
       vi.stubGlobal(

@@ -94,6 +94,58 @@ export class OllamaProvider implements ModelProvider {
     return data.models.map((m) => m.name);
   }
 
+  /** List installed models with size + last-modified, for model management (#203). */
+  async listModelsDetailed(): Promise<Array<{ name: string; size: number; modified: string }>> {
+    const res = await fetch(`${this.baseUrl}/api/tags`, { headers: this.headers() });
+    if (!res.ok) throw await providerErrorFromResponse(res, "ollama", "Ollama list models failed");
+    const data = (await res.json()) as {
+      models: Array<{ name: string; size?: number; modified_at?: string }>;
+    };
+    return (data.models ?? []).map((m) => ({
+      name: m.name,
+      size: m.size ?? 0,
+      modified: m.modified_at ?? "",
+    }));
+  }
+
+  /** Pull a model, streaming progress events from the Ollama daemon (#203). */
+  async *pullModel(name: string): AsyncGenerator<{ status: string; completed?: number; total?: number }> {
+    const res = await fetch(`${this.baseUrl}/api/pull`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ model: name, stream: true }),
+    });
+    if (!res.ok || !res.body) throw await providerErrorFromResponse(res, "ollama", "Ollama pull failed");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          yield JSON.parse(line) as { status: string; completed?: number; total?: number };
+        } catch {
+          // ignore malformed progress lines
+        }
+      }
+    }
+  }
+
+  /** Delete an installed model (#203). */
+  async deleteModel(name: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/api/delete`, {
+      method: "DELETE",
+      headers: this.headers(),
+      body: JSON.stringify({ model: name }),
+    });
+    if (!res.ok) throw await providerErrorFromResponse(res, "ollama", "Ollama delete failed");
+  }
+
   async completeChat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
     const ollamaMessages = this.convertMessages(request.messages);
     const body: OllamaChatRequest = {

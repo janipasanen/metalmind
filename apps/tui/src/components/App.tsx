@@ -9,6 +9,7 @@ import { useChat } from "../hooks/useChat.js";
 import { AgentLoop, createDefaultRouter, type ForcedTier, type ApprovalRequest, type ApprovalDecision } from "../agent.js";
 import ApprovalView from "./ApprovalView.js";
 import { handleMcpCommand } from "../mcp-command.js";
+import { listModelsText, deleteModelText, pullModelProgress } from "../model-command.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -226,6 +227,7 @@ export default function App({ config }: AppProps) {
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
           "  /mcp              - MCP servers: list | presets | add <preset> k=v | remove <id>",
+          "  /models           - Local Ollama models: list | pull <name> | delete <name>",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
           "",
@@ -423,6 +425,25 @@ export default function App({ config }: AppProps) {
       if (input === "/mcp" || input.startsWith("/mcp ")) {
         const text = handleMcpCommand(input.slice(4));
         yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/models" || input.startsWith("/models ")) {
+        const arg = input.slice(7).trim();
+        const [sub, ...rest] = arg.split(/\s+/).filter(Boolean);
+        const name = rest.join(" ");
+        if (!sub || sub === "list" || sub === "ls") {
+          yield { type: "text", text: await listModelsText() } as const;
+        } else if (sub === "pull") {
+          for await (const line of pullModelProgress(name)) {
+            yield { type: "text", text: line + "\n" } as const;
+          }
+        } else if (sub === "delete" || sub === "rm") {
+          yield { type: "text", text: await deleteModelText(name) } as const;
+        } else {
+          yield { type: "text", text: "Usage: /models [list | pull <name> | delete <name>]" } as const;
+        }
         yield { type: "done" } as const;
         return;
       }

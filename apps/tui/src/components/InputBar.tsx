@@ -11,6 +11,7 @@ const SLASH_COMMANDS = [
   { syntax: "/brain ",      description: "Remote-brain mode: on|off (cloud delegates to local)" },
   { syntax: "/keychain ",   description: "save/load/status — macOS keychain" },
   { syntax: "/model ",      description: "Switch model  e.g. /model gemma3:27b" },
+  { syntax: "/models ",     description: "Manage local models: list|pull <n>|delete <n>" },
   { syntax: "/apikey ",     description: "Update API key for current provider" },
   { syntax: "/workspace ",  description: "Allow AI to access a directory" },
   { syntax: "/init",        description: "Generate a starter project memory file" },
