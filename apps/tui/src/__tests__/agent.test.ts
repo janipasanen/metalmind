@@ -1536,3 +1536,39 @@ describe("M14 — image staging (#177)", () => {
     expect(loop.pendingImageCount()).toBe(0); // attached to the turn + cleared
   });
 });
+
+describe("M15 — long-term memory (#218)", () => {
+  it("rememberFact appends to .metalmind/MEMORY.md and it loads into the next session's prompt", async () => {
+    const root = join(tmpdir(), `mm-mem-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    // A project doc exists, so learned memory must load as a *separate* section.
+    writeFileSync(join(root, "AGENTS.md"), "# Project\nStanding instructions.");
+    try {
+      const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+      const res = loop.rememberFact("the build command is npm run build");
+      expect(res).toContain("Remembered");
+      const memPath = join(root, ".metalmind", "MEMORY.md");
+      expect(existsSync(memPath)).toBe(true);
+      expect(readFileSync(memPath, "utf8")).toContain("the build command is npm run build");
+
+      // A freshly constructed agent injects it into the system message of its first turn.
+      let systemMsg = "";
+      mockCreateProvider.mockReturnValue({
+        providerName: "stub",
+        supportedCapabilities: {} as never,
+        async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+          systemMsg = req.messages.find((m) => m.role === "system")?.content ?? "";
+          yield { type: "text", text: "ok" };
+          yield { type: "done" };
+        },
+        async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+      } as never);
+      const next = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+      await collect(next.run("hi"));
+      expect(systemMsg).toContain("Long-term memory");
+      expect(systemMsg).toContain("the build command is npm run build");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

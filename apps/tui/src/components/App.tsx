@@ -233,6 +233,7 @@ export default function App({ config }: AppProps) {
           "  /models           - Local Ollama models: list | pull <name> | delete <name>",
           "  /image            - Attach an image (path or https URL) for a vision model",
           "  /rag              - Retrieval: add <path> | search <q> | status | clear (queries auto-retrieve)",
+          "  /remember <text>  - Save a durable fact to long-term memory (loads next session)",
           "  /prompt           - Prompt library: save <name> <tmpl> | list | delete | <name> k=v",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
@@ -458,6 +459,13 @@ export default function App({ config }: AppProps) {
 
       if (input === "/mcp" || input.startsWith("/mcp ")) {
         const text = handleMcpCommand(input.slice(4));
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/remember" || input.startsWith("/remember ")) {
+        const text = agentRef.current?.rememberFact(input.slice(9).trim()) ?? "Agent not initialised.";
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;

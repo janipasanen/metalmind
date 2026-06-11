@@ -169,6 +169,20 @@ const TASK_TOOL_DEF = {
   },
 };
 
+/** Model-facing definition for the long-term memory tool (#218). */
+const REMEMBER_TOOL_DEF = {
+  name: "remember",
+  description:
+    "Save a durable fact to long-term memory (.metalmind/MEMORY.md) so it's available in future sessions. " +
+    "Use sparingly for things worth persisting: project conventions, the user's stable preferences, or hard-won " +
+    "context that isn't obvious from the code. Don't save transient or easily-rediscovered details.",
+  inputSchema: {
+    type: "object",
+    properties: { fact: { type: "string", description: "A concise, self-contained fact to remember." } },
+    required: ["fact"],
+  },
+};
+
 interface EditSet {
   turn: number;
   files: Array<{ path: string; before: string | null }>;
@@ -696,7 +710,9 @@ export class AgentLoop {
     // General sub-agent delegation, but only at the top level — a sub-agent can't
     // spawn more sub-agents (prevents unbounded recursion) (#210).
     const task = this.subagentDepth === 0 ? [TASK_TOOL_DEF] : [];
-    return [...builtIn, ...mcp, ...delegate, ...task];
+    // Long-term memory tool, top-level only (#218).
+    const remember = this.subagentDepth === 0 ? [REMEMBER_TOOL_DEF] : [];
+    return [...builtIn, ...mcp, ...delegate, ...task, ...remember];
   }
 
   /** A triage function that buckets a request by complexity.
@@ -1226,6 +1242,9 @@ export class AgentLoop {
           } else if (call.toolName === "task") {
             // Spawn a focused sub-agent with its own bounded loop (#210).
             output = await this.handleTaskDelegation(inputObj, signal);
+          } else if (call.toolName === "remember") {
+            // Persist a durable fact to long-term memory (#218).
+            output = this.rememberFact(typeof inputObj.fact === "string" ? inputObj.fact : "");
           } else if (mcpEntry) {
             // Call the server with the ORIGINAL (un-namespaced) tool name.
             output = await this.callMcpAudited(mcpEntry.client, mcpEntry.def.name, inputObj);
@@ -1920,6 +1939,42 @@ export class AgentLoop {
     return null;
   }
 
+  /** Always-loaded long-term learned memory at .metalmind/MEMORY.md (#218). */
+  private loadLearnedMemory(): string | null {
+    const abs = join(this.projectRoot, ".metalmind", "MEMORY.md");
+    try {
+      if (existsSync(abs)) {
+        let c = readFileSync(abs, "utf8");
+        if (c.length > 8000) c = c.slice(0, 8000) + "\n…(truncated)";
+        return c.trim() || null;
+      }
+    } catch {
+      // unreadable — skip
+    }
+    return null;
+  }
+
+  /** Append a durable fact to .metalmind/MEMORY.md so it persists into later sessions (#218). */
+  rememberFact(text: string): string {
+    const fact = text.trim();
+    if (!fact) return "Nothing to remember (empty note).";
+    const dir = join(this.projectRoot, ".metalmind");
+    const file = join(dir, "MEMORY.md");
+    try {
+      mkdirSync(dir, { recursive: true });
+      let content = existsSync(file) ? readFileSync(file, "utf8") : "# Project memory\n";
+      if (!content.includes("## Learned facts")) {
+        content = content.replace(/\s*$/, "") + "\n\n## Learned facts\n";
+      }
+      const stamp = new Date().toISOString().slice(0, 10);
+      content = content.replace("## Learned facts\n", `## Learned facts\n- [${stamp}] ${fact}\n`);
+      writeFileSync(file, content, "utf8");
+      return `Remembered: "${fact}" → .metalmind/MEMORY.md (loads in future sessions).`;
+    } catch (err) {
+      return `Couldn't save memory: ${errText(err)}`;
+    }
+  }
+
   /** Generate a starter project-memory doc from a lightweight repo scan (#146 /init). */
   initProjectDoc(): string {
     const target = join(this.projectRoot, ".metalmind", "MEMORY.md");
@@ -2014,6 +2069,19 @@ export class AgentLoop {
         memory.content,
         "--- end project instructions ---",
       );
+    }
+
+    // Inject long-term learned memory unless it was already loaded as the project doc (#218).
+    if (memory?.name !== ".metalmind/MEMORY.md") {
+      const learned = this.loadLearnedMemory();
+      if (learned) {
+        lines.push(
+          "",
+          "--- Long-term memory (facts you previously chose to remember) ---",
+          learned,
+          "--- end long-term memory ---",
+        );
+      }
     }
 
     // Inject a token-bounded repository map so the model has structural context
