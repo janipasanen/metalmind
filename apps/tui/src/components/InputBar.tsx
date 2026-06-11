@@ -8,6 +8,7 @@ const SLASH_COMMANDS = [
   { syntax: "/cost",        description: "Show this session's token usage" },
   { syntax: "/budget ",     description: "View or set the session spend cap" },
   { syntax: "/routes",      description: "Routing decisions + per-tier counts" },
+  { syntax: "/brain ",      description: "Remote-brain mode: on|off (cloud delegates to local)" },
   { syntax: "/keychain ",   description: "save/load/status — macOS keychain" },
   { syntax: "/model ",      description: "Switch model  e.g. /model gemma3:27b" },
   { syntax: "/apikey ",     description: "Update API key for current provider" },

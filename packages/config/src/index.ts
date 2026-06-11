@@ -98,6 +98,10 @@ export interface UserConfig {
   };
   /** Soft session spend cap in USD; once reached, cloud routing downgrades to local (#182). */
   budgetUsd?: number;
+  /** Persisted per-tier model overrides (1=local MLX, 2=local Ollama, 3=cloud) (#185). */
+  tierModels?: Record<string, { provider: string; model: string }>;
+  /** Remote-brain mode: cloud model coordinates and delegates bounded subtasks to the local model (#186). */
+  remoteBrain?: boolean;
 }
 
 export interface McpServerConfig {

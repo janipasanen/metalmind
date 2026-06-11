@@ -84,6 +84,28 @@ const INDEX_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".ne
 const INDEXABLE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java", ".rb", ".swift", ".c", ".cc", ".cpp", ".h", ".hpp"]);
 const INDEX_MAX_FILES = 400;
 
+/** Model-facing definition for the cloud→local delegation tool (#186/#187). */
+const DELEGATE_TO_LOCAL_DEF = {
+  name: "delegateToLocal",
+  description:
+    "Offload bounded, repetitive subtasks to the fast LOCAL model — they run in parallel and are cached. " +
+    "Use this in remote-brain mode to process many files or items cheaply before you reason over the results. " +
+    "taskType is one of: summarizeFile, extractSymbols, rankRelevantFiles, summarizeDiff, classifyIntent. " +
+    "inputs is an array where each item is the input object for one task (e.g. { filePath } for summarizeFile).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      taskType: { type: "string", description: "The local worker task to run for each input." },
+      inputs: {
+        type: "array",
+        items: { type: "object" },
+        description: "One input object per delegated subtask (up to 16).",
+      },
+    },
+    required: ["taskType", "inputs"],
+  },
+};
+
 interface EditSet {
   turn: number;
   files: Array<{ path: string; before: string | null }>;
@@ -327,6 +349,7 @@ export class AgentLoop {
   private safetyValidator: SafetyValidator;
   private _forcedTier: ForcedTier = null;
   private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
+  private remoteBrain = false;
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
   private redoStack: EditSet[] = [];
@@ -349,7 +372,16 @@ export class AgentLoop {
     this.onContextUsage = options.onContextUsage;
     this.onUsage = options.onUsage;
     this.onApprovalRequest = options.onApprovalRequest;
-    this.autoApprove = loadXdgConfig().permissions?.autoApprove ?? false;
+    const xdg = loadXdgConfig();
+    this.autoApprove = xdg.permissions?.autoApprove ?? false;
+    this.remoteBrain = xdg.remoteBrain ?? false;
+    // Restore persisted per-tier model overrides (#185).
+    for (const [tier, tm] of Object.entries(xdg.tierModels ?? {})) {
+      const t = Number(tier);
+      if ((t === 1 || t === 2 || t === 3) && tm?.provider && tm?.model) {
+        this.tierOverrides.set(t as 1 | 2 | 3, { provider: tm.provider, model: tm.model });
+      }
+    }
     this.rebuildRedactor();
     this.projectRoot = options.projectRoot ?? process.cwd();
     this.registry = buildRegistry(this.projectRoot);
@@ -410,14 +442,35 @@ export class AgentLoop {
     return this._forcedTier;
   }
 
-  /** Override the provider/model used when a specific tier is active.
-   *  Useful for switching the cloud model (tier 3) without editing metalmind.yaml. */
+  /** Override the provider/model used when a specific tier is active, and persist it (#185).
+   *  Tier 2 = the local Ollama model, tier 3 = the remote (Ollama Cloud) model. */
   setTierModel(tier: 1 | 2 | 3, provider: string, model: string): void {
     this.tierOverrides.set(tier, { provider, model });
+    try {
+      const xdg = loadXdgConfig();
+      saveXdgConfig({ ...xdg, tierModels: { ...(xdg.tierModels ?? {}), [tier]: { provider, model } } });
+    } catch {
+      // persistence is best-effort
+    }
   }
 
   getTierModel(tier: 1 | 2 | 3): { provider: string; model: string } | undefined {
     return this.tierOverrides.get(tier);
+  }
+
+  /** Remote-brain mode: the cloud model coordinates; bounded subtasks go to the local model (#186). */
+  isRemoteBrain(): boolean {
+    return this.remoteBrain;
+  }
+
+  setRemoteBrain(on: boolean): void {
+    this.remoteBrain = on;
+    try {
+      const xdg = loadXdgConfig();
+      saveXdgConfig({ ...xdg, remoteBrain: on });
+    } catch {
+      // best-effort
+    }
   }
 
   get safety(): SafetyValidator {
@@ -554,7 +607,10 @@ export class AgentLoop {
       description: def.description,
       inputSchema: def.inputSchema,
     }));
-    return [...builtIn, ...mcp];
+    // In remote-brain mode the cloud model can offload bounded subtasks to the
+    // small local model in parallel (cached) via this tool (#186/#187).
+    const delegate = this.remoteBrain && this.coordinator ? [DELEGATE_TO_LOCAL_DEF] : [];
+    return [...builtIn, ...mcp, ...delegate];
   }
 
   /** A triage function that buckets a request by complexity.
@@ -823,6 +879,9 @@ export class AgentLoop {
       else if (out?.suggestedTier === "direct-tool") targetTierKey = "tier2-medium";
       // cloud-main → tier3-cloud (default)
     }
+    // Remote-brain mode: the cloud model is always the brain/responder; bounded
+    // subtasks are offloaded to the local model via the delegateToLocal tool (#186).
+    if (this.remoteBrain) targetTierKey = "tier3-cloud";
     // If classification failed, log it silently and fall back to cloud.
 
     if (!this.router) {
@@ -1026,7 +1085,10 @@ export class AgentLoop {
         let output: string;
         try {
           const mcpEntry = this.mcpTools.get(call.toolName);
-          if (mcpEntry) {
+          if (call.toolName === "delegateToLocal") {
+            // Cloud brain offloads bounded subtasks to the local model (#187).
+            output = await this.handleDelegateToLocal(inputObj);
+          } else if (mcpEntry) {
             // Call the server with the ORIGINAL (un-namespaced) tool name.
             output = await this.callMcpAudited(mcpEntry.client, mcpEntry.def.name, inputObj);
           } else {
@@ -1334,6 +1396,30 @@ export class AgentLoop {
   ): Promise<{ success: boolean; output?: unknown; error?: string; modelUsed?: string } | null> {
     if (!this.coordinator) return null;
     return this.coordinator.runCachedTask(taskType as Parameters<Coordinator["runCachedTask"]>[0], input);
+  }
+
+  /**
+   * Cloud brain → local model: run a batch of bounded subtasks on the small local
+   * model in parallel, hitting the content-hash cache on repeats (#187). Invoked
+   * when the cloud model calls the delegateToLocal tool in remote-brain mode.
+   */
+  private async handleDelegateToLocal(input: Record<string, unknown>): Promise<string> {
+    if (!this.coordinator) return "Delegation unavailable: no local worker is configured.";
+    const taskType = typeof input.taskType === "string" ? input.taskType : "";
+    const inputs = Array.isArray(input.inputs) ? input.inputs : [];
+    if (!taskType || inputs.length === 0) {
+      return 'delegateToLocal requires { taskType: string, inputs: object[] }.';
+    }
+    const tasks = inputs.slice(0, 16).map((inp, i) => ({
+      taskId: `delegate-${i}`,
+      taskType,
+      input: (inp && typeof inp === "object" ? inp : { value: inp }) as Record<string, unknown>,
+    }));
+    const results = await this.coordinator.runParallelTasks(tasks as never, 4);
+    const lines = results.map(
+      (r, i) => `[${i}] ${r?.success ? JSON.stringify(r.output) : `FAILED: ${r?.error ?? "unknown error"}`}`,
+    );
+    return `Delegated ${tasks.length} "${taskType}" task(s) to the local model:\n${lines.join("\n")}`.slice(0, 8000);
   }
 
   /** Pre-flight health check for the active provider/model (#174). */

@@ -367,6 +367,34 @@ describe("Coordinator planning (#166) and parallel tasks (#180)", () => {
     expect(results).toHaveLength(2);
     expect(started).toEqual(["t1", "t2"]);
   });
+
+  it("runParallelTasks serves a cache hit on repeated input (#187 cache-aware delegation)", async () => {
+    let runs = 0;
+    const counting: WorkerProvider = {
+      providerName: "counting",
+      async isAvailable() { return true; },
+      async sendTask() { runs++; return JSON.stringify({ summary: "x", confidence: 0.9 }); },
+    };
+    const coordinator = new Coordinator(createMockCloudProvider(), counting);
+    const tasks = [{
+      taskId: "a",
+      taskType: "summarizeFile",
+      input: { filePath: "a.ts", fileContent: "export const a = 1;" },
+      outputSchemaName: "summarizeFileOutput",
+      maximumInputTokens: 3000,
+      maximumOutputTokens: 800,
+      timeoutMilliseconds: 5000,
+    }];
+
+    const first = await coordinator.runParallelTasks(tasks as never, 4);
+    expect(first[0].success).toBe(true);
+    expect(first[0].modelUsed).not.toBe("cache");
+
+    // Same input again → served from the content-hash cache, worker not re-run.
+    const second = await coordinator.runParallelTasks(tasks as never, 4);
+    expect(second[0].modelUsed).toBe("cache");
+    expect(runs).toBe(1);
+  });
 });
 
 describe("Coordinator.runCachedTask (#181 result cache)", () => {

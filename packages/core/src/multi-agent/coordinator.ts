@@ -282,16 +282,17 @@ export class Coordinator {
     taskType: LocalWorkerTaskType,
     input: Record<string, unknown>,
     modelId = "",
+    taskId?: string,
   ): Promise<AgentResult> {
     if (this.config.cacheEnabled) {
       const cached = this.cache.get(taskType, modelId, input);
       if (cached !== undefined) {
-        return { taskId: `cache-${Date.now()}`, success: true, output: cached, durationMs: 0, modelUsed: "cache" };
+        return { taskId: taskId ?? `cache-${Date.now()}`, success: true, output: cached, durationMs: 0, modelUsed: "cache" };
       }
     }
 
     const task: LocalWorkerTask = {
-      taskId: `worker-${Date.now()}`,
+      taskId: taskId ?? `worker-${Date.now()}`,
       taskType,
       input,
       outputSchemaName: `${taskType}Output`,
@@ -320,26 +321,25 @@ export class Coordinator {
   async runParallelTasks(tasks: LocalWorkerTask[], concurrency = 4): Promise<AgentResult[]> {
     if (tasks.length === 0) return [];
     this.setPhase("local-delegation");
-    for (const t of tasks) {
-      this.eventBus.emit("coordinator:local-task-started", { taskId: t.taskId, taskType: t.taskType });
-    }
 
-    const results = await this.runner.runMany(tasks, concurrency);
-
-    results.forEach((r, i) => {
-      this.eventBus.emit(
-        r.success ? "coordinator:local-task-completed" : "coordinator:local-task-failed",
-        {
-          taskId: tasks[i].taskId,
-          success: r.success,
-          durationMs: r.durationMs,
-          ...(r.success ? {} : { error: r.error }),
-        },
-      );
-      if (r.success && this.config.cacheEnabled) {
-        this.cache.set(tasks[i].taskType, r.modelUsed ?? "", tasks[i].input, r.output);
+    // Bounded-concurrency pool over runCachedTask, so delegated subtasks run in
+    // parallel (#180) AND hit the content-hash cache on repeats (#181).
+    const results: AgentResult[] = new Array(tasks.length);
+    let next = 0;
+    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const i = next++;
+        if (i >= tasks.length) return;
+        results[i] = await this.runCachedTask(
+          tasks[i].taskType,
+          tasks[i].input as Record<string, unknown>,
+          "",
+          tasks[i].taskId,
+        );
       }
-    });
+    };
+    await Promise.all(Array.from({ length: limit }, () => worker()));
 
     this.setPhase("completed");
     return results;

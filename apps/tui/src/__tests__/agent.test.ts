@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ChatStreamEvent } from "../hooks/useChat.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,6 +124,7 @@ vi.mock("@metalmind/tools", async () => {
 import { createProvider } from "@metalmind/providers";
 import { ModelRouter } from "@metalmind/core";
 import type { RouteDecision } from "@metalmind/core";
+import { XDG_CONFIG_FILE } from "@metalmind/config";
 import {
   AgentLoop,
   createDefaultRouter,
@@ -1305,5 +1306,42 @@ describe("AgentLoop undo/redo, routes, health (M6 #176, #165, #174)", () => {
     const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: tmpdir() });
     const h = await loop.checkHealth();
     expect(h.ok).toBe(true);
+  });
+});
+
+describe("M7 — model orchestration: persisted local/cloud selection + remote brain (#185/#186)", () => {
+  // Snapshot/restore the real XDG config so these persistence tests are non-destructive.
+  let backup: string | null = null;
+  beforeEach(() => {
+    backup = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null;
+  });
+  afterEach(() => {
+    if (backup !== null) writeFileSync(XDG_CONFIG_FILE, backup);
+    else if (existsSync(XDG_CONFIG_FILE)) rmSync(XDG_CONFIG_FILE);
+  });
+
+  it("setTierModel persists and is restored into tier overrides on the next launch (#185)", () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    loop.setTierModel(2, "ollama", "ministral-3:3b");
+    expect(loop.getTierModel(2)).toEqual({ provider: "ollama", model: "ministral-3:3b" });
+    loop.setTierModel(3, "ollama-cloud", "gemini-3-flash-preview:latest");
+
+    // A freshly constructed loop restores both persisted per-tier overrides.
+    const next = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    expect(next.getTierModel(2)).toEqual({ provider: "ollama", model: "ministral-3:3b" });
+    expect(next.getTierModel(3)).toEqual({ provider: "ollama-cloud", model: "gemini-3-flash-preview:latest" });
+  });
+
+  it("remote-brain mode persists across launches (#186)", () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    expect(loop.isRemoteBrain()).toBe(false);
+    loop.setRemoteBrain(true);
+    expect(loop.isRemoteBrain()).toBe(true);
+
+    const next = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    expect(next.isRemoteBrain()).toBe(true);
+
+    next.setRemoteBrain(false);
+    expect(new AgentLoop({ provider: "stub", model: "test", explicit: true }).isRemoteBrain()).toBe(false);
   });
 });

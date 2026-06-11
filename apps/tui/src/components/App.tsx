@@ -219,6 +219,7 @@ export default function App({ config }: AppProps) {
           "  /cost             - Show this session's token usage",
           "  /budget [set <usd>|off] - View or set the session spend cap",
           "  /routes           - Show routing decisions + per-tier hit counts",
+          "  /brain [on|off]   - Remote-brain mode: cloud coordinates, delegates to local",
           "  /keychain         - save | load | status — macOS keychain key storage",
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
@@ -387,6 +388,24 @@ export default function App({ config }: AppProps) {
           } else {
             yield { type: "text", text: `Spent: $${s.spentUsd.toFixed(4)} / $${s.budgetUsd.toFixed(2)}${s.overBudget ? " — OVER BUDGET: cloud routing is downgraded to local" : ""}` } as const;
           }
+        }
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/brain" || input.startsWith("/brain ")) {
+        const arg = input.slice(6).trim();
+        const agent = agentRef.current;
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+        } else if (arg === "on") {
+          agent.setRemoteBrain(true);
+          yield { type: "text", text: "Remote-brain mode ON — the cloud model coordinates and delegates bounded subtasks to the local model." } as const;
+        } else if (arg === "off") {
+          agent.setRemoteBrain(false);
+          yield { type: "text", text: "Remote-brain mode OFF — normal tiered routing (local-first)." } as const;
+        } else {
+          yield { type: "text", text: `Remote-brain mode is ${agent.isRemoteBrain() ? "ON" : "OFF"}. Usage: /brain on|off` } as const;
         }
         yield { type: "done" } as const;
         return;
