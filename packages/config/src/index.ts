@@ -102,6 +102,8 @@ export interface UserConfig {
   tierModels?: Record<string, { provider: string; model: string }>;
   /** Remote-brain mode: cloud model coordinates and delegates bounded subtasks to the local model (#186). */
   remoteBrain?: boolean;
+  /** Saved, reusable prompt templates by name; {{vars}} are filled at use time (#201). */
+  prompts?: Record<string, string>;
 }
 
 export interface McpServerConfig {

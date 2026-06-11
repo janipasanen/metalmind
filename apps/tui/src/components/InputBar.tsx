@@ -16,6 +16,7 @@ const SLASH_COMMANDS = [
   { syntax: "/workspace ",  description: "Allow AI to access a directory" },
   { syntax: "/init",        description: "Generate a starter project memory file" },
   { syntax: "/skill ",      description: "list / activate / deactivate skills" },
+  { syntax: "/prompt ",     description: "Prompt library: save|list|delete|<name>" },
   { syntax: "/mcp ",        description: "MCP servers: list|presets|add|remove" },
   { syntax: "/resume",      description: "List or resume a saved session" },
   { syntax: "/compact",     description: "Summarize older turns to save context" },
