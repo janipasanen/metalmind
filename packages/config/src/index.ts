@@ -104,6 +104,15 @@ export interface UserConfig {
   remoteBrain?: boolean;
   /** Saved, reusable prompt templates by name; {{vars}} are filled at use time (#201). */
   prompts?: Record<string, string>;
+  /** Persisted, granular auto-approval allowlist so trusted ops don't re-prompt (#220). */
+  approvalAllowlist?: {
+    /** Tool names always allowed (e.g. "writeFile"). */
+    tools?: string[];
+    /** Glob patterns for file-op paths (e.g. "src/**"). */
+    paths?: string[];
+    /** Command prefixes for runCommand/runBackground (e.g. "npm test"). */
+    commands?: string[];
+  };
 }
 
 export interface McpServerConfig {

@@ -20,6 +20,7 @@ const SLASH_COMMANDS = [
   { syntax: "/image ",      description: "Attach an image for a vision model" },
   { syntax: "/rag ",        description: "Document retrieval: add|search|status|clear" },
   { syntax: "/remember ",   description: "Save a durable fact to long-term memory" },
+  { syntax: "/allow ",      description: "Persist auto-approval: tool|path|command" },
   { syntax: "/mcp ",        description: "MCP servers: list|presets|add|remove" },
   { syntax: "/resume",      description: "List or resume a saved session" },
   { syntax: "/compact",     description: "Summarize older turns to save context" },

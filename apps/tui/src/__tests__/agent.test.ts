@@ -1572,3 +1572,44 @@ describe("M15 — long-term memory (#218)", () => {
     }
   });
 });
+
+describe("M15 — persistent approval allowlist skips the prompt (#220)", () => {
+  let backup: string | null = null;
+  beforeEach(() => { backup = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null; });
+  afterEach(() => {
+    if (backup !== null) writeFileSync(XDG_CONFIG_FILE, backup);
+    else if (existsSync(XDG_CONFIG_FILE)) rmSync(XDG_CONFIG_FILE);
+  });
+
+  it("an allowlisted writeFile executes without requesting approval", async () => {
+    // Pre-approve writeFile in the persisted config.
+    const cfg = JSON.parse(readFileSync(XDG_CONFIG_FILE, "utf-8"));
+    writeFileSync(XDG_CONFIG_FILE, JSON.stringify({ ...cfg, approvalAllowlist: { tools: ["writeFile"] } }));
+
+    let calls = 0;
+    mockCreateProvider.mockReturnValue((() => {
+      let n = 0;
+      const file = join(tmpdir(), `mm-allow-${Date.now()}.txt`);
+      return {
+        providerName: "stub",
+        supportedCapabilities: {} as never,
+        async *streamChatCompletion() {
+          n++;
+          if (n === 1) {
+            yield { type: "tool-call", toolCall: { toolCallId: "w1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: file, content: "x" }) } };
+            yield { type: "done" };
+          } else {
+            yield { type: "text", text: "done" };
+            yield { type: "done" };
+          }
+        },
+        async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+      };
+    })() as never);
+
+    const onApprovalRequest = async () => { calls++; return "approve" as const; };
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { onApprovalRequest });
+    await collect(loop.run("write a file"));
+    expect(calls).toBe(0); // allowlisted → no approval prompt
+  });
+});

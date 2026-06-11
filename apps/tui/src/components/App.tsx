@@ -13,6 +13,7 @@ import { listModelsText, deleteModelText, pullModelProgress } from "../model-com
 import { handlePromptCommand } from "../prompt-command.js";
 import { buildImageUrl } from "../image-command.js";
 import { handleRagCommand } from "../rag/manager.js";
+import { handleAllowCommand } from "../approval-allowlist.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -234,6 +235,7 @@ export default function App({ config }: AppProps) {
           "  /image            - Attach an image (path or https URL) for a vision model",
           "  /rag              - Retrieval: add <path> | search <q> | status | clear (queries auto-retrieve)",
           "  /remember <text>  - Save a durable fact to long-term memory (loads next session)",
+          "  /allow            - Persist auto-approval: tool <name> | path <glob> | command <prefix> | list | clear",
           "  /prompt           - Prompt library: save <name> <tmpl> | list | delete | <name> k=v",
           "  /clear            - Clear chat history",
           "  /quit             - Exit",
@@ -459,6 +461,13 @@ export default function App({ config }: AppProps) {
 
       if (input === "/mcp" || input.startsWith("/mcp ")) {
         const text = handleMcpCommand(input.slice(4));
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/allow" || input.startsWith("/allow ")) {
+        const text = handleAllowCommand(input.slice(6));
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;

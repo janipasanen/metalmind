@@ -42,6 +42,7 @@ import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
 import { Redactor, collectSecrets } from "./redact.js";
 import { retrieveContext } from "./rag/manager.js";
+import { isAllowlisted } from "./approval-allowlist.js";
 
 interface BufferedAttempt {
   text: string;
@@ -1212,7 +1213,7 @@ export class AgentLoop {
         }
 
         // Human-in-the-loop approval gate: pause before any side-effecting tool (#138).
-        if (this.needsApproval(call.toolName)) {
+        if (this.needsApproval(call.toolName, inputObj)) {
           const decision = await this.requestApproval(call.toolName, inputObj);
           if (decision === "reject") {
             const output = `Rejected by user — "${call.toolName}" was not executed.`;
@@ -1358,8 +1359,11 @@ export class AgentLoop {
   }
 
   /** Tools that must be approved before running: mutating built-ins, git, shell, and any MCP tool (#138). */
-  private needsApproval(toolName: string): boolean {
-    return this.safetyValidator.requiresApproval(toolName) || this.mcpTools.has(toolName);
+  private needsApproval(toolName: string, input: Record<string, unknown> = {}): boolean {
+    if (!(this.safetyValidator.requiresApproval(toolName) || this.mcpTools.has(toolName))) return false;
+    // A persisted allowlist can pre-approve specific tools/paths/commands (#220).
+    if (isAllowlisted(loadXdgConfig().approvalAllowlist, toolName, input)) return false;
+    return true;
   }
 
   /** Resolve the approval decision: always-allowed / auto-approve short-circuit, else ask the UI. */
