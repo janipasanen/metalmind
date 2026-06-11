@@ -1613,3 +1613,28 @@ describe("M15 — persistent approval allowlist skips the prompt (#220)", () => 
     expect(calls).toBe(0); // allowlisted → no approval prompt
   });
 });
+
+describe("M13 — message retry / edit (#204)", () => {
+  it("popLastExchange drops the last user turn and returns its text for re-run", async () => {
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() { yield { type: "text", text: "answer" }; yield { type: "done" }; },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    await collect(loop.run("first question"));
+    expect(loop.conversation().some((m) => m.role === "assistant" && m.content === "answer")).toBe(true);
+
+    const popped = loop.popLastExchange();
+    expect(popped).toBe("first question");
+    // The assistant answer and the user turn are gone.
+    expect(loop.conversation().some((m) => m.content === "answer")).toBe(false);
+    expect(loop.conversation().some((m) => m.content === "first question")).toBe(false);
+  });
+
+  it("popLastExchange returns null when there is nothing to retry", () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    expect(loop.popLastExchange()).toBeNull();
+  });
+});

@@ -2207,6 +2207,41 @@ export class AgentLoop {
     );
   }
 
+  /** Public view of the conversation for the UI after edit/retry/branch (#204). */
+  conversation(): AgentMessage[] {
+    return this.displayMessages();
+  }
+
+  /**
+   * Drop the last user turn and everything after it (assistant reply + tool
+   * messages), returning the user input so the caller can re-run it (#204).
+   * Used by /retry (re-run as-is) and /edit (re-run with new text).
+   */
+  popLastExchange(): string | null {
+    let userIdx = -1;
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      if (this.history[i].role === "user") { userIdx = i; break; }
+    }
+    if (userIdx === -1) return null;
+    const text = this.history[userIdx].content;
+    this.history = this.history.slice(0, userIdx);
+    this.turnCount = Math.max(0, this.turnCount - 1);
+    return text;
+  }
+
+  /** Fork the current conversation into a new persisted session (#204). Returns the new id or null. */
+  branchSession(): string | null {
+    if (!this.sessionStore) return null;
+    try {
+      const id = this.sessionStore.createSession("branch");
+      this.sessionStore.saveMessages(id, this.history);
+      this.sessionId = id;
+      return id;
+    } catch {
+      return null;
+    }
+  }
+
   /** Persist the current history to the active session (#140). */
   private saveSession(): void {
     if (!this.sessionStore || !this.sessionId) return;

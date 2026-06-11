@@ -232,6 +232,9 @@ export default function App({ config }: AppProps) {
           "  /routes           - Show routing decisions + per-tier hit counts",
           "  /brain [on|off]   - Remote-brain mode: cloud coordinates, delegates to local",
           "  /keychain         - save | load | status — macOS keychain key storage",
+          "  /retry            - Re-run the last prompt (drops the prior answer)",
+          "  /edit <text>      - Replace + re-run the last prompt",
+          "  /branch           - Fork this conversation into a new session",
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
@@ -501,6 +504,40 @@ export default function App({ config }: AppProps) {
       if (input === "/allow" || input.startsWith("/allow ")) {
         const text = handleAllowCommand(input.slice(6));
         yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/retry" || input === "/edit" || input.startsWith("/edit ")) {
+        const agent = agentRef.current;
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+        const original = agent.popLastExchange();
+        if (original === null) {
+          yield { type: "text", text: "Nothing to retry yet." } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+        const newText = input.startsWith("/edit ") ? input.slice(6).trim() : original;
+        // Re-sync the chat view to the trimmed history, then re-run the turn.
+        replaceMessages(restoredToChatMessages(agent.conversation()));
+        setScrollOffset(0);
+        if (input.startsWith("/edit") && !newText) {
+          yield { type: "text", text: "Usage: /edit <new prompt>" } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+        yield { type: "text", text: `↻ ${newText}\n` } as const;
+        yield* agent.run(newText, signal);
+        return;
+      }
+
+      if (input === "/branch") {
+        const id = agentRef.current?.branchSession();
+        yield { type: "text", text: id ? `Branched into a new session (${id}). Continuing here; the original is in /resume.` : "Branching unavailable (no session store)." } as const;
         yield { type: "done" } as const;
         return;
       }
