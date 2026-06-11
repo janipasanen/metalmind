@@ -25,12 +25,24 @@ export interface TuiConfig {
 export function providerCredentials(provider: string): { apiKey?: string; baseUrl?: string } {
   const mergedConfig = loadMergedConfig();
   // For ollama-cloud, check both "ollama-cloud" and "ollama" keys (user may have set either).
-  const apiKeyFromConfig =
+  const configKey =
     mergedConfig.apiKeys[provider] ||
     (provider === "ollama-cloud" ? mergedConfig.apiKeys["ollama"] : undefined) ||
     undefined;
-  const apiKey = apiKeyFromConfig ?? envApiKey(provider);
+  const apiKey = resolveApiKey(provider, configKey);
   return { apiKey, baseUrl: process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey) };
+}
+
+/**
+ * Resolve a provider's API key. A **non-empty** environment variable wins over
+ * the stored config key (12-factor: env overrides config/source, so a user can
+ * fix auth without editing files or rebuilding). An unset or empty env var
+ * (e.g. `OLLAMA_API_KEY=`) falls back to the config key rather than blanking it.
+ */
+export function resolveApiKey(provider: string, configKey?: string): string | undefined {
+  const env = envApiKey(provider);
+  if (env && env.trim().length > 0) return env;
+  return configKey && configKey.length > 0 ? configKey : undefined;
 }
 
 const PROVIDER_DEFAULTS: Record<string, string> = {
@@ -41,8 +53,10 @@ const PROVIDER_DEFAULTS: Record<string, string> = {
   mlx: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
 };
 
-const DEFAULT_MLX_BASE_URL = "http://127.0.0.1:8742";
-const OLLAMA_CLOUD_BASE_URL = "https://api.ollama.com";
+// Base URLs are overridable via env so users can repoint providers without
+// touching source (e.g. a proxy, a self-hosted endpoint, a different cloud host).
+const DEFAULT_MLX_BASE_URL = process.env.MLX_BASE_URL || "http://127.0.0.1:8742";
+const OLLAMA_CLOUD_BASE_URL = process.env.OLLAMA_CLOUD_BASE_URL || "https://api.ollama.com";
 
 function envApiKey(provider: string): string | undefined {
   if (provider === "anthropic") return process.env.ANTHROPIC_API_KEY;
@@ -56,6 +70,7 @@ function defaultBaseUrl(provider: string, _apiKey?: string): string | undefined 
   // ollama-cloud = remote Ollama API (api.ollama.com)
   // ollama       = local Ollama daemon (localhost:11434) — NEVER route to cloud
   if (provider === "ollama-cloud") return OLLAMA_CLOUD_BASE_URL;
+  if (provider === "ollama") return process.env.OLLAMA_HOST || undefined; // honor the standard Ollama env var
   if (provider === "mlx") return DEFAULT_MLX_BASE_URL;
   return undefined;
 }
@@ -105,7 +120,7 @@ export function resolveConfig(
   if (namedKey) {
     const entry = models[namedKey];
     const provider = explicitProvider || entry.provider;
-    const apiKey = envApiKey(provider) ?? entry.apiKey;
+    const apiKey = resolveApiKey(provider, entry.apiKey);
     const baseUrl =
       process.env.METALMIND_BASE_URL ?? entry.baseUrl ?? defaultBaseUrl(provider, apiKey);
     return { provider, model: entry.model, apiKey, baseUrl, explicit, continueSession, resumeSessionId: resumeSessionId || undefined };
@@ -142,9 +157,9 @@ export function resolveConfig(
   // Strip any accidental "provider/" prefix from the model name.
   const prefix = provider + "/";
   const model = rawModel.startsWith(prefix) ? rawModel.slice(prefix.length) : rawModel;
-  // Config-file key wins over env var (user explicitly set it via UI).
-  // Use || not ?? so that empty-string env vars (e.g. ANTHROPIC_API_KEY=) don't shadow the config.
-  const apiKey = mergedConfig.apiKeys[provider] || envApiKey(provider) || undefined;
+  // A non-empty env var wins over the stored config key (see resolveApiKey);
+  // an empty/unset env var falls back to config.
+  const apiKey = resolveApiKey(provider, mergedConfig.apiKeys[provider]);
   const baseUrl = process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey);
 
   return {

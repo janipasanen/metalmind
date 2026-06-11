@@ -223,3 +223,40 @@ describe("resolveConfig with metalmind.yaml", () => {
     expect(cfg.model).toBe("claude-sonnet-4-6");
   });
 });
+
+import { resolveApiKey } from "../config.js";
+
+describe("resolveApiKey precedence — env beats config (#auth)", () => {
+  it("a non-empty env var overrides the stored config key", () => {
+    withEnv({ OLLAMA_API_KEY: "env-key" }, () => {
+      expect(resolveApiKey("ollama-cloud", "stale-config-key")).toBe("env-key");
+      expect(resolveApiKey("ollama", "stale-config-key")).toBe("env-key");
+    });
+  });
+
+  it("an empty env var falls back to the config key (doesn't blank it out)", () => {
+    withEnv({ OLLAMA_API_KEY: "" }, () => {
+      expect(resolveApiKey("ollama-cloud", "config-key")).toBe("config-key");
+    });
+  });
+
+  it("an unset env var uses the config key", () => {
+    withEnv({ OLLAMA_API_KEY: undefined }, () => {
+      expect(resolveApiKey("ollama-cloud", "config-key")).toBe("config-key");
+    });
+  });
+
+  it("returns undefined when neither is present", () => {
+    withEnv({ ANTHROPIC_API_KEY: undefined }, () => {
+      expect(resolveApiKey("anthropic", undefined)).toBeUndefined();
+      expect(resolveApiKey("anthropic", "")).toBeUndefined();
+    });
+  });
+
+  it("works for each provider's env var", () => {
+    withEnv({ ANTHROPIC_API_KEY: "ak", OPENAI_API_KEY: "ok" }, () => {
+      expect(resolveApiKey("anthropic", "cfg")).toBe("ak");
+      expect(resolveApiKey("openai", "cfg")).toBe("ok");
+    });
+  });
+});
