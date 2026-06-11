@@ -14,6 +14,7 @@ import { handlePromptCommand } from "../prompt-command.js";
 import { buildImageUrl } from "../image-command.js";
 import { handleRagCommand } from "../rag/manager.js";
 import { handleAllowCommand } from "../approval-allowlist.js";
+import { diagnosticsReport } from "../error-log.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { WorkerProvider } from "@metalmind/core";
@@ -230,6 +231,7 @@ export default function App({ config }: AppProps) {
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
           "  /audit            - Show this session's tool-call log",
+          "  /diagnostics      - Show recent errors / crash log (persisted across sessions)",
           "  /mcp              - MCP servers: list | presets | add <preset> k=v | remove <id>",
           "  /models           - Local Ollama models: list | pull <name> | delete <name>",
           "  /image            - Attach an image (path or https URL) for a vision model",
@@ -462,6 +464,12 @@ export default function App({ config }: AppProps) {
       if (input === "/mcp" || input.startsWith("/mcp ")) {
         const text = handleMcpCommand(input.slice(4));
         yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/diagnostics") {
+        yield { type: "text", text: diagnosticsReport() } as const;
         yield { type: "done" } as const;
         return;
       }

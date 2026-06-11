@@ -43,6 +43,7 @@ import { providerCredentials, type TuiConfig } from "./config.js";
 import { Redactor, collectSecrets } from "./redact.js";
 import { retrieveContext } from "./rag/manager.js";
 import { isAllowlisted } from "./approval-allowlist.js";
+import { logError } from "./error-log.js";
 
 interface BufferedAttempt {
   text: string;
@@ -854,6 +855,7 @@ export class AgentLoop {
       }
     }
 
+    if (lastErr) logError("provider", lastErr);
     yield { type: "error", message: lastErr ? errText(lastErr) : "all providers failed" };
   }
 

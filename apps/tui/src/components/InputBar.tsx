@@ -28,6 +28,7 @@ const SLASH_COMMANDS = [
   { syntax: "/undo",        description: "Revert the agent's last edit set" },
   { syntax: "/redo",        description: "Re-apply the last undone edit set" },
   { syntax: "/audit",       description: "Show this session's tool-call log" },
+  { syntax: "/diagnostics", description: "Show recent errors / crash log" },
   { syntax: "/clear",       description: "Clear chat history" },
   { syntax: "/quit",        description: "Exit" },
 ];
