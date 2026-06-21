@@ -184,3 +184,24 @@ describe("SqliteSessionStore", () => {
     });
   });
 });
+
+describe("SqliteSessionStore persists images + metadata (#236)", () => {
+  const testDir = join(tmpdir(), `metalmind-meta-${Date.now()}`);
+  const dbPath = join(testDir, "s.db");
+  beforeEach(() => rmSync(testDir, { recursive: true, force: true }));
+  afterEach(() => rmSync(testDir, { recursive: true, force: true }));
+
+  it("round-trips image attachments and tool metadata across resume", () => {
+    const store = new SqliteSessionStore(dbPath);
+    const id = store.createSession("s");
+    store.saveMessages(id, [
+      { role: "user", content: "look", images: ["data:image/png;base64,AAAA"] },
+      { role: "assistant", content: "", toolCalls: [{ toolCallId: "tc1", toolName: "readFile", argumentsJson: "{}" }] },
+      { role: "tool", content: "result", metadata: { toolCallId: "tc1" } },
+    ]);
+    const loaded = store.loadMessages(id);
+    expect(loaded[0].images).toEqual(["data:image/png;base64,AAAA"]);
+    expect(loaded[2].metadata?.toolCallId).toBe("tc1"); // tool_call/tool_result pairing preserved
+    store.close();
+  });
+});

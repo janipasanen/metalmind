@@ -1763,3 +1763,59 @@ describe("M19 — clear error for a keyless cloud provider (#231)", () => {
     await expect(collect(loop.run("hi"))).rejects.toThrow(/No API key for "anthropic".*ANTHROPIC_API_KEY/);
   });
 });
+
+describe("M20 — tier overrides apply during auto-routing (#235)", () => {
+  let backup: string | null = null;
+  beforeEach(() => { backup = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null; });
+  afterEach(() => {
+    if (backup !== null) writeFileSync(XDG_CONFIG_FILE, backup);
+    else if (existsSync(XDG_CONFIG_FILE)) rmSync(XDG_CONFIG_FILE);
+  });
+
+  it("uses a setTierModel override even when the tier wasn't forced", async () => {
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() { yield { type: "text", text: "ok" }; yield { type: "done" }; },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { router: new ModelRouter() });
+    // Override every tier so whichever the router picks shows the override.
+    loop.setTierModel(1, "ollama", "MY-OVERRIDE");
+    loop.setTierModel(2, "ollama", "MY-OVERRIDE");
+    loop.setTierModel(3, "ollama", "MY-OVERRIDE");
+    await collect(loop.run("hi")); // auto-routed (not forced)
+    expect(loop.getRoutingSummary()).toContain("MY-OVERRIDE");
+  });
+});
+
+describe("M20 — compaction never orphans a tool_result (#237)", () => {
+  it("snaps the boundary to a user turn and drops dangling tool messages", async () => {
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() { yield { type: "done" }; },
+      async completeChat() { return { message: { role: "assistant" as const, content: "SUMMARY" } }; },
+    } as never);
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    // Build a history where a tool_call/tool_result pair sits right at the keep boundary.
+    (loop as unknown as { history: unknown[] }).history = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1", toolCalls: [{ toolCallId: "x", toolName: "readFile", argumentsJson: "{}" }] },
+      { role: "tool", content: "tool-result", metadata: { toolCallId: "x" } },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: "a2" },
+      { role: "user", content: "u3" },
+      { role: "assistant", content: "a3" },
+    ];
+    await loop.compactHistory();
+    const hist = (loop as unknown as { history: Array<{ role: string; toolCalls?: unknown[] }> }).history;
+    // No tool message should appear without a preceding assistant tool_call kept.
+    hist.forEach((m, i) => {
+      if (m.role === "tool") {
+        expect(hist.slice(0, i).some((p) => p.role === "assistant" && (p.toolCalls?.length ?? 0) > 0)).toBe(true);
+      }
+    });
+  });
+});

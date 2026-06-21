@@ -260,3 +260,16 @@ describe("resolveApiKey precedence — env beats config (#auth)", () => {
     });
   });
 });
+
+import { providerCredentials } from "../config.js";
+
+describe("METALMIND_BASE_URL is not applied to other providers (#234)", () => {
+  it("a non-active provider uses its own default, not the global override", () => {
+    withEnv({ METALMIND_BASE_URL: "http://192.168.1.10:11434" }, () => {
+      // anthropic's base URL must NOT become the Ollama host the user set
+      expect(providerCredentials("anthropic").baseUrl).not.toBe("http://192.168.1.10:11434");
+      // ollama-cloud uses its own default
+      expect(providerCredentials("ollama-cloud").baseUrl).toBe("https://api.ollama.com");
+    });
+  });
+});

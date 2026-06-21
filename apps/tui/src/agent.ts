@@ -1878,6 +1878,15 @@ export class AgentLoop {
 
   /** Record a routing decision (accumulated, not overwritten) and notify the UI (#165). */
   private recordRoute(decision: RouteDecision): void {
+    // Honor a per-tier model override (setTierModel) even on auto-routed turns,
+    // not just when the tier is forced (#235). Mutates the decision so the caller
+    // builds the provider from the override.
+    const tierNum = decision.tier === "tier1-local" ? 1 : decision.tier === "tier2-medium" ? 2 : 3;
+    const override = this.tierOverrides.get(tierNum as 1 | 2 | 3);
+    if (override) {
+      decision.provider = override.provider;
+      decision.modelId = override.model;
+    }
     this.lastRoute = { provider: decision.provider, model: decision.modelId };
     // Reset the latency clock for this attempt and attribute to its tier (#209).
     this.beginAttempt(decision.tier);
@@ -2428,8 +2437,18 @@ export class AgentLoop {
     const KEEP_RECENT = 4;
     if (rest.length <= KEEP_RECENT + 2) return "History is short — nothing to compact yet.";
 
-    const toSummarize = rest.slice(0, rest.length - KEEP_RECENT);
-    const recent = rest.slice(rest.length - KEEP_RECENT);
+    // Snap the boundary back to a clean user turn so we never split a
+    // tool_call/tool_result pair (an orphaned tool message 400s the provider) (#237).
+    let split = rest.length - KEEP_RECENT;
+    while (split > 0 && rest[split].role !== "user") split--;
+    const toSummarize = rest.slice(0, split);
+    // Drop any orphaned tool messages that would still dangle without their call.
+    const recent = rest.slice(split).filter((m, i, arr) => {
+      if (m.role !== "tool") return true;
+      // keep a tool message only if some preceding kept message issued tool calls
+      return arr.slice(0, i).some((p) => p.role === "assistant" && p.toolCalls?.length);
+    });
+    if (toSummarize.length === 0) return "History is short — nothing to compact yet.";
     const convo = toSummarize
       .map((m) => `${m.role}: ${m.content}${m.toolCalls?.length ? ` [tools: ${m.toolCalls.map((t) => t.toolName).join(", ")}]` : ""}`)
       .join("\n")

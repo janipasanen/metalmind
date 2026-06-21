@@ -25,11 +25,20 @@ export class SqliteSessionStore {
     this.migrate();
   }
 
-  /** Add columns introduced after the initial schema, idempotently (#202). */
+  /** Add columns introduced after the initial schema, idempotently (#202/#236). */
   private migrate(): void {
-    const cols = this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "tags")) {
+    const sessionCols = this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    if (!sessionCols.some((c) => c.name === "tags")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT ''");
+    }
+    // Persist image attachments and message metadata (e.g. tool_call_id) so resume
+    // doesn't lose vision input or break tool_call/tool_result pairing (#236).
+    const msgCols = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+    if (!msgCols.some((c) => c.name === "images")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN images TEXT");
+    }
+    if (!msgCols.some((c) => c.name === "metadata")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN metadata TEXT");
     }
   }
 
@@ -66,7 +75,7 @@ export class SqliteSessionStore {
 
   saveMessages(sessionId: string, messages: AgentMessage[]): void {
     const insertMsg = this.db.prepare(
-      "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, ?, ?, ?)",
+      "INSERT INTO messages (session_id, role, content, tool_calls, images, metadata) VALUES (?, ?, ?, ?, ?, ?)",
     );
 
     const deleteAll = this.db.prepare("DELETE FROM messages WHERE session_id = ?");
@@ -83,6 +92,8 @@ export class SqliteSessionStore {
           msg.role,
           msg.content,
           msg.toolCalls?.length ? JSON.stringify(msg.toolCalls) : null,
+          msg.images?.length ? JSON.stringify(msg.images) : null,
+          msg.metadata ? JSON.stringify(msg.metadata) : null,
         );
       }
       updateSession.run(sessionId);
@@ -93,11 +104,13 @@ export class SqliteSessionStore {
 
   loadMessages(sessionId: string): AgentMessage[] {
     const rows = this.db
-      .prepare("SELECT role, content, tool_calls FROM messages WHERE session_id = ? ORDER BY id ASC")
+      .prepare("SELECT role, content, tool_calls, images, metadata FROM messages WHERE session_id = ? ORDER BY id ASC")
       .all(sessionId) as Array<{
       role: string;
       content: string;
       tool_calls: string | null;
+      images: string | null;
+      metadata: string | null;
     }>;
 
     return rows.map((row) => {
@@ -108,10 +121,27 @@ export class SqliteSessionStore {
       if (row.tool_calls) {
         try {
           msg.toolCalls = JSON.parse(row.tool_calls);
-          msg.metadata = { hasToolCalls: true };
         } catch {
           // ignore parse errors
         }
+      }
+      if (row.images) {
+        try {
+          msg.images = JSON.parse(row.images);
+        } catch {
+          // ignore
+        }
+      }
+      // Restore metadata (e.g. toolCallId for tool messages) so resume keeps
+      // tool_call/tool_result pairing intact (#236).
+      if (row.metadata) {
+        try {
+          msg.metadata = JSON.parse(row.metadata);
+        } catch {
+          // ignore
+        }
+      } else if (msg.toolCalls) {
+        msg.metadata = { hasToolCalls: true };
       }
       return msg;
     });

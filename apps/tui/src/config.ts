@@ -30,7 +30,10 @@ export function providerCredentials(provider: string): { apiKey?: string; baseUr
     (provider === "ollama-cloud" ? mergedConfig.apiKeys["ollama"] : undefined) ||
     undefined;
   const apiKey = resolveApiKey(provider, configKey);
-  return { apiKey, baseUrl: process.env.METALMIND_BASE_URL ?? defaultBaseUrl(provider, apiKey) };
+  // Use the provider's own default/env (OLLAMA_HOST, OLLAMA_CLOUD_BASE_URL, MLX_BASE_URL).
+  // METALMIND_BASE_URL is NOT applied here — it would wrongly repoint OTHER tiers'
+  // providers (e.g. an escalated cloud model) at the active provider's URL (#234).
+  return { apiKey, baseUrl: defaultBaseUrl(provider, apiKey) };
 }
 
 /**
