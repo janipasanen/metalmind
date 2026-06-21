@@ -37,3 +37,10 @@ describe("buildImageUrl (#177)", () => {
     expect(buildImageUrl("  ").error).toContain("Usage");
   });
 });
+
+describe("buildImageUrl blocks sensitive paths (#239)", () => {
+  it("refuses to read a path in a blocked directory", () => {
+    expect(buildImageUrl("/Users/me/.ssh/id_rsa").error).toMatch(/sensitive/i);
+    expect(buildImageUrl("~/.aws/credentials.png").error).toMatch(/sensitive/i);
+  });
+});

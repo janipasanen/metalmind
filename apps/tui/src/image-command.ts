@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { extname } from "node:path";
+import { isBlockedPath } from "@metalmind/tools";
 
 /**
  * `/image <path>` support (#177): read a local image file and turn it into a
@@ -28,6 +29,7 @@ export function buildImageUrl(pathOrUrl: string): ImageResult {
   if (!input) return { error: "Usage: /image <path-or-https-url>" };
   if (/^https?:\/\//i.test(input)) return { url: input };
 
+  if (isBlockedPath(input)) return { error: `Refusing to read a sensitive path: ${input}` };
   if (!existsSync(input)) return { error: `Image not found: ${input}` };
   const ext = extname(input).toLowerCase();
   const mime = MIME_BY_EXT[ext];

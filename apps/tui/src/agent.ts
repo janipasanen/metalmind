@@ -95,6 +95,33 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function jsonTypeMatches(v: unknown, t: string): boolean {
+  switch (t) {
+    case "string": return typeof v === "string";
+    case "number":
+    case "integer": return typeof v === "number";
+    case "boolean": return typeof v === "boolean";
+    case "array": return Array.isArray(v);
+    case "object": return v !== null && typeof v === "object" && !Array.isArray(v);
+    default: return true;
+  }
+}
+
+/** Minimal JSON-Schema check for MCP tool args: required fields + top-level types (#240). */
+function validateAgainstJsonSchema(args: Record<string, unknown>, schema: unknown): string | null {
+  if (!schema || typeof schema !== "object") return null;
+  const s = schema as { type?: string; required?: string[]; properties?: Record<string, { type?: string }> };
+  if (s.type && s.type !== "object") return null;
+  for (const req of s.required ?? []) {
+    if (!(req in args) || args[req] === undefined) return `missing required argument "${req}"`;
+  }
+  for (const [k, v] of Object.entries(args)) {
+    const expected = s.properties?.[k]?.type;
+    if (expected && !jsonTypeMatches(v, expected)) return `argument "${k}" should be of type ${expected}`;
+  }
+  return null;
+}
+
 /** Map over items with bounded concurrency, preserving input order in the result. */
 async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
@@ -453,6 +480,15 @@ export class AgentLoop {
   private pendingImages: string[] = [];
   private pendingReplaceTargets: string[] = []; // files a replaceInProject is about to change (#226)
   private auditLog = new AuditLog();
+  /** Audit-log sink that scrubs secrets from tool inputs/outputs before recording (#238). */
+  private auditLogRedacted = (entry: ToolAuditEntry): void => {
+    this.auditLog.log({
+      ...entry,
+      input: this.redactValue(entry.input) as Record<string, unknown>,
+      output: typeof entry.output === "string" ? this.redactor.redact(entry.output) : this.redactValue(entry.output),
+      ...(entry.error ? { error: this.redactor.redact(entry.error) } : {}),
+    });
+  };
   private editStack: EditSet[] = [];
   private redoStack: EditSet[] = [];
   private redactor = new Redactor([]);
@@ -1305,7 +1341,7 @@ export class AgentLoop {
         const violation = this.preflightSafety(call.toolName, inputObj);
         if (violation) {
           const output = `Blocked: ${violation.message}`;
-          this.auditLog.log({
+          this.auditLogRedacted({
             timestamp: new Date().toISOString(),
             toolName: call.toolName,
             input: inputObj,
@@ -1323,7 +1359,7 @@ export class AgentLoop {
           const decision = await this.requestApproval(call.toolName, inputObj);
           if (decision === "reject") {
             const output = `Rejected by user — "${call.toolName}" was not executed.`;
-            this.auditLog.log({
+            this.auditLogRedacted({
               timestamp: new Date().toISOString(),
               toolName: call.toolName,
               input: inputObj,
@@ -1353,13 +1389,20 @@ export class AgentLoop {
             // Persist a durable fact to long-term memory (#218).
             output = this.rememberFact(typeof inputObj.fact === "string" ? inputObj.fact : "");
           } else if (mcpEntry) {
-            // Call the server with the ORIGINAL (un-namespaced) tool name.
-            output = await this.callMcpAudited(mcpEntry.client, mcpEntry.def.name, inputObj);
+            // Validate args against the server-advertised schema before calling,
+            // the same protection built-in tools get from their zod schema (#240).
+            const argErr = validateAgainstJsonSchema(inputObj, mcpEntry.def.inputSchema);
+            if (argErr) {
+              output = `Error: invalid arguments for "${call.toolName}": ${argErr}`;
+            } else {
+              // Call the server with the ORIGINAL (un-namespaced) tool name.
+              output = await this.callMcpAudited(mcpEntry.client, mcpEntry.def.name, inputObj);
+            }
           } else {
             const result = await this.registry.execute(call.toolName, inputObj, {
               projectRoot: this.projectRoot,
               workspaceRoots: this.workspaceRoots,
-              auditLog: this.auditLog.log, // record every built-in tool call (#147)
+              auditLog: this.auditLogRedacted, // record every built-in tool call (#147)
             });
             output = typeof result === "string" ? result : JSON.stringify(result);
             // Post-edit feedback loop: re-index, optional format, append diagnostics.
@@ -1405,7 +1448,7 @@ export class AgentLoop {
       const violation = this.preflightSafety(call.toolName, inputObj);
       if (violation) {
         const output = `Blocked: ${violation.message}`;
-        this.auditLog.log({
+        this.auditLogRedacted({
           timestamp: new Date().toISOString(),
           toolName: call.toolName,
           input: inputObj,
@@ -1420,7 +1463,7 @@ export class AgentLoop {
         const result = await this.registry.execute(call.toolName, inputObj, {
           projectRoot: this.projectRoot,
           workspaceRoots: this.workspaceRoots,
-          auditLog: this.auditLog.log,
+          auditLog: this.auditLogRedacted,
         });
         output = typeof result === "string" ? result : JSON.stringify(result);
       } catch (err) {
@@ -1476,15 +1519,26 @@ export class AgentLoop {
 
   /** Resolve the approval decision: always-allowed / auto-approve short-circuit, else ask the UI. */
   private async requestApproval(toolName: string, input: Record<string, unknown>): Promise<ApprovalDecision> {
-    if (this.alwaysAllow.has(toolName) || this.autoApprove) return "approve";
+    // "Always allow" is scoped to the approved target (tool + path/command), not
+    // the whole tool — approving one writeFile doesn't auto-approve any path (#241).
+    const scope = this.approvalScopeKey(toolName, input);
+    if (this.alwaysAllow.has(scope) || this.autoApprove) return "approve";
     if (!this.onApprovalRequest) return "approve"; // headless / no UI wired → no gate
     try {
       const decision = await this.onApprovalRequest(this.buildApprovalRequest(toolName, input));
-      if (decision === "always") this.alwaysAllow.add(toolName);
+      if (decision === "always") this.alwaysAllow.add(scope);
       return decision;
     } catch {
       return "reject"; // a failed/aborted prompt must not silently execute
     }
+  }
+
+  /** Key that scopes an "always allow" decision to the specific target (#241). */
+  private approvalScopeKey(toolName: string, input: Record<string, unknown>): string {
+    if (typeof input.path === "string") return `${toolName}:${input.path}`;
+    if (typeof input.destination === "string") return `${toolName}:${input.destination}`;
+    if (typeof input.command === "string") return `${toolName}:${input.command}`;
+    return toolName;
   }
 
   /** Build the approval payload (diff for writes, command for shell) for the UI. */
@@ -1664,7 +1718,7 @@ export class AgentLoop {
       output = `Error: ${error}`;
       return output;
     } finally {
-      this.auditLog.log({ timestamp, toolName, input, output, success, error });
+      this.auditLogRedacted({ timestamp, toolName, input, output, success, error });
     }
   }
 
@@ -1677,6 +1731,18 @@ export class AgentLoop {
   private rebuildRedactor(): void {
     const xdg = loadXdgConfig();
     this.redactor = new Redactor(collectSecrets(xdg.apiKeys, [this.config.apiKey], xdg.mcpServers));
+  }
+
+  /** Recursively scrub secret values from a tool input/output structure (#238). */
+  private redactValue(v: unknown): unknown {
+    if (typeof v === "string") return this.redactor.redact(v);
+    if (Array.isArray(v)) return v.map((x) => this.redactValue(x));
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v)) out[k] = this.redactValue(val);
+      return out;
+    }
+    return v;
   }
 
   /** Accumulate real provider token usage; feed the router's budget tracker (#157, #182)

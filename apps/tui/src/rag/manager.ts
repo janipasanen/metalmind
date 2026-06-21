@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
-import { join, extname, relative } from "node:path";
+import { join, extname, relative, isAbsolute } from "node:path";
+import { isBlockedPath } from "@metalmind/tools";
 import { RagIndex } from "./rag-index.js";
 import { HashingEmbedder, OllamaEmbedder, selectEmbedder, type Embedder } from "./embedder.js";
 
@@ -13,6 +14,7 @@ const INDEXABLE = new Set([
   ".c", ".cc", ".cpp", ".h", ".hpp", ".md", ".txt", ".json", ".yaml", ".yml", ".html", ".css",
 ]);
 const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "out", "coverage", ".turbo", "target", ".venv", "__pycache__", ".metalmind"]);
+const BLOCKED_DIRS = new Set([".ssh", ".gnupg", ".aws", ".kube"]);
 const MAX_FILES = 300;
 
 export function ragIndexPath(projectRoot: string): string {
@@ -56,10 +58,11 @@ function walk(root: string, acc: string[]): void {
   }
   for (const e of entries) {
     if (acc.length >= MAX_FILES) return;
+    if (BLOCKED_DIRS.has(e.name)) continue; // never index secret dirs (#239)
     const full = join(root, e.name);
     if (e.isDirectory()) {
       if (!IGNORE_DIRS.has(e.name)) walk(full, acc);
-    } else if (e.isFile() && INDEXABLE.has(extname(e.name).toLowerCase())) {
+    } else if (e.isFile() && INDEXABLE.has(extname(e.name).toLowerCase()) && !isBlockedPath(full)) {
       acc.push(full);
     }
   }
@@ -87,6 +90,10 @@ export async function handleRagCommand(rawArgs: string, projectRoot: string): Pr
   if (sub === "add") {
     if (!rest) return "Usage: /rag add <file-or-directory>";
     const target = join(projectRoot, rest);
+    // Keep indexing inside the project and away from sensitive paths (#239).
+    if (isAbsolute(rest) || relative(projectRoot, target).startsWith("..") || isBlockedPath(target)) {
+      return `Refusing to index a path outside the project or a sensitive path: ${rest}`;
+    }
     if (!existsSync(target)) return `Path not found: ${rest}`;
 
     // Reuse the existing index's embedder so vectors stay compatible; else pick one.

@@ -14,6 +14,13 @@ export const BLOCKED_PATTERNS = [
   "authorized_keys",
 ];
 
+/** True if a path touches a sensitive (blocked) directory/file — for reads that
+ *  aren't project-scoped (e.g. /image, @-mentions, /rag) (#239). */
+export function isBlockedPath(p: string): boolean {
+  const parts = normalize(p).split(sep);
+  return BLOCKED_PATTERNS.some((b) => parts.includes(b));
+}
+
 export class PathValidator {
   readonly projectRoot: string;
   private readonly allowedRoots: string[];

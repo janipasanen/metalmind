@@ -36,3 +36,12 @@ describe("expandMentions + context block (#167)", () => {
     expect(mentionsContextBlock("@src/missing.ts", root)).toBeNull();
   });
 });
+
+describe("expandMentions path safety (#239)", () => {
+  it("refuses ../ escapes and blocked paths", () => {
+    const r = expandMentions("see @../secret.txt and @.ssh/id_rsa", "/tmp/proj");
+    expect(r.files).toEqual([]);
+    expect(r.missing).toContain("../secret.txt");
+    expect(r.missing).toContain(".ssh/id_rsa");
+  });
+});

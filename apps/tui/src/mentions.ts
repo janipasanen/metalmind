@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { join, isAbsolute } from "node:path";
+import { join, isAbsolute, relative } from "node:path";
+import { isBlockedPath } from "@metalmind/tools";
 
 /**
  * @-file mentions (#167): when a message references `@path/to/file`, the file's
@@ -32,6 +33,12 @@ export function expandMentions(text: string, projectRoot: string): ExpandedMenti
   const missing: string[] = [];
   for (const rel of parseMentions(text)) {
     const abs = isAbsolute(rel) ? rel : join(projectRoot, rel);
+    // Stay inside the project and never read sensitive paths (#239).
+    const rel2 = relative(projectRoot, abs);
+    if (isBlockedPath(abs) || rel2.startsWith("..") || isAbsolute(rel)) {
+      missing.push(rel);
+      continue;
+    }
     try {
       if (existsSync(abs) && statSync(abs).isFile()) {
         let content = readFileSync(abs, "utf-8");

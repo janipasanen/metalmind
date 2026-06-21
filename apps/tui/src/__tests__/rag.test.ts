@@ -114,3 +114,11 @@ describe("OllamaEmbedder id is host-aware (#232)", () => {
     expect(e.id).toBe("ollama:nomic-embed-text@example:1234");
   });
 });
+
+describe("/rag add path safety (#239)", () => {
+  it("refuses to index outside the project or a sensitive path", async () => {
+    const root = "/tmp/mm-ragsafe";
+    expect(await handleRagCommand("add ../../etc", root)).toMatch(/Refusing/);
+    expect(await handleRagCommand("add .ssh", root)).toMatch(/Refusing/);
+  });
+});

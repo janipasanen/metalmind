@@ -1837,3 +1837,50 @@ describe("M20 — compaction never orphans a tool_result (#237)", () => {
     });
   });
 });
+
+describe("M21 — approval scope + audit redaction (#241, #238)", () => {
+  it("'always allow' is scoped to the path — a different path still prompts (#241)", async () => {
+    const fileA = join(tmpdir(), `mm-appr-a-${Date.now()}.txt`);
+    const fileB = join(tmpdir(), `mm-appr-b-${Date.now()}.txt`);
+    let n = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        n++;
+        if (n === 1) { yield { type: "tool-call", toolCall: { toolCallId: "w1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: fileA, content: "a" }) } }; yield { type: "done" }; }
+        else if (n === 2) { yield { type: "tool-call", toolCall: { toolCallId: "w2", toolName: "writeFile", argumentsJson: JSON.stringify({ path: fileB, content: "b" }) } }; yield { type: "done" }; }
+        else { yield { type: "text", text: "done" }; yield { type: "done" }; }
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+
+    const calls: string[] = [];
+    const onApprovalRequest = async (req: { toolName: string }) => { calls.push(req.toolName); return "always" as const; };
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { onApprovalRequest });
+    await collect(loop.run("write two files"));
+    expect(calls.length).toBe(2); // not auto-approved for the 2nd path — scoped to the 1st
+  });
+
+  it("redacts secrets in tool inputs written to the audit log (#238)", async () => {
+    const secret = "sk-audit-secret-1234567890";
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        let c = 0; c++;
+        yield { type: "tool-call", toolCall: { toolCallId: "s1", toolName: "successTool", argumentsJson: JSON.stringify({ token: secret }) } };
+        yield { type: "done" };
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+
+    const onApprovalRequest = async () => "approve" as const;
+    const loop = new AgentLoop({ provider: "stub", model: "test", apiKey: secret, explicit: true }, { onApprovalRequest });
+    await collect(loop.run("call it"));
+    const entries = loop.getAuditEntries();
+    const e = entries.find((x) => x.toolName === "successTool");
+    expect(JSON.stringify(e?.input)).not.toContain(secret);
+    expect(JSON.stringify(e?.input)).toContain("[REDACTED]");
+  });
+});
