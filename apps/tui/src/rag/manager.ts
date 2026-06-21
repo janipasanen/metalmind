@@ -21,7 +21,14 @@ export function ragIndexPath(projectRoot: string): string {
 
 /** Reconstruct the embedder an existing index was built with, from its id. */
 export function embedderFromId(id: string): Embedder {
-  if (id.startsWith("ollama:")) return new OllamaEmbedder(id.slice("ollama:".length));
+  if (id.startsWith("ollama:")) {
+    // Parse "ollama:<model>@<host>" (host optional for older indexes) (#232).
+    const rest = id.slice("ollama:".length);
+    const at = rest.lastIndexOf("@");
+    const model = at >= 0 ? rest.slice(0, at) : rest;
+    const host = at >= 0 ? rest.slice(at + 1) : "";
+    return new OllamaEmbedder(model, 768, host ? `http://${host}` : undefined);
+  }
   return new HashingEmbedder();
 }
 

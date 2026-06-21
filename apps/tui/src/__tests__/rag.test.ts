@@ -100,3 +100,17 @@ describe("/rag command + auto-retrieval (#200)", () => {
     expect(await retrieveContext(root, "anything")).toBeNull();
   });
 });
+
+import { OllamaEmbedder as OllamaEmbedder2 } from "../rag/embedder.js";
+import { embedderFromId } from "../rag/manager.js";
+
+describe("OllamaEmbedder id is host-aware (#232)", () => {
+  it("includes the host so a host change invalidates the index", () => {
+    expect(new OllamaEmbedder2("nomic-embed-text", 768, "http://example:1234").id).toBe("ollama:nomic-embed-text@example:1234");
+    expect(new OllamaEmbedder2("nomic-embed-text").id).toBe("ollama:nomic-embed-text@127.0.0.1:11434");
+  });
+  it("embedderFromId round-trips the host-aware id", () => {
+    const e = embedderFromId("ollama:nomic-embed-text@example:1234");
+    expect(e.id).toBe("ollama:nomic-embed-text@example:1234");
+  });
+});

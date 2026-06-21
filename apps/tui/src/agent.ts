@@ -113,6 +113,14 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Prom
 /** File-mutating tools whose targets are snapshotted before execution for /undo. */
 const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "deleteFile"]);
 
+/** Providers that require an API key (so a missing key gets a clear error, #231). */
+const PROVIDERS_NEEDING_KEY = new Set(["anthropic", "openai", "ollama-cloud"]);
+const PROVIDER_ENV_VAR: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  "ollama-cloud": "OLLAMA_API_KEY",
+};
+
 /** Side-effect-free built-in tools that are safe to execute concurrently in one turn (#206). */
 const READ_ONLY_PARALLEL_TOOLS = new Set([
   "readFile",
@@ -764,6 +772,15 @@ export class AgentLoop {
         provider === this.config.provider
           ? { apiKey: this.config.apiKey, baseUrl: this.config.baseUrl }
           : providerCredentials(provider);
+      // Clear, actionable error when the active cloud provider has no key (#231).
+      // Scoped to the active provider — auto-escalation to other tiers keeps its
+      // own fallback handling rather than hard-failing here.
+      if (provider === this.config.provider && PROVIDERS_NEEDING_KEY.has(provider) && !creds.apiKey) {
+        const envVar = PROVIDER_ENV_VAR[provider] ?? `${provider.toUpperCase()}_API_KEY`;
+        throw new Error(
+          `No API key for "${provider}". Set ${envVar} in your environment, or run /apikey <key> after switching to ${provider}.`,
+        );
+      }
       cached = createProvider(provider, model, creds);
       this.providerCache.set(key, cached);
     }
@@ -784,8 +801,12 @@ export class AgentLoop {
       inputSchema: def.inputSchema,
     }));
     // In remote-brain mode the cloud model can offload bounded subtasks to the
-    // small local model in parallel (cached) via this tool (#186/#187).
-    const delegate = this.remoteBrain && this.coordinator ? [DELEGATE_TO_LOCAL_DEF] : [];
+    // small local model — but only expose it when a local worker actually exists,
+    // so the model can't call into a runtime failure (#186/#187/#233).
+    const delegate =
+      this.remoteBrain && this.coordinator && this.coordinator.getRunner().hasProvider
+        ? [DELEGATE_TO_LOCAL_DEF]
+        : [];
     // General sub-agent delegation, but only at the top level — a sub-agent can't
     // spawn more sub-agents (prevents unbounded recursion) (#210).
     const task = this.subagentDepth === 0 ? [TASK_TOOL_DEF] : [];

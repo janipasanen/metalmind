@@ -290,7 +290,7 @@ describe("SkillManager tool bindings (#228)", () => {
 
   const makeSkill = (name: string, tools: Array<{ toolName: string; allowAutoExecute?: boolean }>): SkillDefinition => ({
     metadata: { name, description: "d" } as never,
-    content: "body",
+    prompt: "body",
     tools,
     directory: "/tmp",
     source: "project",

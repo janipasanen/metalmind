@@ -37,34 +37,16 @@ export class LocalWorkerRunner {
     this.provider = provider;
   }
 
-  /**
-   * Run multiple independent worker tasks concurrently with bounded
-   * concurrency (#180). Results preserve input order; an error in one task is
-   * isolated to that task's AgentResult and never rejects the whole batch.
-   */
-  async runMany(tasks: LocalWorkerTask[], concurrency = 4): Promise<AgentResult[]> {
-    const results: AgentResult[] = new Array(tasks.length);
-    let next = 0;
-    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+  /** The configured worker's provider name, or undefined if none (#230).
+   *  (Batch concurrency lives in Coordinator.runParallelTasks, which is also
+   *  cache-aware; the old unreachable runMany() here was removed.) */
+  get providerName(): string | undefined {
+    return this.provider?.providerName;
+  }
 
-    const worker = async (): Promise<void> => {
-      while (true) {
-        const i = next++;
-        if (i >= tasks.length) return;
-        try {
-          results[i] = await this.run(tasks[i]);
-        } catch (err) {
-          results[i] = {
-            taskId: tasks[i].taskId,
-            success: false,
-            error: err instanceof Error ? err.message : String(err),
-          };
-        }
-      }
-    };
-
-    await Promise.all(Array.from({ length: limit }, () => worker()));
-    return results;
+  /** Whether a local worker provider is configured (#230/#233). */
+  get hasProvider(): boolean {
+    return this.provider !== null;
   }
 
   async run(task: LocalWorkerTask): Promise<AgentResult> {

@@ -67,7 +67,14 @@ export class OllamaEmbedder implements Embedder {
     this.model = model;
     this.dim = dim;
     this.baseUrl = baseUrl;
-    this.id = `ollama:${model}`;
+    // Include the host so switching the Ollama endpoint invalidates a stale index (#232).
+    let host = baseUrl;
+    try {
+      host = new URL(baseUrl).host;
+    } catch {
+      /* keep raw */
+    }
+    this.id = `ollama:${model}@${host}`;
   }
   async embed(text: string): Promise<number[]> {
     const res = await fetch(`${this.baseUrl}/api/embeddings`, {

@@ -19,7 +19,6 @@ import { handleCopyCommand } from "../copy-command.js";
 import { VIM_HELP } from "../vim.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
-import type { WorkerProvider } from "@metalmind/core";
 import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
 import type { ModelRoutingDecision } from "@metalmind/schemas";
 import CommandPalette from "./CommandPalette.js";
@@ -137,9 +136,9 @@ export default function App({ config }: AppProps) {
         const coordinator = agent.coordinatorInstance;
         if (coordinator) {
           const wp = coordinator.getRunner();
-          const providerField = (wp as unknown as { provider: WorkerProvider | null }).provider;
-          if (providerField) {
-            _setLocalWorkerProvider(providerField.providerName);
+          const name = wp.providerName; // public accessor (#230)
+          if (name) {
+            _setLocalWorkerProvider(name);
             setLocalWorkerAvailable(true);
           }
         }
@@ -193,9 +192,9 @@ export default function App({ config }: AppProps) {
         const coordinator = agent.coordinatorInstance;
         if (coordinator) {
           const wp = coordinator.getRunner();
-          const providerField = (wp as unknown as { provider: WorkerProvider | null }).provider;
-          if (providerField) {
-            _setLocalWorkerProvider(providerField.providerName);
+          const name = wp.providerName; // public accessor (#230)
+          if (name) {
+            _setLocalWorkerProvider(name);
             setLocalWorkerAvailable(true);
           }
         }

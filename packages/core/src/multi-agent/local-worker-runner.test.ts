@@ -244,65 +244,12 @@ describe("LocalWorkerRunner", () => {
     });
   });
 });
-describe("LocalWorkerRunner.runMany (#180 parallel sub-agents)", () => {
-  function delayedProvider(delayMs: number): WorkerProvider {
-    return {
-      providerName: "delayed",
-      async isAvailable() { return true; },
-      async sendTask(task: LocalWorkerTask) {
-        await new Promise((r) => setTimeout(r, delayMs));
-        return JSON.stringify({ summary: `done ${task.taskId}`, confidence: 0.8 });
-      },
-    };
-  }
 
-  const mkTask = (id: string): LocalWorkerTask => ({
-    taskId: id,
-    taskType: "summarizeFile",
-    input: { filePath: `${id}.ts`, fileContent: "x" },
-    outputSchemaName: "summarizeFileOutput",
-    maximumInputTokens: 3000,
-    maximumOutputTokens: 800,
-    timeoutMilliseconds: 5000,
-  } as LocalWorkerTask);
-
-  it("runs independent tasks concurrently (faster than sequential) and preserves order", async () => {
-    const runner = new LocalWorkerRunner(delayedProvider(80));
-    const tasks = ["a", "b", "c", "d"].map(mkTask);
-    const start = Date.now();
-    const results = await runner.runMany(tasks, 4);
-    const elapsed = Date.now() - start;
-
-    expect(results).toHaveLength(4);
-    expect(results.every((r) => r.success)).toBe(true);
-    expect(results.map((r) => r.taskId)).toEqual(["a", "b", "c", "d"]); // input order
-    // 4 tasks x 80ms run concurrently (~80-200ms), well under the 320ms sequential floor.
-    expect(elapsed).toBeLessThan(300);
-  });
-
-  it("respects the concurrency limit", async () => {
-    const runner = new LocalWorkerRunner(delayedProvider(60));
-    const tasks = ["a", "b", "c", "d"].map(mkTask);
-    const start = Date.now();
-    await runner.runMany(tasks, 2); // 2 at a time → 2 waves of ~60ms
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeGreaterThanOrEqual(110); // at least two sequential waves
-    expect(elapsed).toBeLessThan(260);
-  });
-
-  it("isolates a failing task without rejecting the batch", async () => {
-    const provider: WorkerProvider = {
-      providerName: "flaky",
-      async isAvailable() { return true; },
-      async sendTask(task: LocalWorkerTask) {
-        if (task.taskId === "b") throw new Error("boom");
-        return JSON.stringify({ summary: "ok", confidence: 0.8 });
-      },
-    };
-    const runner = new LocalWorkerRunner(provider);
-    const results = await runner.runMany(["a", "b", "c"].map(mkTask), 3);
-    expect(results[0].success).toBe(true);
-    expect(results[1].success).toBe(false);
-    expect(results[2].success).toBe(true);
+describe("LocalWorkerRunner.hasProvider (#233)", () => {
+  it("reflects whether a worker provider is configured", () => {
+    expect(new LocalWorkerRunner(null).hasProvider).toBe(false);
+    const p = { providerName: "w", async isAvailable() { return true; }, async sendTask() { return "{}"; } };
+    expect(new LocalWorkerRunner(p as never).hasProvider).toBe(true);
+    expect(new LocalWorkerRunner(p as never).providerName).toBe("w");
   });
 });

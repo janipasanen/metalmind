@@ -1488,7 +1488,7 @@ describe("M12 — coordinator-path streaming (#211)", () => {
       async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
     } as never);
 
-    const loop = new AgentLoop({ provider: "anthropic", model: "claude", explicit: false }, { router: makeCoordRouter() });
+    const loop = new AgentLoop({ provider: "anthropic", model: "claude", apiKey: "test-key", explicit: false }, { router: makeCoordRouter() });
     await loop.initCoordinator(worker as never);
     loop.setRemoteBrain(true);
 
@@ -1754,5 +1754,12 @@ describe("M18 — sub-agents get RAG context (#229)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("M19 — clear error for a keyless cloud provider (#231)", () => {
+  it("names the provider and env var instead of a cryptic failure", async () => {
+    const loop = new AgentLoop({ provider: "anthropic", model: "claude", explicit: true }); // no apiKey
+    await expect(collect(loop.run("hi"))).rejects.toThrow(/No API key for "anthropic".*ANTHROPIC_API_KEY/);
   });
 });
