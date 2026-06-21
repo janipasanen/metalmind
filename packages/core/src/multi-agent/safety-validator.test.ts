@@ -178,6 +178,12 @@ describe("SafetyValidator", () => {
       expect(validator.requiresApproval("gitStatus")).toBe(false);
       expect(validator.requiresApproval("gitDiff")).toBe(false);
     });
+
+    it("gates the command-running build/test tools and directory mutations (#252, #253)", () => {
+      for (const t of ["runTests", "runBuild", "runLint", "runFormat", "deleteDirectory", "createDirectory"]) {
+        expect(validator.requiresApproval(t)).toBe(true);
+      }
+    });
   });
 
   describe("isToolAllowedForAgent", () => {

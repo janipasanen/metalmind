@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -120,6 +120,26 @@ describe("Git tools", () => {
         "utf-8",
       );
       expect(content).toBe("original");
+    });
+  });
+
+  describe("shell-injection safety (#255)", () => {
+    it("treats a commit message with $() as a literal string, not a shell command", async () => {
+      initRepo();
+      const sentinel = join(tmpdir(), `mm-git-inject-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+      rmSync(sentinel, { force: true });
+      writeFileSync(join(testDir, "f.ts"), "x");
+      await gitAddTool.execute({ paths: ["f.ts"] }, ctx);
+
+      const msg = `chore: $(touch ${sentinel}) \`touch ${sentinel}\``;
+      await gitCommitTool.execute({ message: msg }, ctx);
+
+      // The shell substitution must NOT have run...
+      expect(existsSync(sentinel)).toBe(false);
+      // ...and the message must be stored verbatim.
+      const stored = execSync("git log -1 --pretty=%B", { cwd: testDir, encoding: "utf-8" }).trim();
+      expect(stored).toBe(msg);
+      rmSync(sentinel, { force: true });
     });
   });
 });

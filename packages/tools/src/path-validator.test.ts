@@ -148,4 +148,31 @@ describe("PathValidator", () => {
       expect(validator.directoryExists("nonexistent")).toBe(false);
     });
   });
+
+  describe("dotted secret-file variants (#262)", () => {
+    it("blocks .env.local / .env.production / id_rsa.pub, not just exact names", () => {
+      for (const p of [".env.local", ".env.production", "config/.env.development", "keys/id_rsa.pub", "id_ed25519.pub"]) {
+        expect(validator.isValidPath(p)).toBe(false);
+        expect(() => validator.resolveSafePath(p)).toThrow(/blocked path/i);
+      }
+    });
+    it("still allows ordinary files that merely start similarly", () => {
+      expect(validator.isValidPath("environment.ts")).toBe(true);
+      expect(validator.isValidPath("src/envelope.ts")).toBe(true);
+    });
+  });
+});
+
+import { isBlockedPath } from "./path-validator.js";
+
+describe("isBlockedPath dotted variants (#262)", () => {
+  it("blocks .env.* and id_rsa.* anywhere in the path", () => {
+    expect(isBlockedPath("/home/u/.env.local")).toBe(true);
+    expect(isBlockedPath("project/.env.production")).toBe(true);
+    expect(isBlockedPath("/home/u/.ssh/id_rsa.pub")).toBe(true);
+  });
+  it("does not block lookalikes", () => {
+    expect(isBlockedPath("src/environment.ts")).toBe(false);
+    expect(isBlockedPath("docs/env.md")).toBe(false);
+  });
 });

@@ -140,6 +140,8 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Prom
 
 /** File-mutating tools whose targets are snapshotted before execution for /undo. */
 const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "deleteFile"]);
+/** Tools that execute a model-overridable shell command — all must be validated (#252). */
+const SHELL_COMMAND_TOOLS = new Set(["runCommand", "runBackground", "runTests", "runBuild", "runLint", "runFormat"]);
 
 /** Providers that require an API key (so a missing key gets a clear error, #231). */
 const PROVIDERS_NEEDING_KEY = new Set(["anthropic", "openai", "ollama-cloud"]);
@@ -1569,7 +1571,9 @@ export class AgentLoop {
 
   /** Pre-execution safety check: dangerous shell commands, secret/traversal paths. */
   private preflightSafety(toolName: string, input: Record<string, unknown>): SafetyViolation | null {
-    if ((toolName === "runCommand" || toolName === "runBackground") && typeof input.command === "string") {
+    // All command-running tools route their (model-overridable) command through the
+    // dangerous-command validator, not just runCommand/runBackground (#252).
+    if (SHELL_COMMAND_TOOLS.has(toolName) && typeof input.command === "string") {
       return (
         this.safetyValidator.validateShellCommand(input.command) ??
         this.safetyValidator.validateFilePath(input.command)
@@ -1823,7 +1827,15 @@ export class AgentLoop {
   /** (Re)build the secret redactor from current config api keys + MCP headers (#168). */
   private rebuildRedactor(): void {
     const xdg = loadXdgConfig();
-    this.redactor = new Redactor(collectSecrets(xdg.apiKeys, [this.config.apiKey], xdg.mcpServers));
+    // Include env-resolved keys for EVERY known provider, not just the active one —
+    // a routed/escalated cloud provider's env-only key must still be scrubbed if it
+    // surfaces in an error, tool output, or the audit log (#261).
+    const providerKeys = ["anthropic", "openai", "ollama", "ollama-cloud", "mlx"].map(
+      (p) => providerCredentials(p).apiKey,
+    );
+    this.redactor = new Redactor(
+      collectSecrets(xdg.apiKeys, [this.config.apiKey, ...providerKeys], xdg.mcpServers),
+    );
   }
 
   /** Recursively scrub secret values from a tool input/output structure (#238). */

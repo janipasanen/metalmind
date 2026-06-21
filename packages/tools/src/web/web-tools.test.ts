@@ -1,5 +1,30 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { webFetchTool, webSearchTool, htmlToText, decodeDuckUrl, parseDuckResults } from "./web-tools.js";
+import { webFetchTool, webSearchTool, htmlToText, decodeDuckUrl, parseDuckResults, isBlockedHost, assertPublicUrl } from "./web-tools.js";
+
+describe("SSRF protection (#256)", () => {
+  it("blocks loopback, private, link-local, and cloud-metadata hosts", () => {
+    for (const h of ["localhost", "app.localhost", "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "svc.internal", "db.local", "::1", "fd00::1", "fe80::1"]) {
+      expect(isBlockedHost(h)).toBe(true);
+    }
+  });
+  it("allows public hosts (incl. lookalikes)", () => {
+    for (const h of ["example.com", "github.com", "8.8.8.8", "fcbarcelona.com", "172.32.0.1", "192.169.0.1"]) {
+      expect(isBlockedHost(h)).toBe(false);
+    }
+  });
+  it("assertPublicUrl rejects non-http schemes and private hosts", () => {
+    expect(() => assertPublicUrl("file:///etc/passwd")).toThrow(/scheme/i);
+    expect(() => assertPublicUrl("http://169.254.169.254/latest/meta-data/")).toThrow(/private|internal/i);
+    expect(assertPublicUrl("https://example.com/x").hostname).toBe("example.com");
+  });
+  it("webFetch refuses a private URL without making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await webFetchTool.execute({ url: "http://169.254.169.254/latest/", maxChars: 100 }, { projectRoot: "/" } as never);
+    expect(out).toMatch(/private|internal/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

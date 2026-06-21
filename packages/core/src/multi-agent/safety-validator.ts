@@ -164,12 +164,20 @@ export class SafetyValidator {
       "createFile",
       "deleteFile",
       "moveFile",
+      "createDirectory",
+      "deleteDirectory",
       "gitCommit",
       "gitAdd",
       "gitRestore",
       "gitCreateBranch",
       "runCommand",
       "runBackground",
+      // These accept a model-overridable `command`, so they must be gated and
+      // command-validated just like runCommand (#252).
+      "runTests",
+      "runBuild",
+      "runLint",
+      "runFormat",
     ]);
     return APPROVAL_REQUIRED_TOOLS.has(toolName);
   }

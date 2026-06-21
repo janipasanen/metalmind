@@ -1,12 +1,15 @@
 import { z } from "zod";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { AgentTool, ToolExecutionContext } from "../types.js";
 import { createTool } from "../types.js";
 import { PathValidator } from "../path-validator.js";
 
-function gitCmd(args: string, cwd: string): string {
+// Run git with an argv array via execFileSync (no shell), so paths, commit
+// messages, and branch names can never be interpreted as shell syntax — closes
+// the $()/backtick/`;` command-injection vector of the old string interpolation (#255).
+function gitCmd(args: string[], cwd: string): string {
   try {
-    return execSync(`git ${args}`, {
+    return execFileSync("git", args, {
       cwd,
       encoding: "utf-8",
       timeout: 30_000,
@@ -28,7 +31,7 @@ export const gitStatusTool: AgentTool<z.input<typeof gitStatusSchema>, string> =
   inputSchema: gitStatusSchema,
   requiresConfirmation: false,
   async execute(_input, ctx: ToolExecutionContext): Promise<string> {
-    return gitCmd("status --porcelain --branch", ctx.projectRoot);
+    return gitCmd(["status", "--porcelain", "--branch"], ctx.projectRoot);
   },
 });
 
@@ -40,7 +43,7 @@ export const gitDiffTool: AgentTool<z.input<typeof gitDiffSchema>, string> = cre
   inputSchema: gitDiffSchema,
   requiresConfirmation: false,
   async execute(_input, ctx: ToolExecutionContext): Promise<string> {
-    return gitCmd("diff --unified=3", ctx.projectRoot);
+    return gitCmd(["diff", "--unified=3"], ctx.projectRoot);
   },
 });
 
@@ -57,8 +60,10 @@ export const gitDiffFileTool: AgentTool<z.input<typeof gitDiffFileSchema>, strin
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
     const v = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     v.resolveSafePath(input.path);
-    const flag = input.staged ? "--cached " : "";
-    return gitCmd(`diff ${flag}--unified=3 -- "${input.path}"`, ctx.projectRoot);
+    const args = ["diff"];
+    if (input.staged) args.push("--cached");
+    args.push("--unified=3", "--", input.path);
+    return gitCmd(args, ctx.projectRoot);
   },
 });
 
@@ -74,8 +79,7 @@ export const gitAddTool: AgentTool<z.input<typeof gitAddSchema>, string> = creat
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
     const v = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     for (const p of input.paths) v.resolveSafePath(p);
-    const files = input.paths.map((p) => `"${p}"`).join(" ");
-    return gitCmd(`add -- ${files}`, ctx.projectRoot);
+    return gitCmd(["add", "--", ...input.paths], ctx.projectRoot);
   },
 });
 
@@ -89,7 +93,7 @@ export const gitCommitTool: AgentTool<z.input<typeof gitCommitSchema>, string> =
   inputSchema: gitCommitSchema,
   requiresConfirmation: true,
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
-    return gitCmd(`commit -m "${input.message.replace(/"/g, '\\"')}"`, ctx.projectRoot);
+    return gitCmd(["commit", "-m", input.message], ctx.projectRoot);
   },
 });
 
@@ -105,8 +109,7 @@ export const gitRestoreTool: AgentTool<z.input<typeof gitRestoreSchema>, string>
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
     const v = new PathValidator(ctx.projectRoot, ctx.workspaceRoots);
     for (const p of input.paths) v.resolveSafePath(p);
-    const files = input.paths.map((p) => `"${p}"`).join(" ");
-    return gitCmd(`restore -- ${files}`, ctx.projectRoot);
+    return gitCmd(["restore", "--", ...input.paths], ctx.projectRoot);
   },
 });
 
@@ -120,7 +123,7 @@ export const gitCreateBranchTool: AgentTool<z.input<typeof gitCreateBranchSchema
   inputSchema: gitCreateBranchSchema,
   requiresConfirmation: true,
   async execute(input, ctx: ToolExecutionContext): Promise<string> {
-    return gitCmd(`checkout -b "${input.name}"`, ctx.projectRoot);
+    return gitCmd(["checkout", "-b", input.name], ctx.projectRoot);
   },
 });
 
@@ -132,7 +135,7 @@ export const gitCurrentBranchTool: AgentTool<z.input<typeof gitCurrentBranchSche
   inputSchema: gitCurrentBranchSchema,
   requiresConfirmation: false,
   async execute(_input, ctx: ToolExecutionContext): Promise<string> {
-    return gitCmd("branch --show-current", ctx.projectRoot);
+    return gitCmd(["branch", "--show-current"], ctx.projectRoot);
   },
 });
 

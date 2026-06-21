@@ -5,6 +5,70 @@ import { createTool } from "../types.js";
 const FETCH_TIMEOUT_MS = 15_000;
 const USER_AGENT = "MetalMind/1.0 (+https://github.com/janipasanen/metalmind)";
 
+/** True for a literal IPv4 in a loopback/private/link-local/CGNAT range (#256). */
+function isPrivateIPv4(ip: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return false;
+  const o = m.slice(1).map(Number);
+  if (o.some((n) => n > 255)) return true; // malformed → treat as unsafe
+  const [a, b] = o;
+  return (
+    a === 0 || a === 10 || a === 127 ||
+    (a === 169 && b === 254) || // link-local incl. 169.254.169.254 cloud metadata
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) // CGNAT
+  );
+}
+
+/** Block internal/private hosts to prevent SSRF to localhost, the LAN, or cloud
+ *  metadata endpoints (#256). IPv6 checks are gated on a literal so real domains
+ *  (e.g. "fcbarcelona.com") aren't affected. */
+export function isBlockedHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".internal") || h.endsWith(".local")) return true;
+  if (h.includes(":")) {
+    if (h === "::1" || h === "::") return true;
+    if (h.startsWith("fe80")) return true; // link-local
+    const first = h.split(":")[0];
+    if (/^f[cd]/.test(first)) return true; // fc00::/7 unique-local
+    const mapped = h.startsWith("::ffff:") ? h.slice(7) : "";
+    if (mapped && isPrivateIPv4(mapped)) return true;
+    return false;
+  }
+  return isPrivateIPv4(h);
+}
+
+/** Validate scheme + host, throwing on a disallowed/internal target (#256). */
+export function assertPublicUrl(urlStr: string): URL {
+  let u: URL;
+  try {
+    u = new URL(urlStr);
+  } catch {
+    throw new Error(`Invalid URL: ${urlStr}`);
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`Blocked URL scheme "${u.protocol}" — only http/https are allowed`);
+  }
+  if (isBlockedHost(u.hostname)) {
+    throw new Error(`Refusing to fetch a private/internal host: ${u.hostname}`);
+  }
+  return u;
+}
+
+/** fetch() that validates the target and re-validates every redirect hop, so a
+ *  public URL can't 30x-redirect into a private/metadata host (#256). */
+async function safeFetch(urlStr: string, init: RequestInit): Promise<Response> {
+  let current = assertPublicUrl(urlStr).toString();
+  for (let hop = 0; hop <= 5; hop++) {
+    const res = await fetch(current, { ...init, redirect: "manual" });
+    const loc = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+    if (!loc) return res;
+    current = assertPublicUrl(new URL(loc, current).toString()).toString();
+  }
+  throw new Error("Too many redirects");
+}
+
 /** Strip HTML to readable plain text (best-effort, dependency-free). */
 export function htmlToText(html: string): string {
   return html
@@ -40,8 +104,7 @@ export const webFetchTool: AgentTool<z.input<typeof webFetchSchema>, string> = c
   async execute(input: z.output<typeof webFetchSchema>): Promise<string> {
     let res: Response;
     try {
-      res = await fetch(input.url, {
-        redirect: "follow",
+      res = await safeFetch(input.url, {
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers: { "User-Agent": USER_AGENT, Accept: "text/html,text/plain,*/*" },
       });

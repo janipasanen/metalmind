@@ -14,11 +14,17 @@ export const BLOCKED_PATTERNS = [
   "authorized_keys",
 ];
 
+/** True if a single path segment is sensitive. Matches the exact name AND dotted
+ *  variants (.env → .env.local/.env.production; id_rsa → id_rsa.pub) so secrets
+ *  aren't reachable just by appending a suffix (#262). */
+export function isBlockedSegment(seg: string): boolean {
+  return BLOCKED_PATTERNS.some((b) => seg === b || seg.startsWith(b + "."));
+}
+
 /** True if a path touches a sensitive (blocked) directory/file — for reads that
  *  aren't project-scoped (e.g. /image, @-mentions, /rag) (#239). */
 export function isBlockedPath(p: string): boolean {
-  const parts = normalize(p).split(sep);
-  return BLOCKED_PATTERNS.some((b) => parts.includes(b));
+  return normalize(p).split(sep).some(isBlockedSegment);
 }
 
 export class PathValidator {
@@ -43,13 +49,11 @@ export class PathValidator {
       ? resolve(requestedPath)
       : resolve(join(this.projectRoot, requestedPath));
 
-    const parts = absolute.split(sep);
-    for (const blocked of BLOCKED_PATTERNS) {
-      if (parts.includes(blocked)) {
-        throw new Error(
-          `Access to blocked path denied: "${blocked}" detected in "${requestedPath}"`,
-        );
-      }
+    const blocked = absolute.split(sep).find(isBlockedSegment);
+    if (blocked) {
+      throw new Error(
+        `Access to blocked path denied: "${blocked}" detected in "${requestedPath}"`,
+      );
     }
 
     return absolute;
