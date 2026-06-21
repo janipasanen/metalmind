@@ -275,17 +275,23 @@ export class LspClient {
   private request(method: string, params?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = ++this.requestId;
-      this.pending.set(id, { resolve, reject });
 
-      const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
-      this.process?.stdin?.write(msg);
-
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           reject(new Error(`LSP request timeout: ${method}`));
         }
       }, 30_000);
+
+      // Clear the timer on every settle path (response, error, dispose), so the
+      // 30s timer doesn't linger after a fast reply (#245).
+      this.pending.set(id, {
+        resolve: (v: unknown) => { clearTimeout(timeout); resolve(v); },
+        reject: (e: Error) => { clearTimeout(timeout); reject(e); },
+      });
+
+      const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+      this.process?.stdin?.write(msg);
     });
   }
 

@@ -8,7 +8,7 @@ import type {
   TokenCountResponse,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
-import { providerErrorFromResponse } from "../normalization/provider-error.js";
+import { providerErrorFromResponse, ProviderError } from "../normalization/provider-error.js";
 import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
 import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 import { JsonRepair } from "../normalization/json-repair.js";
@@ -179,15 +179,27 @@ export class OllamaProvider implements ModelProvider {
       throw await providerErrorFromResponse(res, "ollama", "Ollama chat failed");
     }
 
-    const data = (await res.json()) as OllamaChatResponse;
-    const message: AgentMessage = { role: "assistant", content: data.message.content };
+    const data = (await res.json()) as OllamaChatResponse & { error?: string };
+    // A 200 can still carry an {error} body or omit `message`; surface a clean
+    // provider error instead of throwing a raw TypeError on data.message (#244).
+    if (data.error) {
+      throw new ProviderError(`Ollama chat failed: ${data.error}`);
+    }
+    if (!data.message) {
+      throw new ProviderError("Ollama chat returned no message");
+    }
+    const message: AgentMessage = { role: "assistant", content: data.message.content ?? "" };
     // Surface tool calls the model returned, matching the streaming path (#222).
+    // Skip malformed entries (missing function/name) rather than emit a bad call.
     if (data.message.tool_calls?.length) {
-      message.toolCalls = data.message.tool_calls.map((tc) => ({
-        toolCallId: tc.id ?? `ollama-tc-${this.toolCallCounter++}`,
-        toolName: tc.function.name,
-        argumentsJson: JSON.stringify(tc.function.arguments ?? {}),
-      }));
+      const calls = data.message.tool_calls
+        .filter((tc) => typeof tc?.function?.name === "string" && tc.function.name)
+        .map((tc) => ({
+          toolCallId: tc.id ?? `ollama-tc-${this.toolCallCounter++}`,
+          toolName: tc.function.name,
+          argumentsJson: JSON.stringify(tc.function.arguments ?? {}),
+        }));
+      if (calls.length > 0) message.toolCalls = calls;
     }
     return { message };
   }
@@ -261,6 +273,7 @@ export class OllamaProvider implements ModelProvider {
             }
 
             for (const tc of data.message?.tool_calls ?? []) {
+              if (typeof tc?.function?.name !== "string" || !tc.function.name) continue; // skip malformed (#244)
               yield {
                 type: "tool-call",
                 toolCall: {
@@ -303,6 +316,7 @@ export class OllamaProvider implements ModelProvider {
             yield { type: "text", text: data.message.content };
           }
           for (const tc of data.message?.tool_calls ?? []) {
+            if (typeof tc?.function?.name !== "string" || !tc.function.name) continue; // skip malformed (#244)
             yield {
               type: "tool-call",
               toolCall: {

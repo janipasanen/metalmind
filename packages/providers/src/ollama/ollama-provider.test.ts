@@ -152,6 +152,42 @@ describe("OllamaProvider", () => {
       await expect(p.completeChat(request)).rejects.toThrow(/Ollama chat failed/);
     });
 
+    it("raises a clean error on a malformed 200 body with no message (#244)", async () => {
+      vi.stubGlobal("fetch", mockFetch(200, { not_a_message: true }));
+      const p = new OllamaProvider("test");
+      await expect(p.completeChat({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+        /Ollama chat returned no message/,
+      );
+    });
+
+    it("surfaces an {error} body returned with a 200 (#244)", async () => {
+      vi.stubGlobal("fetch", mockFetch(200, { error: "model not found" }));
+      const p = new OllamaProvider("test");
+      await expect(p.completeChat({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+        /model not found/,
+      );
+    });
+
+    it("skips malformed tool_calls missing a function name (#244)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        mockFetch(200, {
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              { function: { arguments: {} } }, // malformed: no name
+              { function: { name: "writeFile", arguments: { path: "x" } } },
+            ],
+          },
+        }),
+      );
+      const p = new OllamaProvider("test");
+      const result = await p.completeChat({ messages: [{ role: "user", content: "hi" }] });
+      expect(result.message.toolCalls).toHaveLength(1);
+      expect(result.message.toolCalls?.[0].toolName).toBe("writeFile");
+    });
+
     it("converts AgentMessage roles to Ollama format", async () => {
       let requestBody: unknown = null;
 

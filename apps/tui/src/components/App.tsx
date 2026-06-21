@@ -114,7 +114,7 @@ export default function App({ config }: AppProps) {
         const currentConfig = resolveConfig();
         const router = currentConfig.explicit ? undefined : await createDefaultRouter(currentConfig);
         if (cancelled) return;
-        if (agentRef.current) agentRef.current.clearHistory();
+        const previous = agentRef.current;
         const agent = new AgentLoop(currentConfig, {
           router,
           onRoute: (d) => setActiveModel(`${d.provider}/${d.modelId} [${d.tier}]`),
@@ -130,6 +130,9 @@ export default function App({ config }: AppProps) {
         await agent.initCoordinator();
         if (cancelled) return;
         agentRef.current = agent;
+        // Dispose the replaced agent so its sqlite handle, MCP clients, and
+        // background processes are released instead of leaking on each reload (#242).
+        previous?.dispose();
         await agent.initPersistence({}); // reconfigure → fresh persisted session
         setAgentError(null);
 

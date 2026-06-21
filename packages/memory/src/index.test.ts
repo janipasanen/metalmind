@@ -29,6 +29,17 @@ describe("SqliteSessionStore", () => {
     store.close();
   });
 
+  it("close() releases the handle so the db can be reopened (#242)", () => {
+    const a = new SqliteSessionStore(dbPath);
+    const id = a.createSession("persisted");
+    a.close();
+    // A reload (model/provider switch) opens a fresh store on the same file; the
+    // prior handle must be released so this neither locks nor loses data.
+    const b = new SqliteSessionStore(dbPath);
+    expect(b.listSessions().map((s) => s.id)).toContain(id);
+    b.close();
+  });
+
   it("saves and loads messages", () => {
     const store = new SqliteSessionStore(dbPath);
     const sessionId = store.createSession("Chat");

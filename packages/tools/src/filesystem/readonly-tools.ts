@@ -181,10 +181,12 @@ export const searchInFilesTool: AgentTool<z.input<typeof searchInFilesSchema>, s
       maxBuffer: 10 * 1024 * 1024,
     });
 
-    if (result.status === 1) return "";
     if (result.error) {
-      throw new Error(`Search failed: rg not found. Install ripgrep (brew install ripgrep).`);
+      // ripgrep not installed — degrade to an ignore-aware walk + per-line regex,
+      // mirroring findFiles' fallback so both tools behave the same without rg.
+      return searchFallback(safePath, context.projectRoot, input.pattern, input.include);
     }
+    if (result.status === 1) return "";
     if (result.status !== 0) {
       throw new Error(`Search failed: ${result.stderr}`);
     }
@@ -192,6 +194,39 @@ export const searchInFilesTool: AgentTool<z.input<typeof searchInFilesSchema>, s
     return result.stdout.trim();
   },
 });
+
+const SEARCH_FALLBACK_FILE_LIMIT = 1000;
+const SEARCH_FALLBACK_MATCHES_PER_FILE = 100;
+
+/** rg-less search: walk, read each file, match the pattern per line, render in
+ *  ripgrep's --heading --line-number style (path heading, then `lineno:line`). */
+function searchFallback(safePath: string, projectRoot: string, pattern: string, include?: string): string {
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern);
+  } catch {
+    throw new Error(`Search failed: invalid regex pattern: ${pattern}`);
+  }
+  const files = (statSync(safePath).isFile() ? [safePath] : walkDir(safePath)).slice(0, SEARCH_FALLBACK_FILE_LIMIT);
+  const blocks: string[] = [];
+  for (const file of files) {
+    if (include && !globMatch(file.split(sep).pop()!, include)) continue;
+    let content: string;
+    try {
+      content = readFileSync(file, "utf-8");
+    } catch {
+      continue; // unreadable/binary
+    }
+    if (content.includes(String.fromCharCode(0))) continue; // skip binary files, like rg
+    const hits: string[] = [];
+    const lines = content.split("\n");
+    for (let i = 0; i < lines.length && hits.length < SEARCH_FALLBACK_MATCHES_PER_FILE; i++) {
+      if (re.test(lines[i])) hits.push(`${i + 1}:${lines[i]}`);
+    }
+    if (hits.length > 0) blocks.push(`${relative(projectRoot, file)}\n${hits.join("\n")}`);
+  }
+  return blocks.join("\n\n");
+}
 
 export const allReadOnlyTools = [
   readFileTool,

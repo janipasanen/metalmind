@@ -98,6 +98,24 @@ describe("AnthropicProvider", () => {
       const result = await p.completeChat({ messages: [] });
       expect(result.message.content).toBe("Using tool:");
     });
+
+    it("skips a nameless tool_use block, matching the streaming path (#244)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        mockFetch(200, {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "t0", input: {} }, // malformed: no name
+            { type: "tool_use", id: "t1", name: "search", input: { q: "x" } },
+          ],
+        }),
+      );
+
+      const p = new AnthropicProvider("claude", "sk-test");
+      const result = await p.completeChat({ messages: [] });
+      expect(result.message.toolCalls).toHaveLength(1);
+      expect(result.message.toolCalls?.[0].toolName).toBe("search");
+    });
   });
 
   describe("streamChatCompletion", () => {

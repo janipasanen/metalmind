@@ -8,7 +8,7 @@ import type {
   TokenCountResponse,
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
-import { providerErrorFromResponse } from "../normalization/provider-error.js";
+import { providerErrorFromResponse, ProviderError } from "../normalization/provider-error.js";
 import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
 import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 
@@ -124,14 +124,24 @@ export class MlxProvider implements ModelProvider {
     }
 
     const data = (await res.json()) as {
-      message: { role: string; content: string };
+      message?: { role: string; content: string };
+      error?: string;
       usage?: { prompt_tokens: number; completion_tokens: number; duration_ms: number };
     };
+
+    // Guard a malformed/error 200 body so we raise a clean provider error rather
+    // than a raw TypeError on data.message.content (#244).
+    if (data.error) {
+      throw new ProviderError(`MLX chat failed: ${data.error}`);
+    }
+    if (!data.message) {
+      throw new ProviderError("MLX chat returned no message");
+    }
 
     return {
       message: {
         role: "assistant",
-        content: data.message.content,
+        content: data.message.content ?? "",
       },
     };
   }

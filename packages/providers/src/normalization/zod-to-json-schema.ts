@@ -5,10 +5,18 @@ interface ZodDefLike {
   type?: unknown;
   values?: string[];
   description?: string;
+  options?: unknown[];
+  defaultValue?: () => unknown;
 }
 
 function defOf(schema: unknown): ZodDefLike | undefined {
   return (schema as { _def?: ZodDefLike })?._def;
+}
+
+/** Wrap a schema so the value may also be null, in JSON-Schema terms (#243). */
+function withNull(inner: Record<string, unknown>): Record<string, unknown> {
+  if (typeof inner.type === "string") return { ...inner, type: [inner.type, "null"] };
+  return { anyOf: [inner, { type: "null" }] };
 }
 
 /**
@@ -32,9 +40,22 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
     case "ZodArray":
       return { type: "array", items: def.type ? zodToJsonSchema(def.type) : {} };
     case "ZodOptional":
-    case "ZodNullable":
-    case "ZodDefault":
       return def.innerType ? zodToJsonSchema(def.innerType) : {};
+    case "ZodNullable":
+      return def.innerType ? withNull(zodToJsonSchema(def.innerType)) : { type: "null" };
+    case "ZodDefault": {
+      // Unwrap to the inner type and advertise the default value (#243).
+      const inner = def.innerType ? zodToJsonSchema(def.innerType) : {};
+      if (typeof def.defaultValue === "function") {
+        try { return { ...inner, default: def.defaultValue() }; } catch { /* ignore */ }
+      }
+      return inner;
+    }
+    case "ZodUnion": {
+      // e.g. spreadsheet cell `string | number` → anyOf, not a bare object (#243).
+      const options = Array.isArray(def.options) ? def.options : [];
+      return { anyOf: options.map((o) => zodToJsonSchema(o)) };
+    }
     case "ZodObject": {
       const shape = typeof def.shape === "function" ? def.shape() : {};
       const properties: Record<string, unknown> = {};
@@ -51,6 +72,8 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
       return result;
     }
     default:
-      return { type: "object" };
+      // Unknown/unsupported node (e.g. ZodEffects, ZodRecord). Emit an
+      // unconstrained schema rather than mislabelling it as an object (#243).
+      return {};
   }
 }

@@ -154,19 +154,20 @@ export class McpClient extends EventEmitter {
       const req: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
       const payload = JSON.stringify(req) + "\n";
 
-      this.pending.set(id, { resolve, reject });
-      this.writeToStdin(payload);
-
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`MCP request timeout: ${method}`));
       }, 30_000);
 
-      const origResolve = resolve;
-      resolve = ((v: unknown) => {
-        clearTimeout(timeout);
-        origResolve(v);
-      }) as typeof resolve;
+      // Wrap both settle paths so the timer is cleared whenever the request
+      // resolves, errors, or is rejected via rejectAll — not just on a 30s
+      // timeout. (The prior wrapper reassigned a local after the map already
+      // held the original, so clearTimeout never actually ran. #245)
+      this.pending.set(id, {
+        resolve: (v: unknown) => { clearTimeout(timeout); resolve(v); },
+        reject: (e: Error) => { clearTimeout(timeout); reject(e); },
+      });
+      this.writeToStdin(payload);
     });
   }
 

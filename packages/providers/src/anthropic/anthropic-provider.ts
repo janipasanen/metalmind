@@ -199,11 +199,13 @@ export class AnthropicProvider implements ModelProvider {
       .join("");
 
     const message: AgentMessage = { role: "assistant", content: textContent };
-    const toolUses = data.content.filter((c) => c.type === "tool_use");
+    // Only surface usable tool_use blocks — skip any without a name, matching the
+    // streaming path (which already drops nameless blocks) so both agree (#244).
+    const toolUses = data.content.filter((c) => c.type === "tool_use" && typeof c.name === "string" && c.name);
     if (toolUses.length) {
       message.toolCalls = toolUses.map((c) => ({
         toolCallId: c.id ?? "",
-        toolName: c.name ?? "",
+        toolName: c.name as string,
         argumentsJson: JSON.stringify(c.input ?? {}),
       }));
     }

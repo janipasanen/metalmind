@@ -23,6 +23,7 @@ interface SessionStore {
   renameSession(id: string, title: string): void;
   tagSession(id: string, tags: string): void;
   getSession?(id: string): SessionRecordLite | undefined;
+  close?(): void;
 }
 
 /** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
@@ -2579,5 +2580,13 @@ export class AgentLoop {
     for (const client of this.mcpStdioClients) {
       void client.disconnect().catch(() => {});
     }
+    // Release the sqlite connection (and its WAL handles) so reloading the agent
+    // on a model/provider switch doesn't leak a handle each time (#242).
+    try {
+      this.sessionStore?.close?.();
+    } catch {
+      /* already closed */
+    }
+    this.sessionStore = null;
   }
 }

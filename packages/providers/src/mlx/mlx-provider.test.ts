@@ -116,6 +116,18 @@ describe("MlxProvider", () => {
       const p = new MlxProvider(defaultConfig);
       await expect(p.completeChat({ messages: [] })).rejects.toThrow(/MLX chat failed/);
     });
+
+    it("raises a clean error on a malformed 200 body with no message (#244)", async () => {
+      vi.stubGlobal("fetch", mockFetch({ usage: { prompt_tokens: 1 } }));
+      const p = new MlxProvider(defaultConfig);
+      await expect(p.completeChat({ messages: [] })).rejects.toThrow(/MLX chat returned no message/);
+    });
+
+    it("surfaces an {error} body returned with a 200 (#244)", async () => {
+      vi.stubGlobal("fetch", mockFetch({ error: "context overflow" }));
+      const p = new MlxProvider(defaultConfig);
+      await expect(p.completeChat({ messages: [] })).rejects.toThrow(/context overflow/);
+    });
   });
 
   describe("streamChatCompletion", () => {
