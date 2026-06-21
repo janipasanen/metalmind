@@ -58,13 +58,13 @@ export class SkillManager {
       }
     }
 
-    // Register skill-specific tools
+    // Validate tool bindings: don't silently swallow a skill that binds a tool
+    // that doesn't exist — fail activation loudly (#228).
     if (skill.tools && this.toolRegistry) {
-      for (const binding of skill.tools) {
-        if (!this.toolRegistry.get(binding.toolName)) {
-          // Tool not in registry — could register a wrapper
-          // For now, log a warning
-        }
+      const reg = this.toolRegistry;
+      const missing = skill.tools.map((b) => b.toolName).filter((n) => n && !reg.get(n));
+      if (missing.length > 0) {
+        return { success: false, error: `Skill "${skill.metadata.name}" binds unknown tool(s): ${missing.join(", ")}` };
       }
     }
 
@@ -75,6 +75,17 @@ export class SkillManager {
 
     this.notifyPromptUpdate();
     return { success: true };
+  }
+
+  /** Tools that active skills marked allowAutoExecute — the agent pre-approves these (#228). */
+  getAutoExecuteTools(): Set<string> {
+    const out = new Set<string>();
+    for (const { skill } of this.activeSkills.values()) {
+      for (const b of skill.tools ?? []) {
+        if (b.allowAutoExecute && b.toolName) out.add(b.toolName);
+      }
+    }
+    return out;
   }
 
   /**

@@ -1662,3 +1662,97 @@ describe("M16 — streamed text is redacted (#223)", () => {
     expect(text).toContain("[REDACTED]");
   });
 });
+
+describe("M18 — replaceInProject is captured for /undo and the post-edit hook (#226)", () => {
+  it("snapshots the match-set before the edit (so /undo restores) and reports changedPaths after", () => {
+    const root = join(tmpdir(), `mm-rip-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "a.ts"), "const OLDNAME = 1;");
+    try {
+      const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+      const priv = loop as unknown as {
+        snapshotEdit: (t: number, n: string, i: Record<string, unknown>) => void;
+        changedPaths: (n: string, i: Record<string, unknown>) => string[];
+      };
+      const input = { find: "OLDNAME", replace: "NEWNAME", isRegex: false };
+
+      // Before the edit: snapshot captures a.ts (which contains "OLDNAME").
+      priv.snapshotEdit(1, "replaceInProject", input);
+      // The tool would now do the replace; simulate it.
+      writeFileSync(join(root, "a.ts"), "const NEWNAME = 1;");
+
+      // Post-edit hook gets the right changed path even though "OLDNAME" is gone.
+      expect(priv.changedPaths("replaceInProject", input)).toEqual(["a.ts"]);
+
+      // /undo restores the original content.
+      expect(loop.undoLastEdit()).toMatch(/Revert|Undid|restored/i);
+      expect(readFileSync(join(root, "a.ts"), "utf8")).toBe("const OLDNAME = 1;");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("M18 — session auto-title (#227)", () => {
+  it("titles a new session from the first user message", async () => {
+    const root = join(tmpdir(), `mm-title-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() { yield { type: "text", text: "ok" }; yield { type: "done" }; },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+    try {
+      const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+      await loop.initPersistence({});
+      await collect(loop.run("fix the auth bug please"));
+      const sessions = loop.listSessions();
+      expect(sessions[0].title).toBe("fix the auth bug please");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+import { handleRagCommand } from "../rag/manager.js";
+
+describe("M18 — sub-agents get RAG context (#229)", () => {
+  it("injects retrieved document context into the sub-agent's turn", async () => {
+    const root = join(tmpdir(), `mm-subrag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "docs", "auth.md"), "# Auth\nLogin uses a JWT token kept in a session cookie.");
+    await handleRagCommand("add docs", root);
+
+    const subMessages: Array<{ role: string; content: string }> = [];
+    let calls = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "t1", toolName: "task", argumentsJson: JSON.stringify({ objective: "explain the jwt login flow" }) } };
+          yield { type: "done" };
+        } else if (calls === 2) {
+          subMessages.push(...req.messages); // sub-agent turn
+          yield { type: "text", text: "the jwt flow" };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+
+    try {
+      const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+      await collect(loop.run("delegate the auth investigation"));
+      const sys = subMessages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+      expect(sys).toContain("JWT token");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

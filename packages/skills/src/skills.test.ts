@@ -278,3 +278,41 @@ describe("SkillCli", () => {
     expect(existsSync(skillFile)).toBe(true);
   });
 });
+
+import type { SkillDefinition } from "./skill-loader.js";
+import type { ToolRegistry } from "@metalmind/tools";
+
+describe("SkillManager tool bindings (#228)", () => {
+  const mockRegistry = {
+    get: (n: string) => (n === "writeFile" || n === "readFile" ? { toolName: n } : undefined),
+    listNames: () => ["writeFile", "readFile"],
+  } as unknown as ToolRegistry;
+
+  const makeSkill = (name: string, tools: Array<{ toolName: string; allowAutoExecute?: boolean }>): SkillDefinition => ({
+    metadata: { name, description: "d" } as never,
+    content: "body",
+    tools,
+    directory: "/tmp",
+    source: "project",
+  });
+
+  it("fails activation when a skill binds an unknown tool", () => {
+    const m = new SkillManager();
+    m.setToolRegistry(mockRegistry);
+    const res = m.activate(makeSkill("bad", [{ toolName: "writeFile" }, { toolName: "doesNotExist" }]));
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("doesNotExist");
+    expect(m.isActive("bad")).toBe(false);
+  });
+
+  it("activates when all bound tools exist and exposes allowAutoExecute tools", () => {
+    const m = new SkillManager();
+    m.setToolRegistry(mockRegistry);
+    const res = m.activate(makeSkill("ok", [
+      { toolName: "writeFile", allowAutoExecute: true },
+      { toolName: "readFile" },
+    ]));
+    expect(res.success).toBe(true);
+    expect([...m.getAutoExecuteTools()]).toEqual(["writeFile"]);
+  });
+});

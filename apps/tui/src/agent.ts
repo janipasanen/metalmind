@@ -22,6 +22,7 @@ interface SessionStore {
   searchSessions(query: string): SessionRecordLite[];
   renameSession(id: string, title: string): void;
   tagSession(id: string, tags: string): void;
+  getSession?(id: string): SessionRecordLite | undefined;
 }
 
 /** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
@@ -36,7 +37,7 @@ interface McpToolClient {
 import { zodToJsonSchema } from "./zod-to-json.js";
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve, join, dirname, extname } from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent, SafetyViolation } from "@metalmind/core";
 import type { ToolAuditEntry } from "@metalmind/tools";
@@ -442,6 +443,7 @@ export class AgentLoop {
   private remoteBrain = false;
   private subagentDepth = 0;
   private pendingImages: string[] = [];
+  private pendingReplaceTargets: string[] = []; // files a replaceInProject is about to change (#226)
   private auditLog = new AuditLog();
   private editStack: EditSet[] = [];
   private redoStack: EditSet[] = [];
@@ -1446,6 +1448,8 @@ export class AgentLoop {
     if (!(this.safetyValidator.requiresApproval(toolName) || this.mcpTools.has(toolName))) return false;
     // A persisted allowlist can pre-approve specific tools/paths/commands (#220).
     if (isAllowlisted(loadXdgConfig().approvalAllowlist, toolName, input)) return false;
+    // An active skill that binds this tool with allowAutoExecute pre-approves it (#228).
+    if (this.skillManager.getAutoExecuteTools().has(toolName)) return false;
     return true;
   }
 
@@ -1506,6 +1510,24 @@ export class AgentLoop {
   }
 
   /** Snapshot file contents before a mutating tool runs, grouped per turn (#144). */
+  /** Files a replaceInProject would change — the same ripgrep match-set the tool uses (#226). */
+  private replaceMatchFiles(input: Record<string, unknown>): string[] {
+    const find = typeof input.find === "string" ? input.find : "";
+    if (!find) return [];
+    const args = ["--files-with-matches"];
+    if (input.isRegex !== true) args.push("--fixed-strings");
+    args.push("--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
+    if (typeof input.include === "string") args.push("--glob", input.include);
+    args.push("-e", find, ".");
+    try {
+      const rg = spawnSync("rg", args, { cwd: this.projectRoot, encoding: "utf-8", timeout: 30_000, maxBuffer: 10 * 1024 * 1024 });
+      if (rg.status !== 0 && rg.status !== 1) return [];
+      return (rg.stdout ?? "").split("\n").filter(Boolean).map((p) => p.replace(/^\.\//, ""));
+    } catch {
+      return [];
+    }
+  }
+
   private snapshotEdit(turn: number, toolName: string, input: Record<string, unknown>): void {
     const targets: string[] = [];
     if (MUTATING_FILE_TOOLS.has(toolName) && typeof input.path === "string") {
@@ -1517,6 +1539,12 @@ export class AgentLoop {
       for (const e of input.edits as Array<{ path?: unknown }>) {
         if (typeof e?.path === "string") targets.push(e.path);
       }
+    } else if (toolName === "replaceInProject") {
+      // Compute the match-set before the edit (so `find` is still present) and
+      // remember it for the post-edit hook, which runs after `find` is replaced (#226).
+      const matches = this.replaceMatchFiles(input);
+      targets.push(...matches);
+      this.pendingReplaceTargets = matches;
     } else {
       return;
     }
@@ -1773,6 +1801,9 @@ export class AgentLoop {
       },
       { role: "user", content: objective },
     ];
+    // Ground the sub-agent in retrieved documents too, keyed on its objective (#229).
+    const ragContext = await retrieveContext(this.projectRoot, objective).catch(() => null);
+    if (ragContext) this.history.splice(1, 0, { role: "system", content: ragContext });
     try {
       let finalText = "";
       for await (const ev of this.agenticLoop([provider], this.toolDefs(), { signal, maxIterations: 6 })) {
@@ -1950,6 +1981,12 @@ export class AgentLoop {
     if (toolName === "moveFile" && typeof input.destination === "string") return [input.destination];
     if (toolName === "multiEdit" && Array.isArray(input.edits)) {
       return [...new Set((input.edits as Array<{ path?: unknown }>).filter((e) => typeof e?.path === "string").map((e) => e.path as string))];
+    }
+    if (toolName === "replaceInProject") {
+      // Reuse the match-set captured by snapshotEdit (the `find` string is gone post-edit) (#226).
+      const t = this.pendingReplaceTargets;
+      this.pendingReplaceTargets = [];
+      return t;
     }
     return [];
   }
@@ -2284,8 +2321,13 @@ export class AgentLoop {
   private saveSession(): void {
     if (!this.sessionStore || !this.sessionId) return;
     try {
-      // Use the first user message as the session title if not already set.
       this.sessionStore.saveMessages(this.sessionId, this.history);
+      // Auto-title from the first user message if the session has no title yet (#227).
+      const existing = this.sessionStore.getSession?.(this.sessionId);
+      if (existing && !existing.title.trim()) {
+        const firstUser = this.history.find((m) => m.role === "user")?.content?.trim();
+        if (firstUser) this.sessionStore.renameSession(this.sessionId, firstUser.replace(/\s+/g, " ").slice(0, 60));
+      }
     } catch {
       // persistence failure must never break a turn
     }
