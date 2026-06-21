@@ -54,3 +54,12 @@ describe("McpHttpClient resources & prompts (#219)", () => {
     expect(await client.getPrompt("greet")).toBe("system: You are helpful.\nuser: Hi");
   });
 });
+
+describe("McpHttpClient 401 guidance (#225)", () => {
+  afterEach(() => vi.restoreAllMocks());
+  it("turns a 401 into actionable re-auth guidance", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, text: async () => "Unauthorized" }));
+    const client = new McpHttpClient("https://mcp.example/rpc");
+    await expect(client.listResources()).rejects.toThrow(/401 Unauthorized.*\/mcp auth/);
+  });
+});

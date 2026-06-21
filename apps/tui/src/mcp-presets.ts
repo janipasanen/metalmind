@@ -32,6 +32,8 @@ export interface McpPreset {
   env?: Record<string, string>;
   headers?: Record<string, string>;
   authType?: "none" | "oauth2" | "bearer";
+  /** OAuth endpoints for authType "oauth2"; values may contain {{placeholders}} (#224). */
+  oauth?: { authEndpoint: string; tokenEndpoint: string; clientId: string; scope?: string };
   inputs: PresetInput[];
   docsUrl?: string;
 }
@@ -82,7 +84,15 @@ export const MCP_PRESETS: McpPreset[] = [
     transport: "http",
     url: "https://mcp.atlassian.com/v1/sse",
     authType: "oauth2",
-    inputs: [],
+    oauth: {
+      authEndpoint: "https://auth.atlassian.com/authorize",
+      tokenEndpoint: "https://auth.atlassian.com/oauth/token",
+      clientId: "{{clientId}}",
+      scope: "read:jira-work read:confluence-content.all offline_access",
+    },
+    inputs: [
+      { key: "clientId", label: "Atlassian OAuth app client ID", required: true },
+    ],
     docsUrl: "https://support.atlassian.com/rovo/docs/setting-up-ides/",
   },
   {
@@ -184,6 +194,16 @@ export function materializePreset(preset: McpPreset, supplied: Record<string, st
       }
       if (Object.keys(headers).length > 0) base.headers = headers;
     }
+  }
+
+  // Emit OAuth endpoints so /mcp auth has what it needs (#224).
+  if (preset.oauth) {
+    base.oauth = {
+      authEndpoint: fill(preset.oauth.authEndpoint, values),
+      tokenEndpoint: fill(preset.oauth.tokenEndpoint, values),
+      clientId: fill(preset.oauth.clientId, values),
+      ...(preset.oauth.scope ? { scope: fill(preset.oauth.scope, values) } : {}),
+    };
   }
 
   return { config: base, missing };

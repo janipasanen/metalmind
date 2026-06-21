@@ -38,6 +38,9 @@ export class McpHttpClient {
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
     });
     if (!res.ok) {
+      if (res.status === 401) {
+        throw new Error(`MCP ${method} failed: 401 Unauthorized — run "/mcp auth <server>" to (re)authorize.`);
+      }
       throw new Error(`MCP ${method} failed: ${res.status} ${await res.text()}`);
     }
     const json = (await res.json()) as JsonRpcResponse;

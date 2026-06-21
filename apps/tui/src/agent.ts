@@ -50,7 +50,7 @@ import { retrieveContext } from "./rag/manager.js";
 import { mentionsContextBlock } from "./mentions.js";
 import { isAllowlisted } from "./approval-allowlist.js";
 import { logError } from "./error-log.js";
-import { loadTokens } from "./mcp/oauth.js";
+import { loadTokens, getValidAccessToken } from "./mcp/oauth.js";
 
 interface BufferedAttempt {
   text: string;
@@ -634,11 +634,19 @@ export class AgentLoop {
       if (!srv.enabled) continue;
       try {
         if (srv.url) {
-          // HTTP/SSE transport. For OAuth servers, attach a stored bearer token (#199).
+          // HTTP/SSE transport. For OAuth servers, attach a bearer — refreshing an
+          // expired token first when the server's oauth endpoints are known (#199/#225).
           const headers = { ...(srv.headers ?? {}) };
           if (srv.authType === "oauth2") {
-            const tokens = await loadTokens(id).catch(() => null);
-            if (tokens?.accessToken) headers.Authorization = `${tokens.tokenType ?? "Bearer"} ${tokens.accessToken}`;
+            let token: string | null = null;
+            if (srv.oauth?.tokenEndpoint && srv.oauth?.clientId) {
+              token = await getValidAccessToken(id, {
+                tokenEndpoint: srv.oauth.tokenEndpoint,
+                clientId: srv.oauth.clientId,
+              }).catch(() => null);
+            }
+            if (!token) token = (await loadTokens(id).catch(() => null))?.accessToken ?? null;
+            if (token) headers.Authorization = `Bearer ${token}`;
           }
           const client = new McpHttpClient(srv.url, headers);
           await client.initialize();

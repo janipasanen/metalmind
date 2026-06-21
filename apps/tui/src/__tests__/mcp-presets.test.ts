@@ -44,7 +44,7 @@ describe("MCP preset catalog (#192)", () => {
   });
 
   it("carries OAuth http presets through with authType + url", () => {
-    const { config, missing } = materializePreset(findPreset("atlassian")!, {});
+    const { config, missing } = materializePreset(findPreset("atlassian")!, { clientId: "cid" });
     expect(missing).toEqual([]);
     expect(config.url).toBe("https://mcp.atlassian.com/v1/sse");
     expect(config.authType).toBe("oauth2");
@@ -127,5 +127,24 @@ describe("formatMcpStatus (#169)", () => {
   });
   it("handles the empty case", () => {
     expect(formatMcpStatus([])).toContain("No MCP servers");
+  });
+});
+
+describe("OAuth preset materialization (#224)", () => {
+  it("emits config.oauth with the clientId filled from inputs", () => {
+    const { config, missing } = materializePreset(findPreset("atlassian")!, { clientId: "my-client-id" });
+    expect(missing).toEqual([]);
+    expect(config.authType).toBe("oauth2");
+    expect(config.oauth).toEqual({
+      authEndpoint: "https://auth.atlassian.com/authorize",
+      tokenEndpoint: "https://auth.atlassian.com/oauth/token",
+      clientId: "my-client-id",
+      scope: "read:jira-work read:confluence-content.all offline_access",
+    });
+  });
+
+  it("requires the clientId input", () => {
+    const { missing } = materializePreset(findPreset("atlassian")!, {});
+    expect(missing).toContain("clientId");
   });
 });
