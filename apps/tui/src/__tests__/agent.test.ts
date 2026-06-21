@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import type { ChatStreamEvent } from "../hooks/useChat.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -137,6 +137,24 @@ import {
 } from "../agent.js";
 
 const mockCreateProvider = vi.mocked(createProvider);
+
+// Isolate these tests from the developer's personal config — persisted tier
+// overrides / remote-brain would otherwise change routing outcomes (#235).
+let __cfgBackup: string | null = null;
+beforeAll(() => {
+  __cfgBackup = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null;
+  try {
+    const c = __cfgBackup ? JSON.parse(__cfgBackup) : {};
+    delete c.tierModels;
+    delete c.remoteBrain;
+    writeFileSync(XDG_CONFIG_FILE, JSON.stringify(c));
+  } catch {
+    /* ignore */
+  }
+});
+afterAll(() => {
+  if (__cfgBackup !== null) writeFileSync(XDG_CONFIG_FILE, __cfgBackup);
+});
 
 describe("AgentLoop", () => {
   beforeEach(() => {
