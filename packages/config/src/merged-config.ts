@@ -1,4 +1,4 @@
-import { loadXdgConfig, updateXdgConfig, XDG_CONFIG_DIR, XDG_CONFIG_FILE } from "@metalmind/config";
+import { loadXdgConfig, XDG_CONFIG_DIR, XDG_CONFIG_FILE } from "@metalmind/config";
 import type { UserConfig } from "@metalmind/config";
 
 /**
@@ -16,12 +16,6 @@ export function loadMergedConfig(): UserConfig {
   return globalConfig;
 }
 
-/**
- * Save config to global store
- */
-export function saveGlobalConfig(updates: Partial<UserConfig>): void {
-  updateXdgConfig(updates);
-}
 
 /**
  * Get global config dir and file paths

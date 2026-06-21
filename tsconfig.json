@@ -14,9 +14,6 @@
       "path": "packages/tools"
     },
     {
-      "path": "packages/context"
-    },
-    {
       "path": "packages/memory"
     },
     {

@@ -796,13 +796,25 @@ export default function App({ config }: AppProps) {
     return activeModel;
   };
 
+  // The live route for the status panel's "Main", parsed from activeModel (which
+  // every route/model-switch updates) so it tracks the active model rather than
+  // the startup config (#248). Strips the " [tier…]" suffix, splits on the first
+  // "/"; provider has no slash and configured models use ":" tags, not "/".
+  const activeMain = (() => {
+    const base = activeModel.replace(/\s*\[[^\]]*\]\s*$/, "");
+    const slash = base.indexOf("/");
+    return slash >= 0
+      ? { provider: base.slice(0, slash), model: base.slice(slash + 1) }
+      : { provider: config.provider, model: base };
+  })();
+
   return (
     <Box flexDirection="column" padding={1} height="100%">
       <Header projectName={projectName} modelName={getActiveModel()} accent={theme.colors.accent} />
       <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} scrollOffset={scrollOffset} pageSize={CHAT_PAGE_SIZE} />
       <MultiAgentStatus
-        mainModel={config.model}
-        mainProvider={config.provider}
+        mainModel={activeMain.model}
+        mainProvider={activeMain.provider}
         localWorkerModel={localWorkerModel}
         localWorkerProvider={localWorkerProvider}
         localWorkerAvailable={localWorkerAvailable}

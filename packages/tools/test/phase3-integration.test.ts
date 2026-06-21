@@ -8,7 +8,6 @@ import { allGitTools } from "../src/git/git-tools.js";
 import { runShellTools } from "../src/shell/shell-tools.js";
 import { allReadOnlyTools } from "../src/filesystem/readonly-tools.js";
 import { allWriteTools } from "../src/filesystem/write-tools.js";
-import { CommitMessageGenerator } from "../src/git/commit-generator.js";
 import { AuditLog } from "../src/ui/audit-log.js";
 import { RepoMap } from "../src/context/repo-map.js";
 
@@ -55,8 +54,7 @@ describe("Phase 3 integration — Git-native workflow", () => {
     const stagedDiff = await registry.execute("gitDiffFile", { path: "index.ts", staged: true }, ctx());
     expect(stagedDiff).toContain('+console.log("hello");');
 
-    const msg = CommitMessageGenerator.generateFromRepo(testDir);
-    await registry.execute("gitCommit", { message: msg.fullMessage }, ctx());
+    await registry.execute("gitCommit", { message: "feat: add index.ts" }, ctx());
 
     const log = execSync("git log --oneline", { cwd: testDir, encoding: "utf-8" }).trim();
     expect(log).toContain(":");

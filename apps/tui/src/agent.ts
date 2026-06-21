@@ -475,7 +475,10 @@ export class AgentLoop {
   private coordinator: Coordinator | null = null;
   private safetyValidator: SafetyValidator;
   private _forcedTier: ForcedTier = null;
-  private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string }>();
+  private tierOverrides = new Map<1 | 2 | 3, { provider: string; model: string; baseUrl?: string }>();
+  /** Transient "you're near the tool-use iteration cap" notice, injected into the
+   *  next model request only (never persisted to history) (#248). */
+  private iterationCapNotice: string | null = null;
   private remoteBrain = false;
   private subagentDepth = 0;
   private pendingImages: string[] = [];
@@ -518,7 +521,7 @@ export class AgentLoop {
     for (const [tier, tm] of Object.entries(xdg.tierModels ?? {})) {
       const t = Number(tier);
       if ((t === 1 || t === 2 || t === 3) && tm?.provider && tm?.model) {
-        this.tierOverrides.set(t as 1 | 2 | 3, { provider: tm.provider, model: tm.model });
+        this.tierOverrides.set(t as 1 | 2 | 3, { provider: tm.provider, model: tm.model, baseUrl: tm.baseUrl });
       }
     }
     this.rebuildRedactor();
@@ -588,17 +591,17 @@ export class AgentLoop {
 
   /** Override the provider/model used when a specific tier is active, and persist it (#185).
    *  Tier 2 = the local Ollama model, tier 3 = the remote (Ollama Cloud) model. */
-  setTierModel(tier: 1 | 2 | 3, provider: string, model: string): void {
-    this.tierOverrides.set(tier, { provider, model });
+  setTierModel(tier: 1 | 2 | 3, provider: string, model: string, baseUrl?: string): void {
+    this.tierOverrides.set(tier, { provider, model, baseUrl });
     try {
       const xdg = loadXdgConfig();
-      saveXdgConfig({ ...xdg, tierModels: { ...(xdg.tierModels ?? {}), [tier]: { provider, model } } });
+      saveXdgConfig({ ...xdg, tierModels: { ...(xdg.tierModels ?? {}), [tier]: { provider, model, ...(baseUrl ? { baseUrl } : {}) } } });
     } catch {
       // persistence is best-effort
     }
   }
 
-  getTierModel(tier: 1 | 2 | 3): { provider: string; model: string } | undefined {
+  getTierModel(tier: 1 | 2 | 3): { provider: string; model: string; baseUrl?: string } | undefined {
     return this.tierOverrides.get(tier);
   }
 
@@ -801,14 +804,23 @@ export class AgentLoop {
     return `${this.config.provider}/${this.config.model}`;
   }
 
-  private getProvider(provider: string, model: string): ModelProvider {
-    const key = `${provider}/${model}`;
+  private getProvider(provider: string, model: string, baseUrlOverride?: string): ModelProvider {
+    // A per-tier override may pin a specific host for this provider/model (#248).
+    let baseUrl = baseUrlOverride;
+    if (!baseUrl) {
+      for (const ov of this.tierOverrides.values()) {
+        if (ov.provider === provider && ov.model === model && ov.baseUrl) { baseUrl = ov.baseUrl; break; }
+      }
+    }
+    const creds =
+      provider === this.config.provider
+        ? { apiKey: this.config.apiKey, baseUrl: baseUrl ?? this.config.baseUrl }
+        : { ...providerCredentials(provider), ...(baseUrl ? { baseUrl } : {}) };
+    // Key by baseUrl too — two tiers can share a provider/model but target
+    // different hosts, and they must not collide in the cache (#248).
+    const key = `${provider}/${model}@${creds.baseUrl ?? ""}`;
     let cached = this.providerCache.get(key);
     if (!cached) {
-      const creds =
-        provider === this.config.provider
-          ? { apiKey: this.config.apiKey, baseUrl: this.config.baseUrl }
-          : providerCredentials(provider);
       // Clear, actionable error when the active cloud provider has no key (#231).
       // Scoped to the active provider — auto-escalation to other tiers keeps its
       // own fallback handling rather than hard-failing here.
@@ -852,6 +864,26 @@ export class AgentLoop {
     return [...builtIn, ...mcp, ...delegate, ...task, ...remember];
   }
 
+  /** Provider for the cheap triage classification — prefer a local model so an
+   *  ambiguous task isn't classified by the (possibly metered cloud) active
+   *  provider (#248). Local providers need no key, and buildTriage already
+   *  falls back to heuristic routing if the call fails. */
+  private triageProvider(): ModelProvider {
+    const localOverride = this.tierOverrides.get(1) ?? this.tierOverrides.get(2);
+    if (localOverride) {
+      return this.getProvider(localOverride.provider, localOverride.model, localOverride.baseUrl);
+    }
+    if (this.router) {
+      try {
+        const d = this.router.decisionForTier("tier1-local", "triage", false);
+        return this.getProvider(d.provider, d.modelId);
+      } catch {
+        /* fall through to the active provider */
+      }
+    }
+    return this.getProvider(this.config.provider, this.config.model);
+  }
+
   /** A triage function that buckets a request by complexity.
    *
    * Short conversational messages are classified locally without calling any
@@ -872,7 +904,7 @@ export class AgentLoop {
       if (words <= 3) return "SIMPLE";
 
       try {
-        const local = this.getProvider(this.config.provider, this.config.model);
+        const local = this.triageProvider();
         const res = await local.completeChat({
           messages: [
             {
@@ -948,8 +980,12 @@ export class AgentLoop {
         if (signal?.aborted) return;
         let emitted = false;
         try {
+          // Append the transient iteration-cap notice (if any) to this request
+          // only — keep it out of persisted history (#248).
+          const messages = [...this.history];
+          if (this.iterationCapNotice) messages.push({ role: "system", content: this.iterationCapNotice });
           for await (const ev of provider.streamChatCompletion({
-            messages: [...this.history],
+            messages,
             tools: toolDefs,
             signal,
           })) {
@@ -1275,6 +1311,15 @@ export class AgentLoop {
         }
         pending = undefined;
       } else {
+        // Disclose the tool-use iteration cap as the model approaches it, so it
+        // can wrap up instead of being cut off mid-plan with no warning (#248).
+        const remaining = maxIterations - iterations;
+        this.iterationCapNotice =
+          remaining <= 0
+            ? `This is your final tool-use iteration (cap ${maxIterations}). Give your best final answer now from what you have — no further tool calls will run.`
+            : remaining === 1
+              ? `You have 1 tool-use iteration left before the cap (${maxIterations}). Finish any remaining tool calls and prepare your final answer.`
+              : null;
         // Time each model request from here so latency is per-request, not cumulative (#209).
         this.attemptStartMs = Date.now();
         let sawError = false;

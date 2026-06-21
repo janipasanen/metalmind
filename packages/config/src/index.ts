@@ -3,7 +3,6 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { MetalmindConfigSchema, type MetalmindConfig } from "@metalmind/schemas";
-import { loadMergedConfig, saveGlobalConfig } from "./merged-config.js";
 
 export const CONFIG_FILE = "metalmind.yaml";
 export const XDG_CONFIG_DIR = join(homedir(), ".config", "metalmind");
@@ -98,8 +97,9 @@ export interface UserConfig {
   };
   /** Soft session spend cap in USD; once reached, cloud routing downgrades to local (#182). */
   budgetUsd?: number;
-  /** Persisted per-tier model overrides (1=local MLX, 2=local Ollama, 3=cloud) (#185). */
-  tierModels?: Record<string, { provider: string; model: string }>;
+  /** Persisted per-tier model overrides (1=local MLX, 2=local Ollama, 3=cloud) (#185).
+   *  An optional baseUrl lets a tier point at a specific host (#248). */
+  tierModels?: Record<string, { provider: string; model: string; baseUrl?: string }>;
   /** Remote-brain mode: cloud model coordinates and delegates bounded subtasks to the local model (#186). */
   remoteBrain?: boolean;
   /** Saved, reusable prompt templates by name; {{vars}} are filled at use time (#201). */
@@ -255,4 +255,4 @@ export function updateXdgConfig(updates: Partial<UserConfig>): void {
 
 export { themes, THEME_DIR, THEME_FILE, switchTheme, loadTheme } from "./themes.js";
 export type { Theme } from "./themes.js";
-export { loadMergedConfig, saveGlobalConfig } from "./merged-config.js";
+export { loadMergedConfig } from "./merged-config.js";

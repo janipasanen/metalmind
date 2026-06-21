@@ -16,5 +16,3 @@ export type { LspDiagnostic } from "./lsp-client.js";
 export { createDiagnosticsTool } from "./diagnostics-tool.js";
 export { RepoMapV2 } from "./repo-map-v2.js";
 export type { EnhancedEntry, RepoMapV2Options } from "./repo-map-v2.js";
-export { ContextBudgetOptimizer } from "./context-budget.js";
-export type { BudgetAllocation, ContextBudgetResult } from "./context-budget.js";

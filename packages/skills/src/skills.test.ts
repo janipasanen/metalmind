@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { SkillLoader } from "./skill-loader.js";
 import { SkillManager } from "./skill-manager.js";
-import { SkillCli } from "./skill-cli.js";
 
 const TEST_PROJECT = "/tmp/metalmind-test-skills";
 const TEST_GLOBAL = join(homedir(), ".metalmind-test-skills");
@@ -201,81 +200,6 @@ describe("SkillManager", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("conflicts");
-  });
-});
-
-describe("SkillCli", () => {
-  beforeEach(() => setup());
-  afterEach(() => teardown());
-
-  it("lists available skills", () => {
-    const loader = new SkillLoader(TEST_GLOBAL);
-    const manager = new SkillManager();
-    const cli = new SkillCli(loader, manager, TEST_PROJECT);
-
-    const result = cli.list();
-    expect(result.success).toBe(true);
-    expect(result.message).toContain("test-skill");
-  });
-
-  it("activates a skill via name", () => {
-    const loader = new SkillLoader(TEST_GLOBAL);
-    const manager = new SkillManager();
-    const cli = new SkillCli(loader, manager, TEST_PROJECT);
-
-    const result = cli.activate("test-skill");
-    expect(result.success).toBe(true);
-    expect(manager.isActive("test-skill")).toBe(true);
-  });
-
-  it("fails to activate unknown skill", () => {
-    const loader = new SkillLoader(TEST_GLOBAL);
-    const manager = new SkillManager();
-    const cli = new SkillCli(loader, manager, TEST_PROJECT);
-
-    const result = cli.activate("nonexistent");
-    expect(result.success).toBe(false);
-  });
-
-  it("deactivates a skill", () => {
-    const loader = new SkillLoader(TEST_GLOBAL);
-    const manager = new SkillManager();
-    const cli = new SkillCli(loader, manager, TEST_PROJECT);
-
-    cli.activate("test-skill");
-    const result = cli.deactivate("test-skill");
-    expect(result.success).toBe(true);
-    expect(manager.isActive("test-skill")).toBe(false);
-  });
-
-  it("shows skill details", () => {
-    const loader = new SkillLoader(TEST_GLOBAL);
-    const manager = new SkillManager();
-    const cli = new SkillCli(loader, manager, TEST_PROJECT);
-
-    const result = cli.show("test-skill");
-    expect(result.success).toBe(true);
-    expect(result.message).toContain("test-skill");
-    expect(result.message).toContain("1.0.0");
-  });
-
-  it("creates a new skill from template", () => {
-    const loader = new SkillLoader(TEST_GLOBAL);
-    const manager = new SkillManager();
-    const cli = new SkillCli(loader, manager, TEST_PROJECT);
-
-    const result = cli.create("new-skill", { description: "My new skill" });
-    expect(result.success).toBe(true);
-
-    // Verify the file was created
-    const skillFile = join(
-      TEST_PROJECT,
-      ".metalmind",
-      "skills",
-      "new-skill",
-      "SKILL.md",
-    );
-    expect(existsSync(skillFile)).toBe(true);
   });
 });
 

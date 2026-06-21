@@ -1888,3 +1888,74 @@ describe("M21 — approval scope + audit redaction (#241, #238)", () => {
     expect(JSON.stringify(e?.input)).toContain("[REDACTED]");
   });
 });
+
+describe("AgentLoop routing/display polish (#248)", () => {
+  // setTierModel persists tierModels to the real XDG config — snapshot & restore
+  // so this block can't leak overrides into other tests.
+  let cfgBak: string | null = null;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    cfgBak = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null;
+  });
+  afterEach(() => {
+    if (cfgBak !== null) writeFileSync(XDG_CONFIG_FILE, cfgBak);
+  });
+
+  it("discloses the tool-use iteration cap to the model on the final iteration", async () => {
+    const root = join(tmpdir(), `mm-cap-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const seen: Array<Array<{ role: string; content: string }>> = [];
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: 128000 } as never,
+      async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+        seen.push(req.messages);
+        // Always ask for a read-only tool so the loop runs to the iteration cap.
+        yield { type: "tool-call", toolCall: { toolCallId: `t${seen.length}`, toolName: "readFile", argumentsJson: JSON.stringify({ path: "a.ts" }) } };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    loop.setForcedTier(3); // deterministic route, no triage/network
+    await collect(loop.run("keep reading"));
+
+    const hasCap = (msgs: Array<{ role: string; content: string }>) =>
+      msgs.some((m) => m.role === "system" && /final tool-use iteration/i.test(m.content));
+    // The first request has no cap notice; the last one does.
+    expect(hasCap(seen[0])).toBe(false);
+    expect(hasCap(seen[seen.length - 1])).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("carries a per-tier baseUrl override through to the provider (#248)", async () => {
+    const root = join(tmpdir(), `mm-tierurl-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const captured: Array<{ provider: string; model: string; baseUrl?: string }> = [];
+    mockCreateProvider.mockImplementation((provider: string, model: string, opts?: { baseUrl?: string }) => {
+      captured.push({ provider, model, baseUrl: opts?.baseUrl });
+      return makeProvider([{ type: "text", text: "ok" }, { type: "done" }]) as never;
+    });
+
+    const router = new ModelRouter({
+      tier1Model: "local-small", tier1Provider: "mlx",
+      tier2Model: "local-small", tier2Provider: "mlx",
+      tier3Model: "claude", tier3Provider: "anthropic",
+      localFirst: true,
+    });
+    const loop = new AgentLoop({ provider: "mlx", model: "local-small", explicit: false }, { projectRoot: root, router });
+    loop.setTierModel(3, "ollama-cloud", "gemini-3-flash-preview:cloud", "http://custom-host:9999");
+    loop.setForcedTier(3);
+    await collect(loop.run("hello"));
+
+    expect(
+      captured.some(
+        (c) => c.provider === "ollama-cloud" && c.model === "gemini-3-flash-preview:cloud" && c.baseUrl === "http://custom-host:9999",
+      ),
+    ).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+});

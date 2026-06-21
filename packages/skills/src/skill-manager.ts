@@ -1,4 +1,4 @@
-import type { SkillDefinition, SkillToolBinding } from "./skill-loader.js";
+import type { SkillDefinition } from "./skill-loader.js";
 import type { ToolRegistry } from "@metalmind/tools";
 
 export interface ActiveSkill {
@@ -127,19 +127,6 @@ export class SkillManager {
     }
 
     return prompts.join("\n\n");
-  }
-
-  /**
-   * Get tool bindings from all active skills.
-   */
-  getActiveToolBindings(): SkillToolBinding[] {
-    const bindings: SkillToolBinding[] = [];
-    for (const active of this.activeSkills.values()) {
-      if (active.skill.tools) {
-        bindings.push(...active.skill.tools);
-      }
-    }
-    return bindings;
   }
 
   /**
