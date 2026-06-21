@@ -1200,7 +1200,8 @@ export class AgentLoop {
       if (pending) {
         assistantText = pending.text;
         pendingToolCalls.push(...pending.toolCalls);
-        if (assistantText) yield { type: "text", text: assistantText };
+        // Scrub secrets the model may have echoed before they reach the UI (#223).
+        if (assistantText) yield { type: "text", text: this.redactor.redact(assistantText) };
         for (const tc of pendingToolCalls) {
           yield { type: "tool-call", toolCall: { toolName: tc.toolName, argumentsJson: tc.argumentsJson } };
         }
@@ -1212,7 +1213,7 @@ export class AgentLoop {
         for await (const event of this.streamResilient(providers, toolDefs, signal)) {
           if (event.type === "text") {
             assistantText += event.text;
-            yield { type: "text", text: event.text };
+            yield { type: "text", text: this.redactor.redact(event.text) };
           } else if (event.type === "tool-call") {
             pendingToolCalls.push(event.toolCall);
             yield {
@@ -1231,19 +1232,20 @@ export class AgentLoop {
         if (sawError) { yield { type: "done" }; return; }
         // User cancelled mid-stream: persist partial output and end cleanly.
         if (signal?.aborted) {
-          if (assistantText) this.history.push({ role: "assistant", content: assistantText });
+          if (assistantText) this.history.push({ role: "assistant", content: this.redactor.redact(assistantText) });
           yield { type: "done" };
           return;
         }
       }
 
       if (pendingToolCalls.length === 0) {
-        if (assistantText) this.history.push({ role: "assistant", content: assistantText });
+        if (assistantText) this.history.push({ role: "assistant", content: this.redactor.redact(assistantText) });
         yield { type: "done" };
         return;
       }
 
-      this.history.push({ role: "assistant", content: assistantText, toolCalls: pendingToolCalls });
+      // Redact the full accumulated text before persisting/replaying it (#223).
+      this.history.push({ role: "assistant", content: this.redactor.redact(assistantText), toolCalls: pendingToolCalls });
 
       // Parallel fast-path: when every pending call is a side-effect-free read-only
       // tool (and not an MCP tool), run them concurrently instead of one-by-one (#206).

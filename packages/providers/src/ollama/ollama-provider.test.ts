@@ -543,3 +543,29 @@ describe("OllamaProvider message conversion", () => {
     expect(assistant.tool_calls![0].function.arguments).toEqual({ path: "/a.ts" });
   });
 });
+
+describe("OllamaProvider completeChat tool calls (#222)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  it("forwards tools and surfaces tool calls from the response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ message: { role: "assistant", content: "", tool_calls: [
+        { id: "tc-1", function: { name: "readFile", arguments: { path: "a.ts" } } },
+      ] } }),
+      text: async () => "{}",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new OllamaProvider("test");
+    const res = await p.completeChat({
+      messages: [{ role: "user", content: "read it" }],
+      tools: [{ name: "readFile", description: "read a file", inputSchema: { type: "object" } }],
+    } as never);
+    // tools forwarded
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(body.tools?.[0]?.function?.name).toBe("readFile");
+    // tool calls surfaced
+    expect(res.message.toolCalls?.[0]).toEqual({
+      toolCallId: "tc-1", toolName: "readFile", argumentsJson: JSON.stringify({ path: "a.ts" }),
+    });
+  });
+});

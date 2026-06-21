@@ -41,3 +41,30 @@ describe("LspClient definition/references/hover (#178)", () => {
     expect(await client.hover("src/index.ts", 0, 0)).toBeNull();
   });
 });
+
+import { vi } from "vitest";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+describe("LspClient getDiagnostics syncs real content (#221)", () => {
+  it("sends the file's actual content via didOpen, not an empty buffer", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-lsp221-"));
+    writeFileSync(join(dir, "a.ts"), "export const x: number = 'oops';");
+    const client = new LspClient(dir);
+    const spy = vi
+      .spyOn(client as unknown as { sendNotification: (m: string, p: unknown) => void }, "sendNotification")
+      .mockImplementation(() => {});
+    try {
+      await client.getDiagnostics("a.ts");
+      const open = spy.mock.calls.find((c) => c[0] === "textDocument/didOpen");
+      expect(open).toBeDefined();
+      const text = (open![1] as { textDocument: { text: string } }).textDocument.text;
+      expect(text).toContain("export const x");
+      expect(text).not.toBe("");
+    } finally {
+      spy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

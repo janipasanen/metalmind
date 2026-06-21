@@ -49,6 +49,7 @@ export class LspClient {
   private rootPath: string;
   private diagnostics = new Map<string, LspDiagnostic[]>();
   private opened = new Set<string>();
+  private docVersions = new Map<string, number>();
 
   constructor(rootPath: string) {
     this.rootPath = resolve(rootPath);
@@ -112,23 +113,42 @@ export class LspClient {
    * Request diagnostics for a specific file.
    */
   async getDiagnostics(filePath: string): Promise<LspDiagnostic[]> {
-    const absPath = resolve(this.rootPath, filePath);
-    const uri = `file://${absPath}`;
-
-    // Notify the server we opened this file
-    this.sendNotification("textDocument/didOpen", {
-      textDocument: {
-        uri,
-        languageId: this.getLanguageId(filePath),
-        version: 1,
-        text: "",
-      },
-    });
+    // Sync the file's CURRENT content to the server (the old code sent text:"",
+    // so diagnostics were computed against an empty buffer) (#221).
+    const uri = this.syncDocument(filePath);
 
     // Wait briefly for diagnostics to arrive
     await new Promise((r) => setTimeout(r, 500));
 
     return this.diagnostics.get(uri) ?? [];
+  }
+
+  /** Send the file's real content via didOpen (first time) or didChange (subsequent),
+   *  so diagnostics/positions reflect the file as it is on disk now (#221). */
+  private syncDocument(filePath: string): string {
+    const absPath = resolve(this.rootPath, filePath);
+    const uri = `file://${absPath}`;
+    let text = "";
+    try {
+      text = readFileSync(absPath, "utf-8");
+    } catch {
+      text = "";
+    }
+    if (!this.opened.has(uri)) {
+      this.sendNotification("textDocument/didOpen", {
+        textDocument: { uri, languageId: this.getLanguageId(filePath), version: 1, text },
+      });
+      this.opened.add(uri);
+      this.docVersions.set(uri, 1);
+    } else {
+      const version = (this.docVersions.get(uri) ?? 1) + 1;
+      this.docVersions.set(uri, version);
+      this.sendNotification("textDocument/didChange", {
+        textDocument: { uri, version },
+        contentChanges: [{ text }], // full-document sync
+      });
+    }
+    return uri;
   }
 
   /**
@@ -153,6 +173,7 @@ export class LspClient {
         textDocument: { uri, languageId: this.getLanguageId(filePath), version: 1, text },
       });
       this.opened.add(uri);
+      this.docVersions.set(uri, 1);
     }
     return uri;
   }

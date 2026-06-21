@@ -160,6 +160,15 @@ export class OllamaProvider implements ModelProvider {
       keep_alive: OLLAMA_KEEP_ALIVE,
     };
 
+    // Forward tools so non-streaming calls can request tool use too (#222).
+    if (request.tools && request.tools.length > 0) {
+      type ToolDef = { name: string; description: string; inputSchema: Record<string, unknown> };
+      body.tools = (request.tools as ToolDef[]).map((t) => ({
+        type: "function",
+        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      }));
+    }
+
     const res = await fetchWithTimeout(`${this.baseUrl}/api/chat`, {
       method: "POST",
       headers: this.headers(),
@@ -171,12 +180,16 @@ export class OllamaProvider implements ModelProvider {
     }
 
     const data = (await res.json()) as OllamaChatResponse;
-    return {
-      message: {
-        role: "assistant",
-        content: data.message.content,
-      },
-    };
+    const message: AgentMessage = { role: "assistant", content: data.message.content };
+    // Surface tool calls the model returned, matching the streaming path (#222).
+    if (data.message.tool_calls?.length) {
+      message.toolCalls = data.message.tool_calls.map((tc) => ({
+        toolCallId: tc.id ?? `ollama-tc-${this.toolCallCounter++}`,
+        toolName: tc.function.name,
+        argumentsJson: JSON.stringify(tc.function.arguments ?? {}),
+      }));
+    }
+    return { message };
   }
 
   async *streamChatCompletion(

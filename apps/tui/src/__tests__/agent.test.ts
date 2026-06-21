@@ -1638,3 +1638,27 @@ describe("M13 — message retry / edit (#204)", () => {
     expect(loop.popLastExchange()).toBeNull();
   });
 });
+
+describe("M16 — streamed text is redacted (#223)", () => {
+  it("redacts a secret the model echoes in its streamed response", async () => {
+    const secret = "sk-supersecret-key-1234567890";
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: `the api key is ${secret} ok` };
+        yield { type: "done" };
+      },
+      async completeChat() { return { message: { role: "assistant" as const, content: "" } }; },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", apiKey: secret, explicit: true });
+    const events = await collect(loop.run("what is the key"));
+    const text = events
+      .filter((e) => e.type === "text")
+      .map((e) => (e as { type: "text"; text: string }).text)
+      .join("");
+    expect(text).not.toContain(secret);
+    expect(text).toContain("[REDACTED]");
+  });
+});
