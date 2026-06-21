@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { Box, Text } from "ink";
 import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
 import type { ModelRoutingDecision } from "@metalmind/schemas";
@@ -43,7 +43,9 @@ export default function MultiAgentStatus({
   errors = [],
   collapsed = false,
 }: MultiAgentStatusProps) {
-  const [expanded, setExpanded] = useState(!collapsed);
+  // Controlled by the parent (toggled with Ctrl+O); Ink has no click/mouse, so
+  // the panel state lives in App, not local component state (#266).
+  const expanded = !collapsed;
 
   const phaseColor = PHASE_COLORS[phase] ?? "white";
 
@@ -58,18 +60,18 @@ export default function MultiAgentStatus({
           <Text>
             {mainProvider}/{mainModel}
           </Text>
-          {localWorkerModel && (
+          {localWorkerProvider && (
             <>
               <Text dimColor> + </Text>
               <Text color={localWorkerAvailable ? "green" : "gray"}>
-                {localWorkerProvider ?? "ollama"}/{localWorkerModel}
+                {localWorkerProvider}{localWorkerModel ? `/${localWorkerModel}` : ""}
                 {!localWorkerAvailable && " (offline)"}
               </Text>
             </>
           )}
           <Text> </Text>
           <Text dimColor color="gray">
-            [press to expand]
+            [ctrl+o to expand]
           </Text>
         </Box>
       </Box>
@@ -83,7 +85,7 @@ export default function MultiAgentStatus({
           <Text bold>Models</Text>
         </Box>
         <Text dimColor color="gray">
-          [press to collapse]
+          [ctrl+o to collapse]
         </Text>
       </Box>
 
@@ -96,13 +98,13 @@ export default function MultiAgentStatus({
         </Text>
       </Box>
 
-      {localWorkerModel ? (
+      {localWorkerProvider ? (
         <Box>
           <Text bold color="green">
             Worker:{" "}
           </Text>
           <Text color={localWorkerAvailable ? "green" : "gray"}>
-            {localWorkerProvider ?? "ollama"}/{localWorkerModel}
+            {localWorkerProvider}{localWorkerModel ? `/${localWorkerModel}` : ""}
             {!localWorkerAvailable && " (offline)"}
           </Text>
         </Box>

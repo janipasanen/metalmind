@@ -106,6 +106,13 @@ export default function App({ config }: AppProps) {
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
   const [localWorkerAvailable, setLocalWorkerAvailable] = useState(false);
+  const [mcpServers, setMcpServers] = useState<Array<{ name: string; connected: boolean; toolCount: number }>>([]);
+  const [statusCollapsed, setStatusCollapsed] = useState(false);
+
+  // Mirror the agent's MCP server status into the StatusBar footer (#267).
+  const syncMcpStatus = useCallback((agent: AgentLoop) => {
+    setMcpServers(agent.getMcpStatus().map((s) => ({ name: s.id, connected: s.connected, toolCount: s.toolCount })));
+  }, []);
 
   const reloadAgent = useCallback(async () => {
     let cancelled = false;
@@ -135,6 +142,7 @@ export default function App({ config }: AppProps) {
         // background processes are released instead of leaking on each reload (#242).
         previous?.dispose();
         await agent.initPersistence({}); // reconfigure → fresh persisted session
+        syncMcpStatus(agent);
         setAgentError(null);
 
         const coordinator = agent.coordinatorInstance;
@@ -187,6 +195,7 @@ export default function App({ config }: AppProps) {
         if (!cancelled && restored.length > 0) {
           replaceMessages(restoredToChatMessages(restored));
         }
+        if (!cancelled) syncMcpStatus(agent);
 
         // Non-blocking pre-flight: warn up front on a bad key/missing model (#174).
         void agent.checkHealth().then((h) => {
@@ -271,8 +280,12 @@ export default function App({ config }: AppProps) {
       }
 
       if (input === "/clear") {
-        // Start a new persisted session rather than destroying history (#140).
+        // Start a new persisted session rather than destroying history (#140), and
+        // clear the on-screen transcript so the UI matches the session (#263).
         agentRef.current?.newSession();
+        replaceMessages([]);
+        setScrollOffset(0);
+        yield { type: "text", text: "Cleared." } as const;
         yield { type: "done" } as const;
         return;
       }
@@ -511,6 +524,7 @@ export default function App({ config }: AppProps) {
         } else if (agent && sub === "reconnect") {
           yield { type: "text", text: "Reconnecting MCP servers…" } as const;
           await agent.reconnectMcp();
+          syncMcpStatus(agent);
           yield { type: "text", text: formatMcpStatus(agent.getMcpStatus()) } as const;
         } else if (agent && (sub === "resources" || sub === "prompts" || sub === "read")) {
           // Live-client subcommands (resources/prompts) need a connected client (#219).
@@ -784,6 +798,12 @@ export default function App({ config }: AppProps) {
     sendMessage(text);
   }, [sendMessage]);
 
+  // Any modal overlay is open: each overlay owns its own input, so the global
+  // key handler and the chat InputBar must stand down to avoid double-handling (#254).
+  const anyOverlayOpen =
+    showCommandPalette || showProviderSelection || showModelSelection ||
+    showMcpConfig || showThemeSelection || tierModelPickerFor !== null;
+
   useInput((input, key) => {
     // Approval prompt takes priority over all other input while it's open (#138).
     if (pendingApproval) {
@@ -806,11 +826,12 @@ export default function App({ config }: AppProps) {
     }
     if (key.tab) setFocusPanel(prev => prev === "chat" ? "input" : "chat");
     if (key.ctrl && input === "p") setShowCommandPalette(prev => !prev);
+    if (key.ctrl && input === "o") setStatusCollapsed(prev => !prev); // toggle Models panel (#266)
     // Scrollback: PgUp/PgDn page the transcript; End jumps back to the latest (#159).
     if (key.pageUp) setScrollOffset(prev => prev + CHAT_PAGE_SIZE);
     if (key.pageDown) setScrollOffset(prev => Math.max(0, prev - CHAT_PAGE_SIZE));
     if (input === "G") setScrollOffset(0);
-  });
+  }, { isActive: !anyOverlayOpen });
 
   const getActiveModel = () => {
     if (forcedTier !== null) {
@@ -847,6 +868,7 @@ export default function App({ config }: AppProps) {
         phase={coordinatorPhase}
         currentRouting={currentRouting}
         planSteps={planSteps}
+        collapsed={statusCollapsed}
       />
       {healthWarning && (
         <Box>
@@ -854,8 +876,8 @@ export default function App({ config }: AppProps) {
         </Box>
       )}
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
-      <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null} vimMode={vimMode} />
-      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} />
+      <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null || anyOverlayOpen} vimMode={vimMode} />
+      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />
 
       {showCommandPalette && (
         <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} accent={theme.colors.accent}

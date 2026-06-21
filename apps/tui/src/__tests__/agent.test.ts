@@ -142,17 +142,25 @@ const mockCreateProvider = vi.mocked(createProvider);
 // Isolate these tests from the developer's personal config — persisted tier
 // overrides / remote-brain would otherwise change routing outcomes (#235).
 let __cfgBackup: string | null = null;
-beforeAll(() => {
-  __cfgBackup = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null;
+function stripVolatileConfig(): void {
   try {
-    const c = __cfgBackup ? JSON.parse(__cfgBackup) : {};
+    const raw = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : "{}";
+    const c = JSON.parse(raw);
     delete c.tierModels;
     delete c.remoteBrain;
+    delete c.budgetUsd;
     writeFileSync(XDG_CONFIG_FILE, JSON.stringify(c));
   } catch {
     /* ignore */
   }
+}
+beforeAll(() => {
+  __cfgBackup = existsSync(XDG_CONFIG_FILE) ? readFileSync(XDG_CONFIG_FILE, "utf-8") : null;
+  stripVolatileConfig();
 });
+// Re-strip right before every test: another parallel test file can write the
+// shared config mid-run, and the agent reads it at construction (#235 flake).
+beforeEach(() => stripVolatileConfig());
 afterAll(() => {
   if (__cfgBackup !== null) writeFileSync(XDG_CONFIG_FILE, __cfgBackup);
 });
