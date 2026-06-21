@@ -191,14 +191,24 @@ export function loadXdgConfig(): UserConfig {
   ensureConfigDir();
 
   if (!existsSync(XDG_CONFIG_FILE)) {
-    saveXdgConfig(DEFAULT_XDG_CONFIG);
-    return DEFAULT_XDG_CONFIG;
+    const fresh = structuredClone(DEFAULT_XDG_CONFIG);
+    saveXdgConfig(fresh);
+    return fresh;
   }
 
   try {
     const raw = readFileSync(XDG_CONFIG_FILE, "utf-8");
     const parsed = JSON.parse(raw);
-    const config: UserConfig = { ...DEFAULT_XDG_CONFIG, ...parsed };
+    // Deep-merge the nested objects against the defaults so a partial config
+    // (e.g. `editor: { formatOnWrite: true }` or `permissions: {}`) doesn't drop
+    // sibling defaults like editor.formatCommand / permissions.autoApprove (#272).
+    const config: UserConfig = {
+      ...DEFAULT_XDG_CONFIG,
+      ...parsed,
+      models: { ...DEFAULT_XDG_CONFIG.models, ...(parsed.models ?? {}) },
+      permissions: { ...DEFAULT_XDG_CONFIG.permissions, ...(parsed.permissions ?? {}) },
+      editor: { ...DEFAULT_XDG_CONFIG.editor, ...(parsed.editor ?? {}) },
+    };
 
     let dirty = false;
 
@@ -239,7 +249,8 @@ export function loadXdgConfig(): UserConfig {
     if (dirty) saveXdgConfig(config);
     return config;
   } catch {
-    return DEFAULT_XDG_CONFIG;
+    // Return a fresh clone so a caller mutating it can't corrupt the shared default.
+    return structuredClone(DEFAULT_XDG_CONFIG);
   }
 }
 

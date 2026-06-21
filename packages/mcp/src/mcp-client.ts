@@ -104,21 +104,29 @@ export class McpClient extends EventEmitter {
       }
     });
 
-    // Initialize: send initialize request
-    await this.request("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: { tools: {} },
-      clientInfo: { name: "metalmind", version: "0.1.0" },
-    });
+    try {
+      // Initialize: send initialize request
+      await this.request("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: { tools: {} },
+        clientInfo: { name: "metalmind", version: "0.1.0" },
+      });
 
-    // Send initialized notification
-    this.sendNotification("notifications/initialized", {});
+      // Send initialized notification
+      this.sendNotification("notifications/initialized", {});
 
-    // Discover tools
-    const toolsResult = (await this.request("tools/list", {})) as { tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> };
-    this.tools = toolsResult.tools ?? [];
+      // Discover tools
+      const toolsResult = (await this.request("tools/list", {})) as { tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> };
+      this.tools = toolsResult.tools ?? [];
 
-    this.connected = true;
+      this.connected = true;
+    } catch (err) {
+      // Initialization failed (timeout, bad protocol, …) — kill the spawned child
+      // so a failed connect doesn't leak a running process (#264).
+      this.process?.kill();
+      this.process = null;
+      throw err;
+    }
   }
 
   async callTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {

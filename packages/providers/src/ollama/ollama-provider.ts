@@ -124,20 +124,26 @@ export class OllamaProvider implements ModelProvider {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          yield JSON.parse(line) as { status: string; completed?: number; total?: number };
-        } catch {
-          // ignore malformed progress lines
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            yield JSON.parse(line) as { status: string; completed?: number; total?: number };
+          } catch {
+            // ignore malformed progress lines
+          }
         }
       }
+    } finally {
+      // Release the stream even if the consumer stops iterating early (#271).
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
   }
 

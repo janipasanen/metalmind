@@ -2044,3 +2044,44 @@ describe("AgentLoop Build/Plan mode (#11)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("AgentLoop @-mention context is per-turn, not persisted (#260)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("injects the mentioned file into the request but not into saved history, and does not accumulate", async () => {
+    const root = join(tmpdir(), `mm-mention-ctx-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "export const MENTION_MARKER = 1;");
+
+    const seen: Array<Array<{ role: string; content: string }>> = [];
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: 128000 } as never,
+      async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+        seen.push(req.messages);
+        yield { type: "text", text: "ok" };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("look at @src/a.ts"));
+
+    // The model saw the mentioned file content this turn...
+    const firstReq = seen[0].map((m) => m.content).join("\n");
+    expect(firstReq).toContain("MENTION_MARKER");
+    // ...but it was NOT written into persisted history.
+    const histAfter1 = loop.conversation().map((m) => m.content).join("\n");
+    expect(histAfter1).not.toContain("MENTION_MARKER");
+
+    // A second turn (no mention) must not re-include it, and history must not have grown a stale copy.
+    await collect(loop.run("and now something else"));
+    const secondReq = seen[1].map((m) => m.content).join("\n");
+    expect(secondReq).not.toContain("MENTION_MARKER");
+
+    rmSync(root, { recursive: true, force: true });
+  });
+});

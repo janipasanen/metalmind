@@ -80,6 +80,24 @@ describe("spreadsheet builders (#188 xlsx, #189 ods)", () => {
     expect(rowsToCsv([["a", "b,c"], [1, 2]])).toBe('a,"b,c"\n1,2');
     expect(csvToRows("a,b\n1,2")).toEqual([["a", "b"], [1, 2]]);
   });
+
+  it("parses RFC-4180 quoted fields and round-trips with rowsToCsv (#265)", () => {
+    // quoted delimiter, embedded newline, and doubled-quote escape
+    const rows = [
+      ["name", "note"],
+      ["a,b", 'he said ""hi""'.replace(/""/g, '"')],
+      ["multi\nline", 5],
+    ];
+    const csv = rowsToCsv(rows);
+    expect(csvToRows(csv)).toEqual(rows);
+
+    // a comma inside quotes is one field, not two
+    expect(csvToRows('"a,b",c')).toEqual([["a,b", "c"]]);
+    // doubled quotes decode to a single quote
+    expect(csvToRows('"she said ""hi"""')).toEqual([['she said "hi"']]);
+    // a quoted numeric stays a string; an unquoted one is coerced
+    expect(csvToRows('"007",007')).toEqual([["007", 7]]);
+  });
 });
 
 describe("spreadsheet tools", () => {

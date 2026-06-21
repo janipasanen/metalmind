@@ -100,12 +100,15 @@ export class LocalWorkerRunner {
     for (let attempt = 0; attempt <= this.config.maxSchemaValidationRetries; attempt++) {
       const startTime = Date.now();
 
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const rawOutput = await Promise.race([
           this.provider.sendTask(task),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Local worker timed out after ${timeout}ms`)), timeout),
-          ),
+          new Promise<never>((_, reject) => {
+            // Capture the handle so it can be cleared once the race settles — a
+            // fast success otherwise leaves the timeout pending (#270).
+            timer = setTimeout(() => reject(new Error(`Local worker timed out after ${timeout}ms`)), timeout);
+          }),
         ]);
 
         const durationMs = Date.now() - startTime;
@@ -157,6 +160,8 @@ export class LocalWorkerRunner {
             modelUsed: this.provider.providerName,
           };
         }
+      } finally {
+        clearTimeout(timer);
       }
     }
 

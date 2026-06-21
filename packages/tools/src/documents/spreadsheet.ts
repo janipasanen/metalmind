@@ -140,18 +140,50 @@ export function rowsToCsv(rows: Cell[][]): string {
     .join("\n");
 }
 
-/** Parse CSV/TSV text into rows, coercing numeric-looking cells to numbers. */
+/** Parse CSV/TSV text into rows (RFC-4180): double-quoted fields may contain the
+ *  delimiter, newlines, and doubled-quote escapes, so it round-trips with
+ *  rowsToCsv. Unquoted numeric-looking cells are coerced to numbers (#265). */
 export function csvToRows(text: string, delimiter = ","): Cell[][] {
-  return text
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .filter((line, i, arr) => !(i === arr.length - 1 && line === ""))
-    .map((line) =>
-      line.split(delimiter).map((field) => {
-        const trimmed = field.trim();
-        return trimmed !== "" && !Number.isNaN(Number(trimmed)) ? Number(trimmed) : field;
-      }),
-    );
+  const s = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const rows: Cell[][] = [];
+  let row: Cell[] = [];
+  let field = "";
+  let inQuotes = false;
+  let fieldQuoted = false;
+
+  const flushField = () => {
+    const trimmed = field.trim();
+    row.push(!fieldQuoted && trimmed !== "" && !Number.isNaN(Number(trimmed)) ? Number(trimmed) : field);
+    field = "";
+    fieldQuoted = false;
+  };
+  const flushRow = () => {
+    rows.push(row);
+    row = [];
+  };
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') { field += '"'; i++; } // escaped quote
+        else inQuotes = false;
+      } else {
+        field += ch;
+      }
+      continue;
+    }
+    if (ch === '"') { inQuotes = true; fieldQuoted = true; }
+    else if (ch === delimiter) flushField();
+    else if (ch === "\n") { flushField(); flushRow(); }
+    else field += ch;
+  }
+  // Flush the final field/row unless the text ended exactly on a row boundary.
+  if (field !== "" || fieldQuoted || row.length > 0) {
+    flushField();
+    flushRow();
+  }
+  return rows;
 }
 
 // ---------- Tools ----------

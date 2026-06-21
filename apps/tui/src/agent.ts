@@ -188,7 +188,7 @@ const DELEGATE_TO_LOCAL_DEF = {
   description:
     "Offload bounded, repetitive subtasks to the fast LOCAL model — they run in parallel and are cached. " +
     "Use this in remote-brain mode to process many files or items cheaply before you reason over the results. " +
-    "taskType is one of: summarizeFile, extractSymbols, rankRelevantFiles, summarizeDiff, classifyIntent. " +
+    "taskType is one of: summarizeFile, extractSymbols, rankRelevantFiles, summarizeDiff, classifyUserIntent. " +
     "inputs is an array where each item is the input object for one task (e.g. { filePath } for summarizeFile).",
   inputSchema: {
     type: "object",
@@ -485,6 +485,9 @@ export class AgentLoop {
   /** Transient "you're near the tool-use iteration cap" notice, injected into the
    *  next model request only (never persisted to history) (#248). */
   private iterationCapNotice: string | null = null;
+  /** Per-turn @-mention/RAG context blocks, injected into this turn's requests only
+   *  (never persisted to history, so they don't accumulate every turn) (#260). */
+  private turnContext: string[] = [];
   /** Build vs Plan agent mode. In "plan" mode the agent investigates and proposes
    *  a plan but cannot mutate files/repo (mutating tools are hidden + refused) (#11). */
   private mode: "build" | "plan" = "build";
@@ -1011,9 +1014,11 @@ export class AgentLoop {
         if (signal?.aborted) return;
         let emitted = false;
         try {
-          // Append the transient iteration-cap notice (if any) to this request
-          // only — keep it out of persisted history (#248).
+          // Append transient per-request context (per-turn @-mention/RAG blocks
+          // and the iteration-cap notice) to this request only — keep it out of
+          // persisted history (#248, #260).
           const messages = [...this.history];
+          for (const block of this.turnContext) messages.push({ role: "system", content: block });
           if (this.iterationCapNotice) messages.push({ role: "system", content: this.iterationCapNotice });
           for await (const ev of provider.streamChatCompletion({
             messages,
@@ -1085,14 +1090,18 @@ export class AgentLoop {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     }
-    // @-file mentions: pull referenced files into context for this turn (#167).
+    // @-file mentions and RAG are PER-TURN context: inject them into this turn's
+    // request only (via this.turnContext, like the iteration-cap notice) instead
+    // of pushing them into this.history, where they'd persist and accumulate a new
+    // copy every turn — bloating context and the saved session (#260).
+    const turnContext: string[] = [];
     const mentionBlock = mentionsContextBlock(userInput, this.projectRoot);
-    if (mentionBlock) this.history.push({ role: "system", content: mentionBlock });
-
-    // RAG: if documents have been indexed, retrieve and inject the most relevant
-    // chunks as context for this turn (#200). No-ops cheaply when no index exists.
+    if (mentionBlock) turnContext.push(mentionBlock);
+    // RAG: if documents have been indexed, retrieve the most relevant chunks for
+    // this turn (#200). No-ops cheaply when no index exists.
     const ragContext = await retrieveContext(this.projectRoot, userInput).catch(() => null);
-    if (ragContext) this.history.push({ role: "system", content: ragContext });
+    if (ragContext) turnContext.push(ragContext);
+    this.turnContext = turnContext;
 
     // Attach any staged image(s) to this user turn for vision models (#177).
     const images = this.pendingImages.length > 0 ? [...this.pendingImages] : undefined;
@@ -1992,6 +2001,10 @@ export class AgentLoop {
     if (this.subagentDepth >= 1) return "";
     const savedHistory = this.history;
     const savedTurn = this.turnCount;
+    // Don't leak the parent turn's @-mention/RAG context into the sub-agent — it
+    // grounds itself on its own objective (#260).
+    const savedTurnContext = this.turnContext;
+    this.turnContext = [];
     this.subagentDepth++;
     this.history = [
       {
@@ -2015,6 +2028,7 @@ export class AgentLoop {
     } finally {
       this.history = savedHistory;
       this.turnCount = savedTurn;
+      this.turnContext = savedTurnContext;
       this.subagentDepth--;
     }
   }
@@ -2105,8 +2119,14 @@ export class AgentLoop {
     const limit = provider.supportedCapabilities?.maximumContextTokens ?? 32_768;
     const reserve = Math.max(2048, Math.floor(limit * 0.2));
     const budget = limit - reserve;
+    // Vision images cost real context tokens (a model tiles each image into
+    // ~hundreds–~1k+ tokens); count them so image-heavy turns are trimmed/flagged
+    // instead of silently blowing past the window (#268).
+    const IMAGE_TOKEN_ESTIMATE = 1_100;
     const tokensOf = (m: AgentMessage): number =>
-      estimateTokens(m.content) + (m.toolCalls?.length ? estimateTokens(JSON.stringify(m.toolCalls)) : 0);
+      estimateTokens(m.content) +
+      (m.toolCalls?.length ? estimateTokens(JSON.stringify(m.toolCalls)) : 0) +
+      (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
 
     let total = this.history.reduce((s, m) => s + tokensOf(m), 0);
     if (total > budget) {
