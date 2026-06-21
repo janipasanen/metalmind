@@ -1,5 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createInterface, type Interface } from "node:readline";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -38,7 +37,7 @@ interface JsonRpcMessage {
  */
 export class LspClient {
   private process: ChildProcess | null = null;
-  private rl: Interface | null = null;
+  private stdoutBuffer = Buffer.alloc(0);
   private requestId = 0;
   private pending = new Map<
     number,
@@ -73,25 +72,13 @@ export class LspClient {
       this.connected = false;
     });
 
-    this.rl = createInterface({ input: this.process.stdout! });
-
-    this.rl.on("line", (line: string) => {
-      try {
-        const msg = JSON.parse(line) as JsonRpcMessage;
-        if (msg.id !== undefined && this.pending.has(msg.id)) {
-          const pending = this.pending.get(msg.id)!;
-          this.pending.delete(msg.id);
-          if (msg.error) {
-            pending.reject(new Error(msg.error.message));
-          } else {
-            pending.resolve(msg.result);
-          }
-        } else if (msg.method === "textDocument/publishDiagnostics") {
-          this.handleDiagnostics(msg.params as PublishDiagnosticsParams);
-        }
-      } catch {
-        // ignore non-JSON
-      }
+    // LSP base protocol: messages are framed with a `Content-Length` header and
+    // a \r\n\r\n separator — NOT newline-delimited JSON. Buffer raw stdout bytes
+    // and slice out exactly Content-Length bytes per message (#251).
+    this.stdoutBuffer = Buffer.alloc(0);
+    this.process.stdout!.on("data", (chunk: Buffer) => {
+      this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
+      this.drainMessages();
     });
 
     // Initialize
@@ -246,9 +233,9 @@ export class LspClient {
     } catch {
       // best effort
     }
-    this.rl?.close();
     this.process?.kill();
     this.process = null;
+    this.stdoutBuffer = Buffer.alloc(0);
     this.connected = false;
   }
 
@@ -272,6 +259,48 @@ export class LspClient {
     return "javascript";
   }
 
+  /** Parse all complete Content-Length-framed messages from the stdout buffer (#251). */
+  private drainMessages(): void {
+    for (;;) {
+      const sep = this.stdoutBuffer.indexOf("\r\n\r\n");
+      if (sep === -1) return; // header not complete yet
+      const header = this.stdoutBuffer.subarray(0, sep).toString("ascii");
+      const m = /Content-Length:\s*(\d+)/i.exec(header);
+      if (!m) {
+        // Unframed/garbage before a header — skip past the separator to resync.
+        this.stdoutBuffer = this.stdoutBuffer.subarray(sep + 4);
+        continue;
+      }
+      const len = parseInt(m[1], 10);
+      const bodyStart = sep + 4;
+      if (this.stdoutBuffer.length < bodyStart + len) return; // body not fully arrived
+      const body = this.stdoutBuffer.subarray(bodyStart, bodyStart + len).toString("utf8");
+      this.stdoutBuffer = this.stdoutBuffer.subarray(bodyStart + len);
+      try {
+        this.handleMessage(JSON.parse(body) as JsonRpcMessage);
+      } catch {
+        // ignore malformed body
+      }
+    }
+  }
+
+  private handleMessage(msg: JsonRpcMessage): void {
+    if (msg.id !== undefined && this.pending.has(msg.id)) {
+      const pending = this.pending.get(msg.id)!;
+      this.pending.delete(msg.id);
+      if (msg.error) pending.reject(new Error(msg.error.message));
+      else pending.resolve(msg.result);
+    } else if (msg.method === "textDocument/publishDiagnostics") {
+      this.handleDiagnostics(msg.params as PublishDiagnosticsParams);
+    }
+  }
+
+  /** Write a JSON-RPC payload with LSP Content-Length framing (#251). */
+  private writeMessage(payload: Record<string, unknown>): void {
+    const body = JSON.stringify(payload);
+    this.process?.stdin?.write(`Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`);
+  }
+
   private request(method: string, params?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = ++this.requestId;
@@ -290,14 +319,12 @@ export class LspClient {
         reject: (e: Error) => { clearTimeout(timeout); reject(e); },
       });
 
-      const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
-      this.process?.stdin?.write(msg);
+      this.writeMessage({ jsonrpc: "2.0", id, method, params });
     });
   }
 
   private sendNotification(method: string, params: unknown): void {
-    const msg = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
-    this.process?.stdin?.write(msg);
+    this.writeMessage({ jsonrpc: "2.0", method, params });
   }
 
   private handleDiagnostics(params: PublishDiagnosticsParams): void {

@@ -50,9 +50,13 @@ export class McpToolRegistry {
     }
 
     client.on("disconnect", () => {
+      // Fully evict the crashed/disconnected server: drop the client so
+      // isConnected() reflects reality and connectServer() can reconnect instead
+      // of throwing "already connected", and clear its tool entries (#259).
+      this.clients.delete(config.name);
       for (const [name, state] of this.toolMap) {
         if (state.serverName === config.name) {
-          state.connected = false;
+          this.toolMap.delete(name);
           this.registeredTools.delete(name);
         }
       }

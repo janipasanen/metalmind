@@ -210,6 +210,30 @@ describe("AnthropicProvider", () => {
       expect(textEvents).toHaveLength(1);
     });
 
+    it("emits output tokens once as the final cumulative count, not per delta (#258)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createAnthropicSSE(
+          { type: "message_start", message: { usage: { input_tokens: 50 } } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: "hi" } },
+          { type: "message_delta", usage: { output_tokens: 10 } }, // cumulative
+          { type: "message_delta", usage: { output_tokens: 25 } }, // cumulative
+          { type: "message_stop" },
+        ),
+      );
+
+      const p = new AnthropicProvider("claude", "sk-test");
+      const usage: Array<{ inputTokens?: number; outputTokens?: number }> = [];
+      for await (const e of p.streamChatCompletion({ messages: [] })) {
+        if (e.type === "usage") usage.push(e.usage);
+      }
+      // One input event, and exactly one output event with the final cumulative value.
+      const outputs = usage.filter((u) => u.outputTokens != null);
+      expect(outputs).toHaveLength(1);
+      expect(outputs[0].outputTokens).toBe(25);
+      expect(usage.find((u) => u.inputTokens != null)?.inputTokens).toBe(50);
+    });
+
     it("emits a tool-call event from a tool_use content block", async () => {
       vi.stubGlobal(
         "fetch",

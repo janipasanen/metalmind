@@ -31,6 +31,32 @@ describe("OpenAIProvider", () => {
     expect(p.supportedCapabilities.maximumContextTokens).toBe(256_000);
   });
 
+  describe("tool schema (#250)", () => {
+    it("wraps tools in OpenAI's {type:function, function:{...parameters}} shape", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => "{}",
+        json: async () => ({ choices: [{ message: { role: "assistant", content: "ok" } }] }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const p = new OpenAIProvider("gpt-4", "sk-test");
+      await p.completeChat({
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "readFile", description: "read a file", inputSchema: { type: "object", properties: { path: { type: "string" } } } }],
+      } as ChatCompletionRequest);
+
+      const sentBody = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+      expect(sentBody.tools).toEqual([
+        {
+          type: "function",
+          function: { name: "readFile", description: "read a file", parameters: { type: "object", properties: { path: { type: "string" } } } },
+        },
+      ]);
+    });
+  });
+
   describe("completeChat", () => {
     it("returns text response", async () => {
       vi.stubGlobal(

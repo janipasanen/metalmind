@@ -318,6 +318,10 @@ export class AnthropicProvider implements ModelProvider {
     // Track tool_use content blocks by their stream index while their
     // input JSON arrives incrementally as input_json_delta fragments.
     const toolBlocks = new Map<number, { id: string; name: string; json: string }>();
+    // Anthropic's message_delta output_tokens is CUMULATIVE and can arrive on
+    // several deltas — keep only the latest and emit one usage event at the end,
+    // so a consumer that sums usage events doesn't multiply the count (#258).
+    let outputTokens: number | undefined;
 
     try {
       while (true) {
@@ -348,8 +352,8 @@ export class AnthropicProvider implements ModelProvider {
             if (chunk.type === "message_start" && chunk.message?.usage) {
               yield { type: "usage", usage: { inputTokens: chunk.message.usage.input_tokens } };
             }
-            if (chunk.type === "message_delta" && chunk.usage) {
-              yield { type: "usage", usage: { outputTokens: chunk.usage.output_tokens } };
+            if (chunk.type === "message_delta" && chunk.usage?.output_tokens != null) {
+              outputTokens = chunk.usage.output_tokens; // cumulative — keep latest
             }
 
             // Anthropic emits {"type":"error","error":{...}} mid-stream (e.g.
@@ -410,6 +414,8 @@ export class AnthropicProvider implements ModelProvider {
       reader.releaseLock();
     }
 
+    // Emit the final cumulative output-token count once (#258).
+    if (outputTokens != null) yield { type: "usage", usage: { outputTokens } };
     yield { type: "done" };
   }
 }

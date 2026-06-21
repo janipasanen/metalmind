@@ -21,6 +21,16 @@ const openaiCapabilities: ModelCapabilities = {
   maximumContextTokens: 256_000,
 };
 
+/** Map the neutral tool defs ({name, description, inputSchema}) into OpenAI's
+ *  Chat Completions tool schema ({type:"function", function:{...parameters}}).
+ *  Without this wrapper OpenAI rejects every request with a 400 (#250). */
+function toOpenAITools(tools: unknown[]): unknown[] {
+  return (tools as Array<{ name: string; description?: string; inputSchema?: unknown }>).map((t) => ({
+    type: "function",
+    function: { name: t.name, description: t.description ?? "", parameters: t.inputSchema ?? { type: "object", properties: {} } },
+  }));
+}
+
 function convertToOpenAIMessage(msg: AgentMessage) {
   const m: Record<string, unknown> = {
     role: msg.role,
@@ -79,7 +89,7 @@ export class OpenAIProvider implements ModelProvider {
       model: this.modelName,
       messages,
     };
-    if (request.tools) body.tools = request.tools;
+    if (request.tools?.length) body.tools = toOpenAITools(request.tools);
 
     const res = await fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -135,7 +145,7 @@ export class OpenAIProvider implements ModelProvider {
       stream: true,
       stream_options: { include_usage: true },
     };
-    if (request.tools) body.tools = request.tools;
+    if (request.tools?.length) body.tools = toOpenAITools(request.tools);
 
     const res = await fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
       method: "POST",

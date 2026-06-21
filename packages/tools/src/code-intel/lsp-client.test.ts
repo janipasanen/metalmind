@@ -20,6 +20,57 @@ describe("LspClient", () => {
   });
 });
 
+describe("LspClient base-protocol framing (#251)", () => {
+  it("writes Content-Length-framed messages (no trailing newline)", () => {
+    const client = new LspClient("/tmp") as unknown as {
+      process: unknown;
+      writeMessage(p: Record<string, unknown>): void;
+    };
+    const writes: string[] = [];
+    client.process = { stdin: { write: (s: string) => writes.push(s) } };
+    client.writeMessage({ jsonrpc: "2.0", id: 1, method: "initialize" });
+
+    const m = /^Content-Length: (\d+)\r\n\r\n([\s\S]*)$/.exec(writes[0]);
+    expect(m).not.toBeNull();
+    expect(Buffer.byteLength(m![2], "utf8")).toBe(Number(m![1]));
+    expect(JSON.parse(m![2]).method).toBe("initialize");
+  });
+
+  it("parses a framed response and resolves the pending request", () => {
+    const client = new LspClient("/tmp") as unknown as {
+      pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
+      stdoutBuffer: Buffer;
+      drainMessages(): void;
+    };
+    const got: unknown[] = [];
+    client.pending.set(1, { resolve: (v) => got.push(v), reject: () => {} });
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } });
+    client.stdoutBuffer = Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    client.drainMessages();
+    expect(got).toEqual([{ ok: true }]);
+  });
+
+  it("waits for the full body across chunk boundaries", () => {
+    const client = new LspClient("/tmp") as unknown as {
+      pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
+      stdoutBuffer: Buffer;
+      drainMessages(): void;
+    };
+    const got: unknown[] = [];
+    client.pending.set(7, { resolve: (v) => got.push(v), reject: () => {} });
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 7, result: 42 });
+    const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    // First half: header + partial body → nothing resolves yet.
+    client.stdoutBuffer = Buffer.from(frame.slice(0, frame.length - 5));
+    client.drainMessages();
+    expect(got).toHaveLength(0);
+    // Remainder arrives → message completes.
+    client.stdoutBuffer = Buffer.concat([client.stdoutBuffer, Buffer.from(frame.slice(frame.length - 5))]);
+    client.drainMessages();
+    expect(got).toEqual([42]);
+  });
+});
+
 describe("createDiagnosticsTool", () => {
   it("createDiagnosticsTool returns an AgentTool", async () => {
     const { createDiagnosticsTool } = await import("./diagnostics-tool.js");

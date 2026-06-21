@@ -142,6 +142,10 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Prom
 const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "deleteFile"]);
 /** Tools that execute a model-overridable shell command — all must be validated (#252). */
 const SHELL_COMMAND_TOOLS = new Set(["runCommand", "runBackground", "runTests", "runBuild", "runLint", "runFormat"]);
+/** Numeric rank of a tier so escalation can detect when it isn't moving up (#249). */
+function tierRank(t: string): number {
+  return t === "tier1-local" ? 1 : t === "tier2-medium" ? 2 : 3;
+}
 
 /** Providers that require an API key (so a missing key gets a clear error, #231). */
 const PROVIDERS_NEEDING_KEY = new Set(["anthropic", "openai", "ollama-cloud"]);
@@ -1145,9 +1149,15 @@ export class AgentLoop {
       errored: attempt.errored,
     });
 
-    while (!verdict.passed && decision.tier !== "tier3-cloud") {
+    let escalations = 0;
+    while (!verdict.passed && decision.tier !== "tier3-cloud" && escalations < 3) {
+      escalations++;
       const nextTier = this.router.escalateTier(decision.tier);
-      decision = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
+      const next = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
+      // A session budget can downgrade the cloud target back to local; if escalation
+      // can't actually move up a tier, stop instead of looping forever (#249).
+      if (tierRank(next.tier) <= tierRank(decision.tier)) break;
+      decision = next;
       this.recordRoute(decision);
       yield {
         type: "text",

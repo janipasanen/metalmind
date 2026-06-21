@@ -531,6 +531,27 @@ describe("AgentLoop quality gate + escalation", () => {
     expect(events.at(-1)?.type).toBe("done");
   });
 
+  it("terminates escalation when an exceeded budget keeps downgrading the cloud tier (#249)", async () => {
+    // Over budget (budgetUsd: 0): the router rewrites any tier3-cloud target back
+    // to tier1-local. Every model returns empty (fails the gate), so without the
+    // escalation guard the loop would cycle forever. It must still finish.
+    mockCreateProvider.mockImplementation(() => makeProvider([{ type: "done" }]) as never);
+    const router = new ModelRouter({
+      tier1Model: "local-small", tier1Provider: "mlx",
+      tier2Model: "local-small", tier2Provider: "mlx",
+      tier3Model: "claude", tier3Provider: "anthropic",
+      localFirst: true, budgetUsd: 0,
+    });
+
+    const loop = new AgentLoop(
+      { provider: "mlx", model: "local-small", explicit: false },
+      { router },
+    );
+
+    const events = await collect(loop.run("explain recursion conceptually"));
+    expect(events.at(-1)?.type).toBe("done"); // did not hang
+  });
+
   it("uses local-model triage to route an ambiguous low-confidence task", async () => {
     mockCreateProvider.mockImplementation((provider: string, model: string) => {
       if (model === "local-small") {
