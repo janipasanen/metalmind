@@ -109,6 +109,7 @@ vi.mock("@metalmind/tools", async () => {
   allWebTools: [],
   allDocumentTools: [],
   backgroundShellTools: [],
+  isBlockedPath: (p: string) => /(^|\/|\\)(\.ssh|\.gnupg|\.aws|\.kube|\.env|\.git-credentials|\.npmrc|id_rsa|id_ed25519|authorized_keys)(\/|\\|$)/.test(p),
   killAllBackgroundProcesses: () => {},
   indexFile: () => {},
   getReferenceIndex: () => ({ indexFile: () => {} }),
@@ -1124,7 +1125,7 @@ describe("AgentLoop approval gate (M3 #138)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("always-allow suppresses future prompts for that tool in the session", async () => {
+  it("always-allow is scoped to the approved path; a new path re-prompts (#241)", async () => {
     const root = join(tmpdir(), `mm-appr3-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
     mkdirSync(root, { recursive: true });
     const f1 = join(root, "a.ts");
@@ -1136,8 +1137,10 @@ describe("AgentLoop approval gate (M3 #138)", () => {
       async *streamChatCompletion() {
         calls++;
         if (calls === 1) {
+          // Two writes to the SAME path, then one to a DIFFERENT path.
           yield { type: "tool-call", toolCall: { toolCallId: "t1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: f1, content: "a" }) } };
-          yield { type: "tool-call", toolCall: { toolCallId: "t2", toolName: "writeFile", argumentsJson: JSON.stringify({ path: f2, content: "b" }) } };
+          yield { type: "tool-call", toolCall: { toolCallId: "t2", toolName: "writeFile", argumentsJson: JSON.stringify({ path: f1, content: "aa" }) } };
+          yield { type: "tool-call", toolCall: { toolCallId: "t3", toolName: "writeFile", argumentsJson: JSON.stringify({ path: f2, content: "b" }) } };
           yield { type: "done" };
         } else {
           yield { type: "text", text: "done" };
@@ -1154,10 +1157,11 @@ describe("AgentLoop approval gate (M3 #138)", () => {
       { provider: "stub", model: "test", explicit: true },
       { projectRoot: root, onApprovalRequest: approvalSpy },
     );
-    await collect(loop.run("write two"));
+    await collect(loop.run("write some"));
 
-    // Asked exactly once (the second writeFile was auto-approved by always-allow).
-    expect(approvalSpy).toHaveBeenCalledTimes(1);
+    // Prompted once for f1 (second write to f1 auto-approved by the scoped grant),
+    // and once more for f2 — a different target is not covered by f1's grant.
+    expect(approvalSpy).toHaveBeenCalledTimes(2);
     expect(existsSync(f1)).toBe(true);
     expect(existsSync(f2)).toBe(true);
     rmSync(root, { recursive: true, force: true });
