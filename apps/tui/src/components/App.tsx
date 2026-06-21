@@ -27,6 +27,8 @@ import ModelSelection from "./ModelSelection.js";
 import McpConfig from "./McpConfig.js";
 import ThemeSelection from "./ThemeSelection.js";
 import TierModelPicker from "./TierModelPicker.js";
+import FileTree from "./FileTree.js";
+import Notifications, { type Notification, type NotificationType } from "./Notifications.js";
 import { loadXdgConfig, saveXdgConfig, switchTheme, loadTheme } from "@metalmind/config";
 import { KeychainConfig } from "@metalmind/apple";
 import { resolveConfig } from "../config.js";
@@ -76,6 +78,7 @@ export default function App({ config }: AppProps) {
   const [showModelSelection, setShowModelSelection] = useState(false);
   const [showMcpConfig, setShowMcpConfig] = useState(false);
   const [showThemeSelection, setShowThemeSelection] = useState(false);
+  const [showFileTree, setShowFileTree] = useState(false);
   const [theme, setTheme] = useState(() => loadTheme());
   const [forcedTier, setForcedTierState] = useState<ForcedTier>(null);
   const [tierModelPickerFor, setTierModelPickerFor] = useState<1 | 2 | 3 | null>(null);
@@ -108,6 +111,18 @@ export default function App({ config }: AppProps) {
   const [localWorkerAvailable, setLocalWorkerAvailable] = useState(false);
   const [mcpServers, setMcpServers] = useState<Array<{ name: string; connected: boolean; toolCount: number }>>([]);
   const [statusCollapsed, setStatusCollapsed] = useState(false);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const notifIdRef = useRef(0);
+  const notifHistoryRef = useRef<Array<{ type: NotificationType; message: string }>>([]);
+
+  // Push a transient notification (legacy #8): shown briefly, auto-dismissed, and
+  // appended to a bounded history viewable via /notifications.
+  const notify = useCallback((type: NotificationType, message: string) => {
+    const id = ++notifIdRef.current;
+    notifHistoryRef.current = [...notifHistoryRef.current, { type, message }].slice(-50);
+    setNotifications((prev) => [...prev.slice(-3), { id, type, message }]);
+    setTimeout(() => setNotifications((prev) => prev.filter((n) => n.id !== id)), 6000);
+  }, []);
 
   // Mirror the agent's MCP server status into the StatusBar footer (#267).
   const syncMcpStatus = useCallback((agent: AgentLoop) => {
@@ -155,7 +170,11 @@ export default function App({ config }: AppProps) {
           }
         }
       } catch (err) {
-        if (!cancelled) setAgentError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setAgentError(msg);
+          notify("error", `Reload failed: ${msg}`);
+        }
       }
     })();
 
@@ -199,7 +218,10 @@ export default function App({ config }: AppProps) {
 
         // Non-blocking pre-flight: warn up front on a bad key/missing model (#174).
         void agent.checkHealth().then((h) => {
-          if (!cancelled) setHealthWarning(h.ok ? null : h.message);
+          if (!cancelled) {
+            setHealthWarning(h.ok ? null : h.message);
+            if (!h.ok) notify("warning", h.message);
+          }
         });
 
         const coordinator = agent.coordinatorInstance;
@@ -212,7 +234,11 @@ export default function App({ config }: AppProps) {
           }
         }
       } catch (err) {
-        if (!cancelled) setAgentError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setAgentError(msg);
+          notify("error", msg);
+        }
       }
     })();
 
@@ -247,6 +273,8 @@ export default function App({ config }: AppProps) {
           "  /routes           - Show routing decisions + per-tier hit counts",
           "  /brain [on|off]   - Remote-brain mode: cloud coordinates, delegates to local",
           "  /plan | /build    - Plan mode (read-only, proposes a plan) vs Build mode (executes)",
+          "  /tree | /files    - Browse the project files (↑↓ move, →/Enter expand, Esc close)",
+          "  /notifications    - Show recent notifications (errors, warnings, MCP status)",
           "  /keychain         - save | load | status — macOS keychain key storage",
           "  /retry            - Re-run the last prompt (drops the prior answer)",
           "  /edit <text>      - Replace + re-run the last prompt",
@@ -514,6 +542,22 @@ export default function App({ config }: AppProps) {
         return;
       }
 
+      if (input === "/tree" || input === "/files") {
+        setShowFileTree(true);
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/notifications" || input === "/notif") {
+        const hist = notifHistoryRef.current;
+        const text = hist.length === 0
+          ? "No notifications yet."
+          : ["Recent notifications:", ...hist.slice(-15).map((n) => `  [${n.type}] ${n.message}`)].join("\n");
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
       if (input === "/mcp" || input.startsWith("/mcp ")) {
         const args = input.slice(4).trim();
         const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
@@ -525,7 +569,10 @@ export default function App({ config }: AppProps) {
           yield { type: "text", text: "Reconnecting MCP servers…" } as const;
           await agent.reconnectMcp();
           syncMcpStatus(agent);
-          yield { type: "text", text: formatMcpStatus(agent.getMcpStatus()) } as const;
+          const st = agent.getMcpStatus();
+          const up = st.filter((s) => s.connected).length;
+          notify(up === st.length ? "success" : "warning", `MCP: ${up}/${st.length} server(s) connected`);
+          yield { type: "text", text: formatMcpStatus(st) } as const;
         } else if (agent && (sub === "resources" || sub === "prompts" || sub === "read")) {
           // Live-client subcommands (resources/prompts) need a connected client (#219).
           let text: string;
@@ -802,7 +849,7 @@ export default function App({ config }: AppProps) {
   // key handler and the chat InputBar must stand down to avoid double-handling (#254).
   const anyOverlayOpen =
     showCommandPalette || showProviderSelection || showModelSelection ||
-    showMcpConfig || showThemeSelection || tierModelPickerFor !== null;
+    showMcpConfig || showThemeSelection || showFileTree || tierModelPickerFor !== null;
 
   useInput((input, key) => {
     // Approval prompt takes priority over all other input while it's open (#138).
@@ -875,6 +922,7 @@ export default function App({ config }: AppProps) {
           <Text color="yellow">⚠ {healthWarning}</Text>
         </Box>
       )}
+      <Notifications items={notifications} />
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
       <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null || anyOverlayOpen} vimMode={vimMode} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />
@@ -890,6 +938,7 @@ export default function App({ config }: AppProps) {
             { id: "model", title: "Remote Model", description: "Model used for complex tasks", action: () => setShowModelSelection(true) },
             { id: "mcp", title: "MCP", description: "Configure MCP servers", action: () => setShowMcpConfig(true) },
             { id: "theme", title: "Theme", description: "Switch theme (light/dark)", action: () => setShowThemeSelection(true) },
+            { id: "files", title: "File Tree", description: "Browse the project files", action: () => setShowFileTree(true) },
           ]}
         />
       )}
@@ -910,6 +959,9 @@ export default function App({ config }: AppProps) {
         }} onCancel={() => setShowModelSelection(false)} accent={theme.colors.accent} />
       )}
       {showMcpConfig && <McpConfig onDone={() => setShowMcpConfig(false)} accent={theme.colors.accent} />}
+      {showFileTree && (
+        <FileTree root={agentRef.current?.projectRootPath ?? process.cwd()} onClose={() => setShowFileTree(false)} accent={theme.colors.accent} />
+      )}
       {tierModelPickerFor !== null && (
         <TierModelPicker
           tier={tierModelPickerFor}
