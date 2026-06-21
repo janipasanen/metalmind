@@ -479,6 +479,9 @@ export class AgentLoop {
   /** Transient "you're near the tool-use iteration cap" notice, injected into the
    *  next model request only (never persisted to history) (#248). */
   private iterationCapNotice: string | null = null;
+  /** Build vs Plan agent mode. In "plan" mode the agent investigates and proposes
+   *  a plan but cannot mutate files/repo (mutating tools are hidden + refused) (#11). */
+  private mode: "build" | "plan" = "build";
   private remoteBrain = false;
   private subagentDepth = 0;
   private pendingImages: string[] = [];
@@ -617,6 +620,21 @@ export class AgentLoop {
       saveXdgConfig({ ...xdg, remoteBrain: on });
     } catch {
       // best-effort
+    }
+  }
+
+  /** Build vs Plan mode (#11). Plan mode hides + refuses mutating tools and tells
+   *  the model to produce a plan rather than edit. Refreshes the system prompt so
+   *  the change takes effect on the next turn. */
+  getMode(): "build" | "plan" {
+    return this.mode;
+  }
+
+  setMode(mode: "build" | "plan"): void {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    if (this.history[0]?.role === "system") {
+      this.history[0] = { role: "system", content: this.buildSystemPrompt() };
     }
   }
 
@@ -837,11 +855,17 @@ export class AgentLoop {
   }
 
   private toolDefs() {
-    const builtIn = this.registry.list().map((t) => ({
-      name: t.toolName,
-      description: t.description,
-      inputSchema: zodToJsonSchema(t.inputSchema),
-    }));
+    // Plan mode: expose only non-mutating tools so the model investigates and
+    // proposes rather than edits (#11).
+    const planMode = this.mode === "plan";
+    const builtIn = this.registry
+      .list()
+      .filter((t) => !planMode || !t.requiresConfirmation)
+      .map((t) => ({
+        name: t.toolName,
+        description: t.description,
+        inputSchema: zodToJsonSchema(t.inputSchema),
+      }));
     // Expose the namespaced key (serverId:toolName) to the model so collisions
     // across servers stay distinct; dispatch maps it back to the original name.
     const mcp = [...this.mcpTools.entries()].map(([namespacedName, { def }]) => ({
@@ -857,10 +881,11 @@ export class AgentLoop {
         ? [DELEGATE_TO_LOCAL_DEF]
         : [];
     // General sub-agent delegation, but only at the top level — a sub-agent can't
-    // spawn more sub-agents (prevents unbounded recursion) (#210).
-    const task = this.subagentDepth === 0 ? [TASK_TOOL_DEF] : [];
-    // Long-term memory tool, top-level only (#218).
-    const remember = this.subagentDepth === 0 ? [REMEMBER_TOOL_DEF] : [];
+    // spawn more sub-agents (prevents unbounded recursion) (#210). A sub-agent can
+    // write, so it's withheld in plan mode (#11).
+    const task = this.subagentDepth === 0 && !planMode ? [TASK_TOOL_DEF] : [];
+    // Long-term memory tool, top-level only (#218); it writes, so not in plan mode.
+    const remember = this.subagentDepth === 0 && !planMode ? [REMEMBER_TOOL_DEF] : [];
     return [...builtIn, ...mcp, ...delegate, ...task, ...remember];
   }
 
@@ -1381,6 +1406,28 @@ export class AgentLoop {
 
       for (const call of pendingToolCalls) {
         const inputObj = this.safeParseArgs(call.argumentsJson);
+
+        // Plan-mode guard (#11): refuse any mutating built-in tool even if the
+        // model tries one. Mutating tools aren't advertised in plan mode, so this
+        // is defense-in-depth — it keeps "plan" read-only no matter what.
+        if (this.mode === "plan") {
+          const tool = this.registry.list().find((t) => t.toolName === call.toolName);
+          const mutating = tool?.requiresConfirmation || MUTATING_FILE_TOOLS.has(call.toolName);
+          if (mutating) {
+            const output = `Plan mode: "${call.toolName}" was not executed (no changes made). Switch to /build to apply changes.`;
+            this.auditLogRedacted({
+              timestamp: new Date().toISOString(),
+              toolName: call.toolName,
+              input: inputObj,
+              output,
+              success: false,
+              error: "plan mode",
+            });
+            this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
+            yield { type: "tool-result", output };
+            continue;
+          }
+        }
 
         // Safety gate: block dangerous shell commands and secret-path access
         // before any execution (#139).
@@ -2320,7 +2367,9 @@ export class AgentLoop {
       "",
       `Available tools: ${toolNames}`,
       "",
-      "You are a fully agentic assistant. You can read files, write and edit files, run shell commands (gh, git, npm, etc.), and use git. Use your tools proactively to complete tasks — do not just suggest code, implement it.",
+      this.mode === "plan"
+        ? "PLAN MODE: investigate the request using read-only tools (read/list/find/search/symbols/web) and produce a concrete, ordered, step-by-step plan for the user to review. You CANNOT modify files, run shell commands, or commit — those tools are unavailable and will be refused. Do not claim you made changes; end with the plan and tell the user to run /build to execute it."
+        : "You are a fully agentic assistant. You can read files, write and edit files, run shell commands (gh, git, npm, etc.), and use git. Use your tools proactively to complete tasks — do not just suggest code, implement it.",
       "You have access to the entire filesystem. Sensitive paths (.ssh, .aws, .env, credentials) are blocked automatically.",
       "When the user mentions a directory path, you can read files from it directly without any setup.",
       "When asked about MetalMind configuration, read ~/.config/metalmind/config.json with your file tools.",

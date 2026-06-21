@@ -13,6 +13,7 @@ interface StatusBarProps {
   mcpServers?: McpServerStatus[];
   context?: { used: number; limit: number };
   usage?: { inputTokens: number; outputTokens: number };
+  mode?: "build" | "plan";
 }
 
 export default function StatusBar({
@@ -21,6 +22,7 @@ export default function StatusBar({
   mcpServers,
   context,
   usage,
+  mode = "build",
 }: StatusBarProps) {
   const connectedServers = mcpServers?.filter((s) => s.connected) ?? [];
   const totalMcpTools = connectedServers.reduce((sum, s) => sum + s.toolCount, 0);
@@ -45,6 +47,7 @@ export default function StatusBar({
   return (
     <Box marginTop={1} flexDirection="column">
       <Box>
+        {mode === "plan" ? <Text color="cyan" bold>PLAN </Text> : null}
         <Text dimColor>
           {isStreaming
             ? "Streaming | Esc: cancel | "

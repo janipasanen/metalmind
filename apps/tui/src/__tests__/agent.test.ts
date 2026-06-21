@@ -1959,3 +1959,59 @@ describe("AgentLoop routing/display polish (#248)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("AgentLoop Build/Plan mode (#11)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function writeThenDone(path: string) {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "w1", toolName: "writeFile", argumentsJson: JSON.stringify({ path, content: "hi" }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("plan mode refuses mutating tools without executing them", async () => {
+    const root = join(tmpdir(), `mm-plan-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const f = join(root, "x.ts");
+    mockCreateProvider.mockReturnValue(writeThenDone(f));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    loop.setMode("plan");
+    expect(loop.getMode()).toBe("plan");
+    const events = await collect(loop.run("write the file"));
+
+    expect(existsSync(f)).toBe(false); // refused, not executed
+    const result = events.find((e) => e.type === "tool-result") as { output?: string } | undefined;
+    expect(result?.output).toMatch(/plan mode/i);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("build mode (default) executes mutating tools", async () => {
+    const root = join(tmpdir(), `mm-build-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const f = join(root, "y.ts");
+    mockCreateProvider.mockReturnValue(writeThenDone(f));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    expect(loop.getMode()).toBe("build");
+    await collect(loop.run("write the file"));
+
+    expect(existsSync(f)).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+});

@@ -101,6 +101,7 @@ export default function App({ config }: AppProps) {
   const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | undefined>(undefined);
   const [pendingApproval, setPendingApproval] = useState<{ req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null>(null);
   const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number } | undefined>(undefined);
+  const [agentMode, setAgentMode] = useState<"build" | "plan">("build");
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
@@ -236,6 +237,7 @@ export default function App({ config }: AppProps) {
           "  /budget [set <usd>|off] - View or set the session spend cap",
           "  /routes           - Show routing decisions + per-tier hit counts",
           "  /brain [on|off]   - Remote-brain mode: cloud coordinates, delegates to local",
+          "  /plan | /build    - Plan mode (read-only, proposes a plan) vs Build mode (executes)",
           "  /keychain         - save | load | status — macOS keychain key storage",
           "  /retry            - Re-run the last prompt (drops the prior answer)",
           "  /edit <text>      - Replace + re-run the last prompt",
@@ -463,6 +465,30 @@ export default function App({ config }: AppProps) {
           yield { type: "text", text: "Remote-brain mode OFF — normal tiered routing (local-first)." } as const;
         } else {
           yield { type: "text", text: `Remote-brain mode is ${agent.isRemoteBrain() ? "ON" : "OFF"}. Usage: /brain on|off` } as const;
+        }
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/plan" || input === "/build" || input === "/mode" || input.startsWith("/mode ")) {
+        const agent = agentRef.current;
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+        } else {
+          const arg = input === "/plan" ? "plan" : input === "/build" ? "build" : input.slice(5).trim();
+          if (arg === "plan" || arg === "build") {
+            agent.setMode(arg);
+            setAgentMode(arg);
+            yield {
+              type: "text",
+              text:
+                arg === "plan"
+                  ? "Plan mode ON — I'll investigate and propose a step-by-step plan without changing files. Run /build to execute."
+                  : "Build mode ON — I'll implement changes directly using all tools.",
+            } as const;
+          } else {
+            yield { type: "text", text: `Current mode: ${agent.getMode()}. Usage: /plan | /build (or /mode plan|build)` } as const;
+          }
         }
         yield { type: "done" } as const;
         return;
@@ -829,7 +855,7 @@ export default function App({ config }: AppProps) {
       )}
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
       <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null} vimMode={vimMode} />
-      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} />
+      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} />
 
       {showCommandPalette && (
         <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} accent={theme.colors.accent}
