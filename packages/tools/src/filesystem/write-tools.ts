@@ -63,16 +63,15 @@ const editFileSchema = z.object({
   replaceAll: z.boolean().default(false),
 });
 
-/** A short line-numbered snippet around the first line of `needle` in `content`,
- *  so the model can verify its edit landed without re-reading the file (#291). */
-function snippetAround(content: string, needle: string, context = 2): string {
-  const firstLine = needle.split("\n")[0];
+/** A short line-numbered snippet at a KNOWN line of `content`, so the model can
+ *  verify its edit landed without re-reading the file (#291). Anchored by the
+ *  edit position (computed by the caller), not by text search — searching for
+ *  newString's first line pointed at the wrong region whenever that line was
+ *  empty ("" matches everything → top of file) or non-unique ("}", "return;"). */
+function snippetAtLine(content: string, lineIdx: number, spanLines: number, context = 2): string {
   const lines = content.split("\n");
-  const idx = lines.findIndex((l) => l.includes(firstLine));
-  if (idx < 0) return "";
-  const needleLines = needle.split("\n").length;
-  const start = Math.max(0, idx - context);
-  const end = Math.min(lines.length, idx + needleLines + context);
+  const start = Math.max(0, lineIdx - context);
+  const end = Math.min(lines.length, lineIdx + spanLines + context);
   const width = String(end).length;
   return lines.slice(start, end).map((l, i) => `${String(start + i + 1).padStart(width)}→${l}`).join("\n");
 }
@@ -136,7 +135,12 @@ export const editFileTool: AgentTool<z.input<typeof editFileSchema>, string> = c
 
     const updated = original.replace(input.oldString, input.newString);
     writeFileSync(safePath, updated, "utf-8");
-    const snip = input.newString ? snippetAround(updated, input.newString) : "";
+    // Anchor the verification snippet on the edit's actual position (known from
+    // the unique match), not a text search for newString.
+    const editPos = original.indexOf(input.oldString);
+    const editLine = original.slice(0, editPos).split("\n").length - 1;
+    const span = Math.max(1, input.newString.split("\n").length);
+    const snip = snippetAtLine(updated, editLine, span);
     return snip ? `Edited ${input.path}. Result:\n${snip}` : `Edited ${input.path}`;
   },
 });

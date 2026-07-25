@@ -103,9 +103,18 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   useEffect(() => {
     if (insertText && insertText.nonce !== lastNonce.current) {
       lastNonce.current = insertText.nonce;
-      setValue((v) => (v.endsWith(" ") || v === "" ? v : v + " ") + insertText.text);
+      setValue((v) => {
+        const next = (v.endsWith(" ") || v === "" ? v : v + " ") + insertText.text;
+        // Keep the vim buffer in sync — it renders its own value, so without
+        // this the inserted mention would be invisible in vim mode.
+        if (vimMode) setVim(initialVimState(next));
+        return next;
+      });
     }
-  }, [insertText]);
+  }, [insertText, vimMode]);
+
+  const [dismissed, setDismissed] = useState(false);
+  const wasAtMatch = useRef(false);
 
   const slashMatches = value.startsWith("/")
     ? SLASH_COMMANDS.filter((c) => c.syntax.startsWith(value))
@@ -114,40 +123,35 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   const atMatch = !value.startsWith("/") && projectRoot ? /@([A-Za-z0-9_./-]*)$/.exec(value) : null;
   let pathMatches: string[] = [];
   if (atMatch) {
-    if (pathsRef.current === null) pathsRef.current = walkProjectPaths(projectRoot!);
+    // Rebuild the path cache each time a NEW @-token starts, so files the agent
+    // just created/deleted show up (a per-process cache went stale immediately).
+    if (pathsRef.current === null || !wasAtMatch.current) pathsRef.current = walkProjectPaths(projectRoot!);
     const q = atMatch[1].toLowerCase();
     pathMatches = pathsRef.current.filter((pp) => pp.toLowerCase().includes(q)).slice(0, 8);
   }
+  wasAtMatch.current = atMatch !== null;
   const suggestions: Array<{ label: string; description: string }> = atMatch
     ? pathMatches.map((pp) => ({ label: `@${pp}`, description: "" }))
     : slashMatches.map((c) => ({ label: c.syntax, description: c.description }));
   const filtered = suggestions;
-  const showSuggestions = !disabled && filtered.length > 0;
+  const showSuggestions = !disabled && filtered.length > 0 && !dismissed;
 
   const acceptSuggestion = (idx: number) => {
     const sel = filtered[idx];
     if (!sel) return;
-    if (atMatch) {
-      setValue(value.slice(0, atMatch.index) + sel.label + " ");
-    } else {
-      setValue(sel.label);
-    }
+    const next = atMatch ? value.slice(0, atMatch.index) + sel.label + " " : sel.label;
+    setValue(next);
+    // Vim renders its own buffer — keep it in sync or the completion would be
+    // invisibly reverted by the next vim keystroke.
+    if (vimMode) setVim(initialVimState(next));
     setSuggestionIdx(0);
   };
 
   useInput((_input, key) => {
-    // Vim modal editing drives the buffer when enabled and no slash menu is open (#184).
-    if (vimMode && !showSuggestions) {
-      const r = vimKey(vim, _input, key);
-      if (r.submit) {
-        handleSubmit(vim.value);
-        setVim(initialVimState(""));
-      } else {
-        setVim(r.state);
-        setValue(r.state.value);
-      }
-      return;
-    }
+    // Suggestion navigation claims ONLY its nav keys; every other key falls
+    // through so typing keeps working. (Previously the open menu swallowed all
+    // keys, which froze the input entirely in vim mode — no TextInput is
+    // mounted there, so the vim branch was the only way characters got in.)
     if (showSuggestions) {
       if (key.upArrow) {
         setSuggestionIdx((p) => Math.max(p - 1, 0));
@@ -161,15 +165,31 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
         acceptSuggestion(suggestionIdx);
         return;
       }
-      if (key.escape) {
-        setValue("");
+      if (key.escape && !vimMode) {
+        // Dismiss the popup but KEEP the draft — wiping a 30-char sentence
+        // because a path popup auto-opened mid-word was destructive. The flag
+        // resets on the next text change.
+        setDismissed(true);
         setSuggestionIdx(0);
         return;
       }
-      return; // swallow other special keys while suggestions open
+    }
+
+    // Vim modal editing drives the buffer when enabled (#184).
+    if (vimMode) {
+      const r = vimKey(vim, _input, key);
+      if (r.submit) {
+        handleSubmit(vim.value);
+        setVim(initialVimState(""));
+      } else {
+        setVim(r.state);
+        setValue(r.state.value);
+      }
+      return;
     }
 
     // History navigation (only when suggestions are not open)
+    if (showSuggestions) return;
     if (key.upArrow) {
       if (history.current.length === 0) return;
       if (historyIdx.current === -1) draft.current = value;
@@ -190,6 +210,7 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
     const { text } = parseBracketedPaste(v);
     setValue(text);
     setSuggestionIdx(0);
+    setDismissed(false);
     if (!text.startsWith("/")) historyIdx.current = -1;
   };
 

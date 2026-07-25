@@ -105,6 +105,7 @@ export default function App({ config }: AppProps) {
   const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
   const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | undefined>(undefined);
   const [pendingApproval, setPendingApproval] = useState<{ req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null>(null);
+  const [approvalScroll, setApprovalScroll] = useState(0);
   const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number } | undefined>(undefined);
   const [agentMode, setAgentMode] = useState<"build" | "plan">("build");
   const [todos, setTodos] = useState<Array<{ text: string; status: "pending" | "in_progress" | "completed" }>>([]);
@@ -133,8 +134,23 @@ export default function App({ config }: AppProps) {
     setMcpServers(agent.getMcpStatus().map((s) => ({ name: s.id, connected: s.connected, toolCount: s.toolCount })));
   }, []);
 
+  // Monotonic reload sequence: a second reload started before the first
+  // finishes must WIN (its config is newer) and the loser must dispose its own
+  // half-built agent instead of leaking it or clobbering the newer one.
+  const reloadSeq = useRef(0);
+  // Mirror of useChat's isStreaming (declared later) for use in callbacks
+  // defined before it.
+  const isStreamingRef = useRef(false);
+
   const reloadAgent = useCallback(async () => {
     let cancelled = false;
+    // Reloading disposes the active agent — doing that during a live turn kills
+    // the in-flight stream and its sqlite handle from under it.
+    if (isStreamingRef.current) {
+      notify("warning", "Model switch deferred — finish or Esc the current turn first, then retry.");
+      return () => {};
+    }
+    const mySeq = ++reloadSeq.current;
 
     (async () => {
       try {
@@ -156,7 +172,11 @@ export default function App({ config }: AppProps) {
         });
         await agent.initMcp();
         await agent.initCoordinator();
-        if (cancelled) return;
+        if (cancelled || mySeq !== reloadSeq.current) {
+          // A newer reload superseded this one — release everything we built.
+          agent.dispose();
+          return;
+        }
         agentRef.current = agent;
         // Dispose the replaced agent so its sqlite handle, MCP clients, and
         // background processes are released instead of leaking on each reload (#242).
@@ -371,6 +391,13 @@ export default function App({ config }: AppProps) {
               ? `Recent sessions — resume with /resume <id>:\n${sessions.slice(0, 15).map(fmt).join("\n")}`
               : "No saved sessions yet.",
           } as const;
+        } else if (!agent.listSessions().some((s) => s.id === sub)) {
+          // An unknown id (or a typo'd subcommand like "list") must NOT wipe the
+          // current conversation — resumeSession would load an empty history.
+          yield {
+            type: "text",
+            text: `No session "${sub}" found. /resume lists sessions; subcommands: search <text> | rename <id> <title> | tag <id> <tags>`,
+          } as const;
         } else {
           const restored = agent.resumeSession(sub);
           replaceMessages(restoredToChatMessages(restored));
@@ -557,7 +584,7 @@ export default function App({ config }: AppProps) {
         if (!agent) { yield { type: "text", text: "Agent not initialised." } as const; }
         else {
           yield { type: "text", text: "Generating commit…" } as const;
-          yield { type: "text", text: `\n${await agent.commitFlow(input.slice(7).trim())}` } as const;
+          yield { type: "text", text: `\n${await agent.commitFlow(input.slice(7).trim(), signal)}` } as const;
         }
         yield { type: "done" } as const;
         return;
@@ -568,7 +595,7 @@ export default function App({ config }: AppProps) {
         if (!agent) { yield { type: "text", text: "Agent not initialised." } as const; }
         else {
           yield { type: "text", text: "Preparing pull request…" } as const;
-          yield { type: "text", text: `\n${await agent.prFlow(input.slice(3).trim())}` } as const;
+          yield { type: "text", text: `\n${await agent.prFlow(input.slice(3).trim(), signal)}` } as const;
         }
         yield { type: "done" } as const;
         return;
@@ -582,8 +609,14 @@ export default function App({ config }: AppProps) {
 
       if (input === "/rollback" || input.startsWith("/rollback ")) {
         const arg = input.slice(9).trim();
-        const turn = arg ? Number(arg) : undefined;
-        const text = agentRef.current?.rollbackToCheckpoint(Number.isFinite(turn) ? turn : undefined) ?? "Agent not initialised.";
+        // A malformed arg ("/rollback turn 3") must be a usage error, NOT a
+        // silent restore of the LATEST checkpoint over the current worktree.
+        if (arg && !/^\d+$/.test(arg)) {
+          yield { type: "text", text: `Unrecognized argument "${arg}". Usage: /rollback [turn-number] — see /checkpoints for the list.` } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+        const text = agentRef.current?.rollbackToCheckpoint(arg ? Number(arg) : undefined) ?? "Agent not initialised.";
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;
@@ -595,7 +628,7 @@ export default function App({ config }: AppProps) {
         if (!agent) { yield { type: "text", text: "Agent not initialised." } as const; }
         else {
           yield { type: "text", text: `Running /${kind}…` } as const;
-          yield { type: "text", text: `\n${await agent.verifyFlow(kind, input.slice(kind.length + 2).trim() || undefined)}` } as const;
+          yield { type: "text", text: `\n${await agent.verifyFlow(kind, input.slice(kind.length + 2).trim() || undefined, signal)}` } as const;
         }
         yield { type: "done" } as const;
         return;
@@ -684,6 +717,14 @@ export default function App({ config }: AppProps) {
       }
 
       if (input === "/retry" || input === "/edit" || input.startsWith("/edit ")) {
+        // Bare /edit must print usage BEFORE popping anything — previously it
+        // silently behaved like /retry, discarding the last answer and burning a
+        // full model run the user didn't ask for.
+        if (input === "/edit" || (input.startsWith("/edit ") && !input.slice(6).trim())) {
+          yield { type: "text", text: "Usage: /edit <new prompt>  (or /retry to re-run the last prompt unchanged)" } as const;
+          yield { type: "done" } as const;
+          return;
+        }
         const agent = agentRef.current;
         if (!agent) {
           yield { type: "text", text: "Agent not initialised." } as const;
@@ -700,11 +741,6 @@ export default function App({ config }: AppProps) {
         // Re-sync the chat view to the trimmed history, then re-run the turn.
         replaceMessages(restoredToChatMessages(agent.conversation()));
         setScrollOffset(0);
-        if (input.startsWith("/edit") && !newText) {
-          yield { type: "text", text: "Usage: /edit <new prompt>" } as const;
-          yield { type: "done" } as const;
-          return;
-        }
         yield { type: "text", text: `↻ ${newText}\n` } as const;
         yield* agent.run(newText, signal);
         return;
@@ -809,8 +845,8 @@ export default function App({ config }: AppProps) {
         return;
       }
 
-      if (input.startsWith("/workspace ")) {
-        const wsPath = input.slice(11).trim();
+      if (input === "/workspace" || input.startsWith("/workspace ")) {
+        const wsPath = input === "/workspace" ? "" : input.slice(11).trim();
         if (!wsPath) {
           yield { type: "text", text: "Usage: /workspace <absolute-path>" } as const;
           yield { type: "done" } as const;
@@ -858,8 +894,8 @@ export default function App({ config }: AppProps) {
         return;
       }
 
-      if (input.startsWith("/apikey ")) {
-        const newKey = input.slice(8).trim();
+      if (input === "/apikey" || input.startsWith("/apikey ")) {
+        const newKey = input === "/apikey" ? "" : input.slice(8).trim();
         if (!newKey) {
           yield { type: "text", text: "Usage: /apikey <key>" } as const;
           yield { type: "done" } as const;
@@ -873,7 +909,12 @@ export default function App({ config }: AppProps) {
         return;
       }
 
-      if (input.startsWith("/model ")) {
+      if (input === "/model" || input.startsWith("/model ")) {
+        if (input === "/model" || !input.slice(7).trim()) {
+          yield { type: "text", text: `Usage: /model <name>  (current: ${activeModel})` } as const;
+          yield { type: "done" } as const;
+          return;
+        }
         // Strip optional "provider/" prefix so "/model ollama/foo" and "/model foo" both work.
         let newModel = input.slice(7).trim();
         const slash = newModel.indexOf("/");
@@ -899,6 +940,9 @@ export default function App({ config }: AppProps) {
     },
   });
 
+  // Keep the pre-declared ref in sync for callbacks defined above useChat.
+  isStreamingRef.current = isStreaming;
+
   const handleSend = useCallback((text: string) => {
     setScrollOffset(0); // jump back to the live tail on a new turn (#159)
     sendMessage(text);
@@ -916,12 +960,21 @@ export default function App({ config }: AppProps) {
       if (input === "y" || key.return) {
         pendingApproval.resolve("approve");
         setPendingApproval(null);
+        setApprovalScroll(0);
       } else if (input === "a") {
         pendingApproval.resolve("always");
         setPendingApproval(null);
+        setApprovalScroll(0);
       } else if (input === "n" || key.escape) {
         pendingApproval.resolve("reject");
         setPendingApproval(null);
+        setApprovalScroll(0);
+      } else if (input === "j" || key.pageDown) {
+        // Scroll a long approval diff — approving big writes blind was the
+        // only option before.
+        setApprovalScroll((v) => v + 10);
+      } else if (input === "k" || key.pageUp) {
+        setApprovalScroll((v) => Math.max(0, v - 10));
       }
       return;
     }
@@ -937,7 +990,7 @@ export default function App({ config }: AppProps) {
     if (key.pageUp) setScrollOffset(prev => prev + CHAT_PAGE_SIZE);
     if (key.pageDown) setScrollOffset(prev => Math.max(0, prev - CHAT_PAGE_SIZE));
     if (input === "G") setScrollOffset(0);
-  }, { isActive: !anyOverlayOpen });
+  }, { isActive: !anyOverlayOpen || pendingApproval !== null }); // approval keys must ALWAYS win, even under an overlay
 
   const getActiveModel = () => {
     if (forcedTier !== null) {
@@ -998,7 +1051,7 @@ export default function App({ config }: AppProps) {
           {todos.length > 8 && <Text dimColor>… {todos.length - 8} more</Text>}
         </Box>
       )}
-      {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
+      {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} diffScroll={approvalScroll} />}
       <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null || anyOverlayOpen} vimMode={vimMode} projectRoot={agentRef.current?.projectRootPath ?? process.cwd()} insertText={pendingInsert} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />
 

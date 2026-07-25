@@ -80,7 +80,7 @@ export default function ChatView({
                 </Box>
                 {tc.diff ? (
                   <Box marginLeft={2} flexDirection="column">
-                    <DiffView diff={tc.diff} filePath={tc.filePath} />
+                    <DiffView diff={tc.diff} filePath={tc.filePath} maxLines={12} />
                   </Box>
                 ) : tc.output ? (
                   <Box marginLeft={2}>

@@ -783,7 +783,12 @@ export class AgentLoop {
       execFileSync("git", ["read-tree", ckpt.sha], { cwd: this.projectRoot, env, timeout: 30_000 });
       execFileSync("git", ["checkout-index", "-af"], { cwd: this.projectRoot, env, timeout: 60_000 });
       this.systemPromptDirty = true;
-      return `Restored the worktree to the turn-${ckpt.turn} checkpoint (${ckpt.sha.slice(0, 10)}). Files created since remain; delete them manually if unwanted.`;
+      // The file-level /undo//redo snapshots describe a timeline that no longer
+      // exists — /undo after a rollback would silently RE-APPLY the rolled-back
+      // edits. Invalidate both stacks so the two restore systems can't fight.
+      this.editStack.length = 0;
+      this.redoStack.length = 0;
+      return `Restored the worktree to the turn-${ckpt.turn} checkpoint (${ckpt.sha.slice(0, 10)}). Files created since remain; delete them manually if unwanted. (File-level /undo history was cleared — it predates this rollback.)`;
     } catch (err) {
       return `Rollback failed: ${errText(err)}`;
     } finally {
@@ -816,9 +821,10 @@ export class AgentLoop {
   }
 
   /** /test, /check, /lint (#295): run the verification tool through the approval
-   *  gate and record the result in history so the model sees it next turn. */
-  async verifyFlow(kind: "test" | "check" | "lint", cmdOverride?: string): Promise<string> {
-    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted };
+   *  gate and record the result in history so the model sees it next turn.
+   *  `signal` makes Esc actually cancel the run (the shell tools honour it). */
+  async verifyFlow(kind: "test" | "check" | "lint", cmdOverride?: string, signal?: AbortSignal): Promise<string> {
+    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted, signal };
     let toolName: string;
     let input: Record<string, unknown>;
     if (kind === "check") {
@@ -830,15 +836,28 @@ export class AgentLoop {
       toolName = kind === "test" ? "runTests" : "runLint";
       input = cmdOverride?.trim() ? { command: cmdOverride.trim() } : {};
     }
-    if ((await this.requestApproval(toolName, input)) === "reject") return `/${kind} cancelled.`;
+    // Respect the persisted /allow allowlist like model-initiated calls do.
+    if (this.needsApproval(toolName, input) && (await this.requestApproval(toolName, input)) === "reject") {
+      return `/${kind} cancelled.`;
+    }
     let out: string;
     try {
       out = String(await this.registry.execute(toolName, input, ctx));
     } catch (err) {
       out = `Error: ${errText(err)}`;
     }
-    out = this.redactor.redact(out).slice(0, 8_000);
+    if (signal?.aborted) return `/${kind} cancelled.`;
+    // Keep the TAIL: test/lint failures and the pass/fail trailer are at the END
+    // of the output — head-truncation cut exactly the part that matters.
+    out = this.redactor.redact(out);
+    if (out.length > 8_000) out = `…(earlier output truncated)\n${out.slice(-8_000)}`;
     // Feed the result into history so the model can act on failures next turn (#295).
+    // On a fresh session, build the REAL system prompt first — otherwise this
+    // push makes history non-empty and runInner would never install it, leaving
+    // the model without its instructions/tools context for the whole session.
+    if (this.history.length === 0) {
+      this.history.push({ role: "system", content: this.buildSystemPrompt() });
+    }
     this.history.push({ role: "system", content: `[/${kind} result]\n${out}` });
     this.saveSession();
     return out;
@@ -847,23 +866,32 @@ export class AgentLoop {
   /** Deterministic /commit flow (#274): stage everything, generate a Conventional
    *  Commit message from the staged diff via the active model, then commit —
    *  both mutations pass through the normal approval gate. */
-  async commitFlow(extraContext = ""): Promise<string> {
-    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted };
+  async commitFlow(extraContext = "", signal?: AbortSignal): Promise<string> {
+    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted, signal };
     const status = String(await this.registry.execute("gitStatus", {}, ctx));
-    if (!status.trim() || status.includes("git exit")) {
-      return status.includes("git exit") ? `Not a git repository?\n${status}` : "Working tree clean — nothing to commit.";
-    }
+    if (status.includes("git exit")) return `Not a git repository?\n${status}`;
+    // gitStatus uses --branch, so a "## main..." header line is ALWAYS present —
+    // clean-tree detection must look for entries beyond it.
+    const dirty = status.split("\n").some((l) => l.trim() && !l.startsWith("##"));
+    if (!dirty) return "Working tree clean — nothing to commit.";
 
-    // Stage all changes (approval-gated like a model-initiated call).
-    if ((await this.requestApproval("gitAdd", { paths: ["."] })) === "reject") return "Commit cancelled (staging rejected).";
+    // Stage all changes (approval-gated like a model-initiated call, honouring
+    // the persisted /allow allowlist).
+    if (this.needsApproval("gitAdd", { paths: ["."] }) && (await this.requestApproval("gitAdd", { paths: ["."] })) === "reject") {
+      return "Commit cancelled (staging rejected).";
+    }
     const addOut = String(await this.registry.execute("gitAdd", { paths: ["."] }, ctx));
     if (addOut.includes("git exit")) return `Staging failed:\n${addOut}`;
 
-    const diff = String(await this.registry.execute("gitDiff", { staged: true }, ctx)).slice(0, 12_000);
+    // Redact BEFORE the diff reaches the (possibly cloud) model — the diff can
+    // quote secrets straight out of config files.
+    const diff = this.redactor.redact(String(await this.registry.execute("gitDiff", { staged: true }, ctx))).slice(0, 12_000);
     if (!diff.trim()) return "Nothing staged after git add — nothing to commit.";
+    if (signal?.aborted) return "Commit cancelled.";
 
     // Generate a Conventional Commit message from the diff.
     let message = "chore: update";
+    let generationFailed = false;
     try {
       const provider = this.getProvider(this.config.provider, this.config.model);
       const res = await provider.completeChat({
@@ -876,33 +904,48 @@ export class AgentLoop {
           },
           { role: "user", content: `${extraContext ? `Context from the user: ${extraContext}\n\n` : ""}Diff:\n${diff}` },
         ],
+        signal,
       });
       const m = res.message.content.trim();
       if (m) message = m.replace(/^```[a-z]*\n?|```$/g, "").trim();
+      else generationFailed = true;
     } catch {
-      /* fall back to the default message */
+      generationFailed = true; // fall back to the default message, but SAY so
     }
+    if (signal?.aborted) return "Commit cancelled.";
 
-    if ((await this.requestApproval("gitCommit", { message })) === "reject") return "Commit cancelled.";
+    if (this.needsApproval("gitCommit", { message }) && (await this.requestApproval("gitCommit", { message })) === "reject") {
+      return "Commit cancelled.";
+    }
     const out = String(await this.registry.execute("gitCommit", { message }, ctx));
-    return out.includes("git exit") ? `Commit failed:\n${out}` : `Committed:\n${message.split("\n")[0]}\n\n${out}`;
+    // Redact: the message is model-generated FROM the diff, which can quote
+    // secrets out of config files; scrub before it reaches the terminal.
+    const note = generationFailed ? "\n(note: message generation failed — used a generic message; amend with git commit --amend if needed)" : "";
+    return this.redactor.redact(
+      out.includes("git exit") ? `Commit failed:\n${out}` : `Committed:\n${message.split("\n")[0]}${note}\n\n${out}`,
+    );
   }
 
   /** /pr flow (#275): push the branch, generate a PR title/body from its commits,
    *  create the PR with gh — push and PR creation are approval-gated. */
-  async prFlow(extraContext = ""): Promise<string> {
-    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted };
+  async prFlow(extraContext = "", signal?: AbortSignal): Promise<string> {
+    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted, signal };
     const branch = String(await this.registry.execute("gitCurrentBranch", {}, ctx)).trim();
     if (!branch || branch.includes("git exit")) return `Could not determine the current branch:\n${branch}`;
     if (branch === "main" || branch === "master") {
-      return `You are on ${branch} — create a feature branch first (gitCreateBranch or /model the agent to do it).`;
+      return `You are on ${branch} — create a feature branch first (e.g. ask the agent: "create a branch for this change").`;
     }
 
-    if ((await this.requestApproval("gitPush", {})) === "reject") return "PR cancelled (push rejected).";
+    if (this.needsApproval("gitPush", {}) && (await this.requestApproval("gitPush", {})) === "reject") {
+      return "PR cancelled (push rejected).";
+    }
     const pushOut = String(await this.registry.execute("gitPush", {}, ctx));
     if (pushOut.includes("git exit")) return `Push failed:\n${pushOut}`;
+    if (signal?.aborted) return "PR cancelled.";
 
-    const log = String(await this.registry.execute("gitLog", { count: 15 }, ctx)).slice(0, 4_000);
+    // Redact BEFORE the log reaches the (possibly cloud) model — commit subjects
+    // can quote secrets.
+    const log = this.redactor.redact(String(await this.registry.execute("gitLog", { count: 15 }, ctx))).slice(0, 4_000);
     let title = `${branch}`;
     let body = "";
     try {
@@ -916,6 +959,7 @@ export class AgentLoop {
           },
           { role: "user", content: `Branch: ${branch}\n${extraContext ? `Context: ${extraContext}\n` : ""}Recent commits:\n${log}` },
         ],
+        signal,
       });
       const text = res.message.content;
       const tm = /TITLE:\s*(.+)/.exec(text);
@@ -925,11 +969,14 @@ export class AgentLoop {
     } catch {
       body = `Commits:\n${log}`;
     }
+    if (signal?.aborted) return "PR cancelled.";
 
-    if ((await this.requestApproval("createPullRequest", { title, body })) === "reject") return "PR cancelled.";
+    if (this.needsApproval("createPullRequest", { title, body }) && (await this.requestApproval("createPullRequest", { title, body })) === "reject") {
+      return "PR cancelled.";
+    }
     try {
       const out = String(await this.registry.execute("createPullRequest", { title, body }, ctx));
-      return `PR created: ${out}`;
+      return this.redactor.redact(`PR created: ${out}`);
     } catch (err) {
       return `PR creation failed: ${errText(err)}`;
     }
@@ -1741,7 +1788,10 @@ export class AgentLoop {
         // End-of-turn verification (#282): if this turn edited files, run the
         // project check before finishing; on failure, feed the errors back and
         // let the model fix them (bounded retries so it can't loop).
-        if (this.editedThisTurn && this.verifyRetriesLeft > 0 && this.mode !== "plan") {
+        // Top-level turns only: a sub-agent shares these flags with its parent,
+        // so running the check inside runSubagent consumed the parent's retries
+        // and injected failure notes into the sub-agent's throwaway history.
+        if (this.subagentDepth === 0 && this.editedThisTurn && this.verifyRetriesLeft > 0 && this.mode !== "plan") {
           const failure = this.runProjectCheck();
           if (failure) {
             this.verifyRetriesLeft--;
@@ -1780,6 +1830,16 @@ export class AgentLoop {
       }
 
       for (const call of pendingToolCalls) {
+        // Esc must stop the WHOLE batch: without this, aborting a long tool let
+        // the remaining queued calls execute (and even pop approval prompts
+        // after the user cancelled). Stub results keep call/result pairing valid.
+        if (signal?.aborted) {
+          const output = "Cancelled by user — tool not executed.";
+          this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
+          yield { type: "tool-result", toolCallId: call.toolCallId, output };
+          continue;
+        }
+
         const inputObj = this.safeParseArgs(call.argumentsJson);
 
         // Plan-mode guard (#11): refuse any mutating built-in tool even if the
@@ -1839,8 +1899,15 @@ export class AgentLoop {
             yield { type: "tool-result", toolCallId: call.toolCallId, output };
             continue;
           }
-          // A mutating tool is about to run — take the turn's git checkpoint so
-          // /rollback can restore even shell/git-driven changes (#297).
+        }
+
+        // A mutation-capable tool is about to run — take the turn's git
+        // checkpoint so /rollback can restore even shell/git-driven changes
+        // (#297). Deliberately OUTSIDE the approval branch: allowlisted (/allow)
+        // and skill-auto-approved calls skip the prompt but must still
+        // checkpoint, otherwise the users who trusted the tool most lose the
+        // safety net entirely.
+        if (this.safetyValidator.requiresApproval(call.toolName) || this.mcpTools.has(call.toolName)) {
           this.gitCheckpoint();
         }
 
@@ -1854,7 +1921,8 @@ export class AgentLoop {
         if (MUTATING_FILE_TOOLS.has(call.toolName) || call.toolName === "multiEdit" || call.toolName === "replaceInProject") {
           try {
             const req = this.buildApprovalRequest(call.toolName, inputObj);
-            resultDiff = req.diff;
+            // Diffs are raw file content — scrub secrets before they reach the UI.
+            resultDiff = req.diff ? this.redactor.redact(req.diff) : undefined;
             resultFile = req.filePath;
           } catch {
             /* best-effort */
@@ -2041,7 +2109,15 @@ export class AgentLoop {
     if (this.alwaysAllow.has(scope) || this.autoApprove) return "approve";
     if (!this.onApprovalRequest) return "approve"; // headless / no UI wired → no gate
     try {
-      const decision = await this.onApprovalRequest(this.buildApprovalRequest(toolName, input));
+      // Redact the prompt payload — diffs/summaries quote raw file content,
+      // which can contain secrets the terminal must never display.
+      const req = this.buildApprovalRequest(toolName, input);
+      const decision = await this.onApprovalRequest({
+        ...req,
+        summary: this.redactor.redact(req.summary),
+        ...(req.diff ? { diff: this.redactor.redact(req.diff) } : {}),
+        ...(req.command ? { command: this.redactor.redact(req.command) } : {}),
+      });
       if (decision === "always") this.alwaysAllow.add(scope);
       return decision;
     } catch {
@@ -2049,11 +2125,21 @@ export class AgentLoop {
     }
   }
 
-  /** Key that scopes an "always allow" decision to the specific target (#241). */
+  /** Key that scopes an "always allow" decision to the specific target (#241).
+   *  Batch tools scope on their real targets too — previously multiEdit and
+   *  replaceInProject fell through to a bare tool-wide key, so one [a] on a
+   *  2-line edit silently pre-approved ARBITRARY multi-file rewrites. */
   private approvalScopeKey(toolName: string, input: Record<string, unknown>): string {
     if (typeof input.path === "string") return `${toolName}:${input.path}`;
     if (typeof input.destination === "string") return `${toolName}:${input.destination}`;
     if (typeof input.command === "string") return `${toolName}:${input.command}`;
+    if (toolName === "multiEdit" && Array.isArray(input.edits)) {
+      const paths = [...new Set((input.edits as Array<{ path?: unknown }>).map((e) => String(e?.path ?? "")))].sort();
+      return `multiEdit:${paths.join(",")}`;
+    }
+    if (toolName === "replaceInProject" && typeof input.find === "string") {
+      return `replaceInProject:${input.find}`;
+    }
     return toolName;
   }
 
@@ -2911,6 +2997,14 @@ export class AgentLoop {
   clearHistory(): void {
     this.history = [];
     this.turnCount = 0;
+    // Per-conversation state must not leak into the fresh session: stale todos
+    // kept the Tasks panel showing the OLD session's list after /clear, and a
+    // leftover turnContext/cap-notice would ride into the first new request.
+    this.todos = [];
+    this.onTodos?.([]);
+    this.turnContext = [];
+    this.iterationCapNotice = null;
+    this.editedThisTurn = false;
   }
 
   /**
@@ -3066,6 +3160,13 @@ export class AgentLoop {
       this.history = this.sessionStore.loadMessages(id);
       this.sessionId = id;
       this.turnCount = this.history.filter((m) => m.role === "user").length;
+      // Mirror initPersistence: the resumed prompt's repo map/instructions may
+      // predate on-disk changes — rebuild on the next turn (#302). And the
+      // previous conversation's task list must not bleed into this one.
+      this.systemPromptDirty = true;
+      this.todos = [];
+      this.onTodos?.([]);
+      this.turnContext = [];
       return this.displayMessages();
     } catch {
       return [];

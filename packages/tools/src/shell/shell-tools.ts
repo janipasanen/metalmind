@@ -14,13 +14,20 @@ const OUTPUT_CAP = 10 * 1024 * 1024;
 
 /** Async shell runner (#284): spawn instead of execSync so the event loop (and
  *  the whole Ink TUI) keeps rendering during long commands, with a hard timeout
- *  and Esc-to-cancel via the turn's AbortSignal. */
+ *  and Esc-to-cancel via the turn's AbortSignal.
+ *
+ *  Settling is anchored on 'exit', NOT 'close': 'close' waits for the stdio
+ *  pipes to drain, and a grandchild that inherits them (e.g. `npm run dev &`,
+ *  or a test runner's orphaned worker) keeps them open forever — hanging the
+ *  whole turn. After exit we give stdio a short grace to flush, then settle.
+ *  Kill/abort also force-settle on their own, and the process GROUP is killed
+ *  (detached + kill(-pid)) so grandchildren don't survive the timeout. */
 function runShellAsync(command: string, cwd: string, timeoutMs: number | undefined, signal?: AbortSignal): Promise<RunResult> {
   // Direct execute() calls (tests, registry bypass) may skip zod defaults.
   const effectiveTimeout = timeoutMs && timeoutMs >= 1000 ? timeoutMs : 120_000;
   return new Promise((resolvePromise) => {
     const start = Date.now();
-    const child = spawn(command, { shell: true, cwd });
+    const child = spawn(command, { shell: true, cwd, detached: true });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => {
@@ -38,13 +45,24 @@ function runShellAsync(command: string, cwd: string, timeoutMs: number | undefin
       signal?.removeEventListener("abort", onAbort);
       resolvePromise({ stdout, stderr, exitCode, duration: Date.now() - start });
     };
+    const killGroup = () => {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL"); // whole group, incl. grandchildren
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    };
     const timer = setTimeout(() => {
       stderr += `\n(timed out after ${effectiveTimeout}ms — killed)`;
-      child.kill("SIGKILL");
+      killGroup();
+      // Force-settle: don't depend on any event arriving after a SIGKILL.
+      setTimeout(() => settle(124), 250);
     }, effectiveTimeout);
     const onAbort = () => {
       stderr += "\n(cancelled)";
-      child.kill("SIGKILL");
+      killGroup();
+      setTimeout(() => settle(130), 250);
     };
     if (signal) {
       if (signal.aborted) onAbort();
@@ -54,6 +72,12 @@ function runShellAsync(command: string, cwd: string, timeoutMs: number | undefin
       stderr += String(err);
       settle(127);
     });
+    // 'exit' fires when the process dies even if grandchildren hold the pipes;
+    // give stdio 200ms to flush whatever is buffered, then settle.
+    child.on("exit", (code) => {
+      setTimeout(() => settle(code ?? 1), 200);
+    });
+    // Fast path: pipes closed too — settle immediately without the grace wait.
     child.on("close", (code) => settle(code ?? 1));
   });
 }

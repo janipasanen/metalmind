@@ -41,8 +41,11 @@ export class DiffGenerator {
     return { path, original, modified: content, patch };
   }
 
-  /** Preview a multiEdit batch: apply each edit in-memory (grouped per file, in
-   *  order) and emit one bounded unified diff per touched file (#279). */
+  /** Preview a multiEdit batch: apply each edit in-memory (keyed by RESOLVED
+   *  path, matching execution) and emit one bounded unified diff per touched
+   *  file. Edits that would make the real tool FAIL (0 matches, or >1 without
+   *  replaceAll) are flagged explicitly — previously they previewed as a clean
+   *  first-occurrence diff the user approved but that was never applied (#279). */
   static previewMultiEdit(
     edits: Array<{ path: string; oldString: string; newString: string; replaceAll?: boolean }>,
     projectRoot: string,
@@ -50,23 +53,34 @@ export class DiffGenerator {
   ): string {
     const maxFiles = opts.maxFiles ?? 10;
     const maxLines = opts.maxLinesPerFile ?? 40;
-    const buffers = new Map<string, { original: string; current: string }>();
-    for (const e of edits) {
-      let buf = buffers.get(e.path);
+    const buffers = new Map<string, { display: string; original: string; current: string }>();
+    const failures: string[] = [];
+    edits.forEach((e, i) => {
+      const key = resolve(projectRoot, e.path);
+      let buf = buffers.get(key);
       if (!buf) {
-        const resolved = resolve(projectRoot, e.path);
-        const original = existsSync(resolved) ? readFileSync(resolved, "utf-8") : "";
-        buf = { original, current: original };
-        buffers.set(e.path, buf);
+        const original = existsSync(key) ? readFileSync(key, "utf-8") : "";
+        buf = { display: e.path, original, current: original };
+        buffers.set(key, buf);
+      }
+      const count = buf.current.split(e.oldString).length - 1;
+      if (count === 0) {
+        failures.push(`edit ${i + 1} (${e.path}) will FAIL: oldString not found — the whole batch rolls back`);
+        return;
+      }
+      if (count > 1 && !e.replaceAll) {
+        failures.push(`edit ${i + 1} (${e.path}) will FAIL: ${count} occurrences without replaceAll — the whole batch rolls back`);
+        return;
       }
       buf.current = e.replaceAll
         ? buf.current.replaceAll(e.oldString, e.newString)
         : buf.current.replace(e.oldString, e.newString);
-    }
-    const files = [...buffers.entries()];
+    });
+    const files = [...buffers.values()].filter((b) => b.current !== b.original);
     const parts: string[] = [];
-    for (const [path, buf] of files.slice(0, maxFiles)) {
-      const patch = this.generatePatch(path, buf.original, buf.current);
+    if (failures.length > 0) parts.push(`⚠ ${failures.join("\n⚠ ")}`);
+    for (const buf of files.slice(0, maxFiles)) {
+      const patch = this.generatePatch(buf.display, buf.original, buf.current);
       const lines = patch.split("\n");
       parts.push(lines.length > maxLines ? lines.slice(0, maxLines).join("\n") + `\n…(+${lines.length - maxLines} more diff lines)` : patch);
     }

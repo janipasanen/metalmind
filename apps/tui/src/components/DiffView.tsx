@@ -9,6 +9,10 @@ interface DiffLine {
 interface DiffViewProps {
   diff: string;
   filePath?: string;
+  /** Cap on rendered diff lines (transcript uses a smaller cap than approvals). */
+  maxLines?: number;
+  /** Scroll offset in diff lines (approval view: j/k). */
+  offset?: number;
 }
 
 function parseDiff(raw: string): DiffLine[] {
@@ -31,7 +35,7 @@ function parseDiff(raw: string): DiffLine[] {
   return lines;
 }
 
-export default function DiffView({ diff, filePath }: DiffViewProps) {
+export default function DiffView({ diff, filePath, maxLines = 30, offset = 0 }: DiffViewProps) {
   if (!diff) {
     return (
       <Box padding={1}>
@@ -43,9 +47,10 @@ export default function DiffView({ diff, filePath }: DiffViewProps) {
   const parsed = parseDiff(diff);
   // Top-anchored: the first hunk (where the edit almost always is) must be
   // visible; truncate from the TAIL with an explicit footer (#278).
-  const MAX_LINES = 30;
-  const display = parsed.slice(0, MAX_LINES);
-  const hidden = parsed.length - display.length;
+  const start = Math.max(0, Math.min(offset, Math.max(0, parsed.length - maxLines)));
+  const display = parsed.slice(start, start + maxLines);
+  const hiddenAbove = start;
+  const hidden = parsed.length - start - display.length;
 
   return (
     <Box
@@ -81,8 +86,9 @@ export default function DiffView({ diff, filePath }: DiffViewProps) {
           </Text>
         </Box>
       ))}
+      {hiddenAbove > 0 && <Text dimColor>↑ {hiddenAbove} line(s) above</Text>}
       {hidden > 0 && (
-        <Text dimColor>… {hidden} more diff line(s) not shown</Text>
+        <Text dimColor>… {hidden} more diff line(s) below</Text>
       )}
     </Box>
   );

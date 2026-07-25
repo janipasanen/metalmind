@@ -244,3 +244,35 @@ describe("findFilesTool (#163)", () => {
     expect(out.includes("node_modules")).toBe(false);
   });
 });
+
+describe("audit-4 fixes", () => {
+  const testDir = join(tmpdir(), `metalmind-a4-${Date.now()}`);
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(join(testDir, "src", "deep"), { recursive: true });
+    writeFileSync(join(testDir, "src", "deep", "x.ts"), "content");
+    writeFileSync(join(testDir, "c++thing.h"), "content");
+  });
+  afterEach(() => rmSync(testDir, { recursive: true, force: true }));
+
+  it("findFiles does not crash on regex metachars in the pattern", async () => {
+    const result = await findFilesTool.execute({ pattern: "c++*.h", path: "." }, { projectRoot: testDir });
+    expect(result).toContain("c++thing.h");
+  });
+
+  it("readFile clamp reports the ACTUAL shown range on line boundaries", async () => {
+    // 3000 lines x ~30 chars ≈ 90KB numbered — exceeds the 48KB clamp.
+    const big = Array.from({ length: 3000 }, (_, i) => `line-${i}-abcdefghijklmnopqrst`).join("\n");
+    writeFileSync(join(testDir, "big.txt"), big);
+    const result = await readFileTool.execute({ path: "big.txt" }, { projectRoot: testDir });
+    const m = /\(lines 1-(\d+) of 3000 — clamped at 48KB/.exec(result);
+    expect(m).not.toBeNull();
+    const shownEnd = Number(m![1]);
+    expect(shownEnd).toBeLessThan(2000); // clamped before the line cap
+    // The last numbered line in the body matches the reported range exactly.
+    const bodyLines = result.split("\n");
+    const lastNumbered = bodyLines[bodyLines.length - 2]; // before the footer
+    expect(lastNumbered).toContain(`${shownEnd}→`);
+  });
+});

@@ -128,3 +128,38 @@ describe("DiffGenerator", () => {
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+describe("previewMultiEdit mirrors execution semantics (audit-4)", () => {
+  it("flags edits that will fail instead of showing a diff that never applies", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-medit4-"));
+    writeFileSync(join(dir, "dup.ts"), "const x = 1;\nconst x2 = 1;\nconst x3 = 1;");
+    const preview = DiffGenerator.previewMultiEdit(
+      [
+        { path: "dup.ts", oldString: "const", newString: "let" }, // 3 occurrences, no replaceAll → will fail
+        { path: "dup.ts", oldString: "NOT-PRESENT", newString: "x" }, // not found → will fail
+      ],
+      dir,
+    );
+    expect(preview).toMatch(/will FAIL: 3 occurrences/);
+    expect(preview).toMatch(/will FAIL: oldString not found/);
+    expect(preview).toMatch(/rolls back/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keys buffers by resolved path so ./x and x are the same file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-medit5-"));
+    writeFileSync(join(dir, "one.ts"), "aaa\nbbb");
+    const preview = DiffGenerator.previewMultiEdit(
+      [
+        { path: "one.ts", oldString: "aaa", newString: "AAA" },
+        { path: "./one.ts", oldString: "bbb", newString: "BBB" },
+      ],
+      dir,
+    );
+    // Both edits land in ONE file preview (sequential on the same buffer).
+    expect((preview.match(/--- a\//g) ?? []).length).toBe(1);
+    expect(preview).toContain("+AAA");
+    expect(preview).toContain("+BBB");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

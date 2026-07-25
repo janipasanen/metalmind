@@ -47,21 +47,28 @@ export const readFileTool: AgentTool<ReadFileInput, string> = createTool({
     const sliced = lines.slice(start, end);
 
     // cat -n style line numbers so the model can cite/edit precisely (#281).
-    const width = String(end).length;
-    let body = sliced.map((l, i) => `${String(start + i + 1).padStart(width)}→${l}`).join("\n");
-    // Char clamp on top of the line cap: minified/long-line files can still be
-    // huge at few lines (#290).
+    // Char clamp on LINE boundaries: a mid-line cut with a footer claiming the
+    // full range made the model page past lines it never saw. Accumulate whole
+    // lines until the budget, and report the range that was ACTUALLY shown so
+    // offset-based paging resumes exactly where output stopped (#290 fix).
     const CHAR_CAP = 48_000;
-    let clamped = "";
-    if (body.length > CHAR_CAP) {
-      body = body.slice(0, CHAR_CAP);
-      clamped = " — output clamped at 48KB";
+    const width = String(end).length;
+    const numbered: string[] = [];
+    let chars = 0;
+    let shownEnd = start; // last line number actually included (1-based = shownEnd)
+    for (let i = 0; i < sliced.length; i++) {
+      const line = `${String(start + i + 1).padStart(width)}→${sliced[i]}`;
+      if (chars + line.length + 1 > CHAR_CAP && numbered.length > 0) break;
+      numbered.push(line);
+      chars += line.length + 1;
+      shownEnd = start + i + 1;
     }
+    const clamped = shownEnd < end ? " — clamped at 48KB" : "";
     const footer =
-      start > 0 || end < lines.length || clamped
-        ? `\n(lines ${start + 1}-${end} of ${lines.length}${clamped} — use offset/limit to read more)`
+      start > 0 || shownEnd < lines.length || clamped
+        ? `\n(lines ${start + 1}-${shownEnd} of ${lines.length}${clamped} — use offset/limit to read more)`
         : "";
-    return body + footer;
+    return numbered.join("\n") + footer;
   },
 });
 
@@ -123,10 +130,20 @@ export const listDirectoryTool: AgentTool<z.input<typeof listDirectorySchema>, s
 });
 
 function globMatch(name: string, pattern: string): boolean {
-  const regex = new RegExp(
-    "^" + pattern.replace(/\./g, "\\.").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
-  );
-  return regex.test(name);
+  // Escape ALL regex metachars first (a pattern like "c++*.h" used to build an
+  // invalid regex and throw), then translate glob wildcards: ** crosses path
+  // separators, * stays within one segment, ? is a single char.
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const translated = escaped
+    .split("**").join(String.fromCharCode(0))
+    .replace(/\*/g, "[^/]*")
+    .split(String.fromCharCode(0)).join(".*")
+    .replace(/\?/g, ".");
+  try {
+    return new RegExp(`^${translated}$`).test(name);
+  } catch {
+    return name === pattern; // unparseable pattern → literal comparison
+  }
 }
 
 const WALK_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "out", "coverage", ".turbo", "target"]);
@@ -213,8 +230,15 @@ export const findFilesTool: AgentTool<z.input<typeof findFilesSchema>, string> =
       return finish(files);
     }
 
-    // Fallback (ripgrep not installed): ignore-aware hand-rolled walk.
-    return finish(walkDir(searchDir).filter((f) => globMatch(f.split(sep).pop()!, input.pattern)));
+    // Fallback (ripgrep not installed): ignore-aware hand-rolled walk. A pattern
+    // containing "/" matches the searchDir-RELATIVE path (as rg does) — basename
+    // matching made every advertised path-aware glob return nothing without rg.
+    const wantsPath = input.pattern.includes("/");
+    return finish(
+      walkDir(searchDir).filter((f) =>
+        wantsPath ? globMatch(relative(searchDir, f), input.pattern) : globMatch(f.split(sep).pop()!, input.pattern),
+      ),
+    );
   },
 });
 
