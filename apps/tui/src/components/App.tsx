@@ -42,6 +42,8 @@ export interface ChatMessage {
     toolName: string;
     argumentsJson: string;
     output?: string;
+    diff?: string;
+    filePath?: string;
   }>;
   timestamp: Date;
 }
@@ -106,6 +108,7 @@ export default function App({ config }: AppProps) {
   const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number } | undefined>(undefined);
   const [agentMode, setAgentMode] = useState<"build" | "plan">("build");
   const [todos, setTodos] = useState<Array<{ text: string; status: "pending" | "in_progress" | "completed" }>>([]);
+  const [pendingInsert, setPendingInsert] = useState<{ text: string; nonce: number } | null>(null);
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
@@ -996,7 +999,7 @@ export default function App({ config }: AppProps) {
         </Box>
       )}
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
-      <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null || anyOverlayOpen} vimMode={vimMode} />
+      <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null || anyOverlayOpen} vimMode={vimMode} projectRoot={agentRef.current?.projectRootPath ?? process.cwd()} insertText={pendingInsert} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />
 
       {showCommandPalette && (
@@ -1032,7 +1035,12 @@ export default function App({ config }: AppProps) {
       )}
       {showMcpConfig && <McpConfig onDone={() => setShowMcpConfig(false)} accent={theme.colors.accent} />}
       {showFileTree && (
-        <FileTree root={agentRef.current?.projectRootPath ?? process.cwd()} onClose={() => setShowFileTree(false)} accent={theme.colors.accent} />
+        <FileTree
+          root={agentRef.current?.projectRootPath ?? process.cwd()}
+          onClose={() => setShowFileTree(false)}
+          accent={theme.colors.accent}
+          onSelectFile={(rel) => setPendingInsert({ text: `@${rel}`, nonce: Date.now() })}
+        />
       )}
       {tierModelPickerFor !== null && (
         <TierModelPicker

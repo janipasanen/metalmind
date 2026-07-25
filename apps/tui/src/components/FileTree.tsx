@@ -12,6 +12,8 @@ interface FileTreeProps {
   root: string;
   onClose: () => void;
   accent?: string;
+  /** Called with the project-relative path when Enter is pressed on a FILE (#299). */
+  onSelectFile?: (relPath: string) => void;
 }
 
 interface VisibleRow {
@@ -41,7 +43,7 @@ const MAX_ROWS = 18;
  * Read-only terminal file browser (legacy #9). Arrow keys navigate; →/Enter
  * expands a directory, ← collapses (or jumps to parent), Esc closes.
  */
-export default function FileTree({ root, onClose, accent = "cyan" }: FileTreeProps) {
+export default function FileTree({ root, onClose, accent = "cyan", onSelectFile }: FileTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set([root]));
   const [cursor, setCursor] = useState(0);
 
@@ -79,6 +81,11 @@ export default function FileTree({ root, onClose, accent = "cyan" }: FileTreePro
           next.add(current.path);
           return next;
         });
+      } else if (current && onSelectFile) {
+        // Enter on a file inserts an @-mention into the input bar (#299).
+        const rel = current.path.startsWith(root) ? current.path.slice(root.length + 1) : current.path;
+        onSelectFile(rel);
+        onClose();
       }
     } else if (key.leftArrow || input === "h") {
       if (current?.isDir && expanded.has(current.path)) {
@@ -107,7 +114,7 @@ export default function FileTree({ root, onClose, accent = "cyan" }: FileTreePro
   return (
     <Box borderStyle="round" borderColor={accent} flexDirection="column" paddingX={1} marginTop={1}>
       <Text bold color={accent}>
-        Files — ↑↓ move · →/Enter expand · ← collapse · Esc close
+        Files — ↑↓ move · →/Enter expand dir / @-mention file · ← collapse · Esc close
       </Text>
       {view.map((r, i) => {
         const selected = start + i === clampedCursor;

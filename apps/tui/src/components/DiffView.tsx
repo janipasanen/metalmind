@@ -41,7 +41,11 @@ export default function DiffView({ diff, filePath }: DiffViewProps) {
   }
 
   const parsed = parseDiff(diff);
-  const display = parsed.slice(-30);
+  // Top-anchored: the first hunk (where the edit almost always is) must be
+  // visible; truncate from the TAIL with an explicit footer (#278).
+  const MAX_LINES = 30;
+  const display = parsed.slice(0, MAX_LINES);
+  const hidden = parsed.length - display.length;
 
   return (
     <Box
@@ -77,6 +81,9 @@ export default function DiffView({ diff, filePath }: DiffViewProps) {
           </Text>
         </Box>
       ))}
+      {hidden > 0 && (
+        <Text dimColor>… {hidden} more diff line(s) not shown</Text>
+      )}
     </Box>
   );
 }

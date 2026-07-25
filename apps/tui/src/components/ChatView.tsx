@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { ChatMessage } from "./App.js";
 import MarkdownText from "./MarkdownText.js";
+import DiffView from "./DiffView.js";
 import { pageWindow } from "../paging.js";
 
 interface ChatViewProps {
@@ -11,6 +12,8 @@ interface ChatViewProps {
     toolName: string;
     argumentsJson: string;
     output?: string;
+    diff?: string;
+    filePath?: string;
   }>;
   isStreaming: boolean;
   accent?: string;
@@ -75,10 +78,14 @@ export default function ChatView({
                     ↳ {tc.toolName}({truncateJson(tc.argumentsJson)})
                   </Text>
                 </Box>
-                {tc.output ? (
+                {tc.diff ? (
+                  <Box marginLeft={2} flexDirection="column">
+                    <DiffView diff={tc.diff} filePath={tc.filePath} />
+                  </Box>
+                ) : tc.output ? (
                   <Box marginLeft={2}>
                     <Text color="green" dimColor>
-                      ← {truncateJson(tc.output, 80)}
+                      ← {truncateJson(tc.output, 200)}
                     </Text>
                   </Box>
                 ) : null}
@@ -99,6 +106,19 @@ export default function ChatView({
           </Box>
           <Box flexGrow={1} flexDirection="column">
             <MarkdownText text={streamingContent} accent={accent} />
+            {/* Tool activity stays visible even after text has streamed (#298). */}
+            {activeToolCalls.length > 0 && (
+              <Box flexDirection="column">
+                {activeToolCalls.slice(-4).map((tc, i) => (
+                  <Text key={i} color="yellow" dimColor>
+                    {tc.output ? "✓" : "…"} {tc.toolName}({truncateJson(tc.argumentsJson)})
+                  </Text>
+                ))}
+                {activeToolCalls.length > 4 && (
+                  <Text dimColor>({activeToolCalls.filter((t) => t.output).length} of {activeToolCalls.length} tools done)</Text>
+                )}
+              </Box>
+            )}
             <Text color="yellow" dimColor>▌</Text>
           </Box>
         </Box>

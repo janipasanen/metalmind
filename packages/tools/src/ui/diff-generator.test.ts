@@ -68,4 +68,63 @@ describe("DiffGenerator", () => {
       expect(patch).toContain("+y");
     });
   });
+
+  describe("LCS alignment (#278)", () => {
+    it("a one-line insertion does not cascade into the rest of the file", () => {
+      const original = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
+      const lines = original.split("\n");
+      lines.splice(5, 0, "INSERTED LINE");
+      const patch = DiffGenerator.generatePatch("big.ts", original, lines.join("\n"));
+
+      const adds = patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++"));
+      const dels = patch.split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---"));
+      expect(adds).toEqual(["+INSERTED LINE"]); // exactly one +, no churn
+      expect(dels).toEqual([]);
+      // and the patch is small (one hunk + context), not the whole file
+      expect(patch.split("\n").length).toBeLessThan(15);
+    });
+
+    it("emits proper @@ hunk headers with line numbers", () => {
+      const original = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj";
+      const modified = "a\nb\nc\nd\nE\nf\ng\nh\ni\nj";
+      const patch = DiffGenerator.generatePatch("h.ts", original, modified);
+      expect(patch).toMatch(/@@ -\d+,\d+ \+\d+,\d+ @@/);
+      expect(patch).toContain("-e");
+      expect(patch).toContain("+E");
+    });
+
+    it("distant changes produce separate hunks", () => {
+      const lines = Array.from({ length: 60 }, (_, i) => `l${i}`);
+      const mod = [...lines];
+      mod[2] = "CHANGED-TOP";
+      mod[55] = "CHANGED-BOTTOM";
+      const patch = DiffGenerator.generatePatch("two.ts", lines.join("\n"), mod.join("\n"));
+      const hunks = patch.split("\n").filter((l) => l.startsWith("@@"));
+      expect(hunks.length).toBe(2);
+    });
+  });
+
+  describe("previewMultiEdit (#279)", () => {
+    it("previews per-file diffs for a multi-edit batch", () => {
+      const dir = mkdtempSync(join(tmpdir(), "mm-medit-"));
+      writeFileSync(join(dir, "one.ts"), "const a = 1;\nconst b = 2;");
+      writeFileSync(join(dir, "two.ts"), "export function f() { return 0; }");
+      const diff = DiffGenerator.previewMultiEdit(
+        [
+          { path: "one.ts", oldString: "const a = 1;", newString: "const a = 100;" },
+          { path: "two.ts", oldString: "return 0;", newString: "return 42;" },
+        ],
+        dir,
+      );
+      expect(diff).toContain("--- a/one.ts");
+      expect(diff).toContain("+const a = 100;");
+      expect(diff).toContain("--- a/two.ts");
+      expect(diff).toContain("+export function f() { return 42; }");
+      rmSync(dir, { recursive: true, force: true });
+    });
+  });
 });
+
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";

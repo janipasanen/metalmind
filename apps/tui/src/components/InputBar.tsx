@@ -1,8 +1,35 @@
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { parseBracketedPaste, endsWithContinuation, applyContinuation } from "../multiline.js";
 import { vimKey, initialVimState } from "../vim.js";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+
+const PATH_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "out", "coverage", ".turbo", "target", ".venv", "__pycache__", ".metalmind"]);
+const PATH_CAP = 2000;
+
+/** Bounded project file walk for @-path completion (#277). */
+function walkProjectPaths(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, rel: string) => {
+    if (out.length >= PATH_CAP) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (out.length >= PATH_CAP) return;
+      if (e.name.startsWith(".") && e.isDirectory()) continue;
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (!PATH_IGNORE_DIRS.has(e.name)) walk(join(dir, e.name), r);
+      } else {
+        out.push(r);
+      }
+    }
+  };
+  walk(root, "");
+  return out;
+}
 
 const SLASH_COMMANDS = [
   { syntax: "/help",        description: "Show available commands" },
@@ -55,9 +82,13 @@ interface InputBarProps {
   accent?: string;
   /** Vim modal editing in the input bar (#184). */
   vimMode?: boolean;
+  /** Project root for @-path completion (#277). */
+  projectRoot?: string;
+  /** External text insertion (e.g. FileTree Enter → @mention) (#299). */
+  insertText?: { text: string; nonce: number } | null;
 }
 
-export default function InputBar({ onSubmit, disabled = false, accent = "cyan", vimMode = false }: InputBarProps) {
+export default function InputBar({ onSubmit, disabled = false, accent = "cyan", vimMode = false, projectRoot, insertText }: InputBarProps) {
   const [value, setValue] = useState("");
   const [vim, setVim] = useState(() => initialVimState(""));
   const [suggestionIdx, setSuggestionIdx] = useState(0);
@@ -65,10 +96,44 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   const historyIdx = useRef(-1);
   const draft = useRef("");
 
-  const filtered = value.startsWith("/")
+  const pathsRef = useRef<string[] | null>(null);
+
+  // External insertion (#299): append e.g. "@src/a.ts " when the nonce changes.
+  const lastNonce = useRef(-1);
+  useEffect(() => {
+    if (insertText && insertText.nonce !== lastNonce.current) {
+      lastNonce.current = insertText.nonce;
+      setValue((v) => (v.endsWith(" ") || v === "" ? v : v + " ") + insertText.text);
+    }
+  }, [insertText]);
+
+  const slashMatches = value.startsWith("/")
     ? SLASH_COMMANDS.filter((c) => c.syntax.startsWith(value))
     : [];
+  // @-path completion (#277): complete the trailing @token against the project tree.
+  const atMatch = !value.startsWith("/") && projectRoot ? /@([A-Za-z0-9_./-]*)$/.exec(value) : null;
+  let pathMatches: string[] = [];
+  if (atMatch) {
+    if (pathsRef.current === null) pathsRef.current = walkProjectPaths(projectRoot!);
+    const q = atMatch[1].toLowerCase();
+    pathMatches = pathsRef.current.filter((pp) => pp.toLowerCase().includes(q)).slice(0, 8);
+  }
+  const suggestions: Array<{ label: string; description: string }> = atMatch
+    ? pathMatches.map((pp) => ({ label: `@${pp}`, description: "" }))
+    : slashMatches.map((c) => ({ label: c.syntax, description: c.description }));
+  const filtered = suggestions;
   const showSuggestions = !disabled && filtered.length > 0;
+
+  const acceptSuggestion = (idx: number) => {
+    const sel = filtered[idx];
+    if (!sel) return;
+    if (atMatch) {
+      setValue(value.slice(0, atMatch.index) + sel.label + " ");
+    } else {
+      setValue(sel.label);
+    }
+    setSuggestionIdx(0);
+  };
 
   useInput((_input, key) => {
     // Vim modal editing drives the buffer when enabled and no slash menu is open (#184).
@@ -93,8 +158,7 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
         return;
       }
       if (key.tab) {
-        setValue(filtered[suggestionIdx]?.syntax ?? value);
-        setSuggestionIdx(0);
+        acceptSuggestion(suggestionIdx);
         return;
       }
       if (key.escape) {
@@ -156,16 +220,16 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
       {showSuggestions && (
         <Box flexDirection="column" borderStyle="round" borderColor={accent} paddingX={1} paddingY={0}>
           {filtered.map((cmd, i) => (
-            <Box key={cmd.syntax} flexDirection="row">
+            <Box key={cmd.label} flexDirection="row">
               <Box width={2}>
                 <Text color={i === suggestionIdx ? accent : "gray"}>{i === suggestionIdx ? ">" : " "}</Text>
               </Box>
-              <Box width={14}>
+              <Box width={cmd.description ? 14 : undefined}>
                 <Text color={i === suggestionIdx ? accent : "white"} bold={i === suggestionIdx}>
-                  {cmd.syntax.trimEnd()}
+                  {cmd.label.trimEnd()}
                 </Text>
               </Box>
-              <Text dimColor>{cmd.description}</Text>
+              {cmd.description ? <Text dimColor>{cmd.description}</Text> : null}
             </Box>
           ))}
           <Text dimColor>↑↓ select  Tab complete  Esc dismiss</Text>

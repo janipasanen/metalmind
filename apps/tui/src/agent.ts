@@ -1680,7 +1680,7 @@ export class AgentLoop {
         // Scrub secrets the model may have echoed before they reach the UI (#223).
         if (assistantText) yield { type: "text", text: this.redactor.redact(assistantText) };
         for (const tc of pendingToolCalls) {
-          yield { type: "tool-call", toolCall: { toolName: tc.toolName, argumentsJson: tc.argumentsJson } };
+          yield { type: "tool-call", toolCall: { toolCallId: tc.toolCallId, toolName: tc.toolName, argumentsJson: tc.argumentsJson } };
         }
         pending = undefined;
       } else {
@@ -1713,7 +1713,7 @@ export class AgentLoop {
             pendingToolCalls.push(event.toolCall);
             yield {
               type: "tool-call",
-              toolCall: { toolName: event.toolCall.toolName, argumentsJson: event.toolCall.argumentsJson },
+              toolCall: { toolCallId: event.toolCall.toolCallId, toolName: event.toolCall.toolName, argumentsJson: event.toolCall.argumentsJson },
             };
           } else if (event.type === "usage") {
             this.recordUsage(event.usage);
@@ -1769,7 +1769,7 @@ export class AgentLoop {
       ) {
         const outputs = await this.runReadOnlyBatch(pendingToolCalls);
         for (let i = 0; i < pendingToolCalls.length; i++) {
-          yield { type: "tool-result", output: outputs[i] };
+          yield { type: "tool-result", toolCallId: pendingToolCalls[i].toolCallId, output: outputs[i] };
           this.history.push({
             role: "tool",
             content: outputs[i],
@@ -1799,7 +1799,7 @@ export class AgentLoop {
               error: "plan mode",
             });
             this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
-            yield { type: "tool-result", output };
+            yield { type: "tool-result", toolCallId: call.toolCallId, output };
             continue;
           }
         }
@@ -1818,7 +1818,7 @@ export class AgentLoop {
             error: violation.message,
           });
           this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
-          yield { type: "tool-result", output };
+          yield { type: "tool-result", toolCallId: call.toolCallId, output };
           continue;
         }
 
@@ -1836,7 +1836,7 @@ export class AgentLoop {
               error: "rejected by user",
             });
             this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
-            yield { type: "tool-result", output };
+            yield { type: "tool-result", toolCallId: call.toolCallId, output };
             continue;
           }
           // A mutating tool is about to run — take the turn's git checkpoint so
@@ -1846,6 +1846,20 @@ export class AgentLoop {
 
         // Snapshot affected files before any mutation so /undo can revert (#144).
         this.snapshotEdit(this.turnCount, call.toolName, inputObj);
+
+        // Pre-compute the edit's unified diff (before the file changes) so the
+        // transcript can render what the tool did, not just a summary line (#288).
+        let resultDiff: string | undefined;
+        let resultFile: string | undefined;
+        if (MUTATING_FILE_TOOLS.has(call.toolName) || call.toolName === "multiEdit" || call.toolName === "replaceInProject") {
+          try {
+            const req = this.buildApprovalRequest(call.toolName, inputObj);
+            resultDiff = req.diff;
+            resultFile = req.filePath;
+          } catch {
+            /* best-effort */
+          }
+        }
 
         let output: string;
         try {
@@ -1897,7 +1911,12 @@ export class AgentLoop {
         // Scrub any secret values before the output reaches the model or UI (#168).
         output = this.redactor.redact(output);
 
-        yield { type: "tool-result", output };
+        yield {
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          output,
+          ...(resultDiff && !output.startsWith("Error") ? { diff: resultDiff, filePath: resultFile } : {}),
+        };
 
         // Re-reads supersede stale copies: a second readFile of the same path
         // shrinks the earlier result to a stub (the message object stays in place
@@ -2062,11 +2081,45 @@ export class AgentLoop {
     if (toolName === "deleteFile") return { toolName, kind: "write", summary: `Delete ${path ?? "(file)"}`, filePath: path };
     if (toolName === "moveFile") return { toolName, kind: "write", summary: `Move ${String(input.source)} → ${String(input.destination)}` };
     if (toolName === "multiEdit") {
-      const n = Array.isArray(input.edits) ? input.edits.length : 0;
-      return { toolName, kind: "write", summary: `Apply ${n} edit(s) atomically across files` };
+      // Show the actual per-file diffs, not a blind count (#279).
+      const edits = Array.isArray(input.edits) ? (input.edits as Array<{ path: string; oldString: string; newString: string; replaceAll?: boolean }>) : [];
+      const files = [...new Set(edits.map((e) => e.path))];
+      let diff: string | undefined;
+      try {
+        diff = DiffGenerator.previewMultiEdit(edits, this.projectRoot);
+      } catch {
+        /* best-effort */
+      }
+      return { toolName, kind: "write", summary: `Apply ${edits.length} edit(s) across ${files.length} file(s): ${files.slice(0, 5).join(", ")}${files.length > 5 ? "…" : ""}`, diff };
     }
     if (toolName === "replaceInProject") {
-      return { toolName, kind: "write", summary: `Replace "${String(input.find)}" → "${String(input.replace)}" across the project` };
+      // Show which files match and preview the replacement diffs (#279).
+      const matches = this.replaceMatchFiles(input);
+      const find = String(input.find ?? "");
+      const replace = String(input.replace ?? "");
+      let diff: string | undefined;
+      try {
+        const parts: string[] = [];
+        for (const p of matches.slice(0, 10)) {
+          const abs = this.resolveProjectPath(p);
+          const original = readFileSync(abs, "utf-8");
+          const updated = input.isRegex === true ? original.replace(new RegExp(find, "g"), replace) : original.split(find).join(replace);
+          if (updated !== original) {
+            const patch = DiffGenerator.generatePatch(p, original, updated).split("\n");
+            parts.push(patch.length > 40 ? patch.slice(0, 40).join("\n") + `\n…(+${patch.length - 40} more)` : patch.join("\n"));
+          }
+        }
+        if (matches.length > 10) parts.push(`…(+${matches.length - 10} more files)`);
+        diff = parts.join("\n") || undefined;
+      } catch {
+        /* best-effort */
+      }
+      return {
+        toolName,
+        kind: "write",
+        summary: `Replace "${find}" → "${replace}" in ${matches.length} file(s)${matches.length ? `: ${matches.slice(0, 5).join(", ")}${matches.length > 5 ? "…" : ""}` : ""}`,
+        diff,
+      };
     }
     if (toolName === "runCommand" || toolName === "runBackground") {
       const command = String(input.command ?? "");

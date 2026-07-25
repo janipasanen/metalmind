@@ -8,8 +8,8 @@ export interface UseChatOptions {
 export type ChatStreamEvent =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string } // live reasoning trace; shown dimmed, not saved as the answer
-  | { type: "tool-call"; toolCall: { toolName: string; argumentsJson: string } }
-  | { type: "tool-result"; output: string }
+  | { type: "tool-call"; toolCall: { toolCallId?: string; toolName: string; argumentsJson: string } }
+  | { type: "tool-result"; toolCallId?: string; output: string; diff?: string; filePath?: string }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -19,7 +19,7 @@ export function useChat(options: UseChatOptions) {
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [activeToolCalls, setActiveToolCalls] = useState<
-    Array<{ toolName: string; argumentsJson: string; output?: string }>
+    Array<{ toolName: string; argumentsJson: string; output?: string; diff?: string; filePath?: string }>
   >([]);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -43,18 +43,23 @@ export function useChat(options: UseChatOptions) {
       const abortController = new AbortController();
       abortRef.current = abortController;
 
+      let assistantContent = "";
+      let doneFired = false;
+      const toolCalls: Array<{
+        id: string;
+        agentId?: string;
+        toolName: string;
+        argumentsJson: string;
+        output?: string;
+        diff?: string;
+        filePath?: string;
+      }> = [];
+
       try {
-        let assistantContent = "";
-        const toolCalls: Array<{
-          id: string;
-          toolName: string;
-          argumentsJson: string;
-          output?: string;
-        }> = [];
 
+        // On abort we keep DRAINING: the agent ends promptly with a `done` that
+        // commits the partial answer — breaking here discarded it (#286).
         for await (const event of options.generateResponse(userContent, abortController.signal)) {
-          if (abortController.signal.aborted) break;
-
           switch (event.type) {
             case "text":
               assistantContent += event.text;
@@ -70,6 +75,7 @@ export function useChat(options: UseChatOptions) {
             case "tool-call":
               toolCalls.push({
                 id: `tc-${Date.now()}-${toolCalls.length}`,
+                agentId: event.toolCall.toolCallId,
                 toolName: event.toolCall.toolName,
                 argumentsJson: event.toolCall.argumentsJson,
               });
@@ -77,15 +83,23 @@ export function useChat(options: UseChatOptions) {
               break;
 
             case "tool-result": {
-              const lastCall = toolCalls[toolCalls.length - 1];
-              if (lastCall) {
-                lastCall.output = event.output;
+              // Match by the agent's toolCallId; fall back to the first
+              // unresolved call (results arrive in call order) (#285).
+              const target =
+                (event.toolCallId && toolCalls.find((tc) => tc.agentId === event.toolCallId)) ||
+                toolCalls.find((tc) => tc.output === undefined) ||
+                toolCalls[toolCalls.length - 1];
+              if (target) {
+                target.output = event.output;
+                target.diff = event.diff;
+                target.filePath = event.filePath;
                 setActiveToolCalls([...toolCalls]);
               }
               break;
             }
 
             case "done": {
+              doneFired = true;
               const assistantMsg: ChatMessage = {
                 id: `assistant-${Date.now()}`,
                 role: "assistant",
@@ -95,6 +109,8 @@ export function useChat(options: UseChatOptions) {
                   toolName: tc.toolName,
                   argumentsJson: tc.argumentsJson,
                   output: tc.output,
+                  diff: tc.diff,
+                  filePath: tc.filePath,
                 })),
                 timestamp: new Date(),
               };
@@ -129,9 +145,32 @@ export function useChat(options: UseChatOptions) {
           },
         ]);
       } finally {
+        // Safety net (#286): a cancelled/never-done stream still commits its
+        // partial answer to the transcript instead of silently discarding it.
+        // (Runs for BOTH the error path and a generator that ended without done.)
+        if (!doneFired && (assistantContent || toolCalls.length > 0)) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              content: assistantContent ? `${assistantContent}\n\n(cancelled)` : "(cancelled)",
+              toolCalls: toolCalls.map((tc) => ({
+                id: tc.id,
+                toolName: tc.toolName,
+                argumentsJson: tc.argumentsJson,
+                output: tc.output,
+                diff: tc.diff,
+                filePath: tc.filePath,
+              })),
+              timestamp: new Date(),
+            },
+          ]);
+        }
         setIsStreaming(false);
         setStreamingContent("");
         setStreamingReasoning("");
+        setActiveToolCalls([]);
         abortRef.current = null;
       }
     },
