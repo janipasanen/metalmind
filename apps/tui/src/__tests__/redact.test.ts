@@ -1,5 +1,47 @@
 import { describe, it, expect } from "vitest";
-import { Redactor, collectSecrets } from "../redact.js";
+import { Redactor, StreamRedactor, collectSecrets } from "../redact.js";
+
+describe("StreamRedactor — secrets split across stream chunks (#168 stream)", () => {
+  const SECRET = "225cae0f1234567890abcdefghijklmnop7qTz"; // 38 chars
+
+  it("scrubs a secret even when it arrives one character at a time", () => {
+    const sr = new StreamRedactor(new Redactor([SECRET]));
+    let out = "";
+    for (const ch of `token is ${SECRET} ok`) out += sr.push(ch);
+    out += sr.flush();
+    expect(out).not.toContain(SECRET);
+    expect(out).toContain("[REDACTED]");
+    expect(out).toBe("token is [REDACTED] ok");
+  });
+
+  it("scrubs a secret split into two awkward chunks", () => {
+    const sr = new StreamRedactor(new Redactor([SECRET]));
+    const mid = Math.floor(SECRET.length / 2);
+    let out = sr.push(`the key: ${SECRET.slice(0, mid)}`);
+    out += sr.push(`${SECRET.slice(mid)}. done.`);
+    out += sr.flush();
+    expect(out).not.toContain(SECRET);
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("streams ordinary text through without holding it back", () => {
+    const sr = new StreamRedactor(new Redactor([SECRET]));
+    let out = "";
+    for (const ch of "hello world, this is fine") out += sr.push(ch);
+    out += sr.flush();
+    expect(out).toBe("hello world, this is fine");
+  });
+
+  it("holds back a trailing partial-secret prefix until flush", () => {
+    const sr = new StreamRedactor(new Redactor([SECRET]));
+    // A chunk ending in a genuine secret prefix must not be emitted yet.
+    const emitted = sr.push(`x ${SECRET.slice(0, 20)}`);
+    expect(emitted).not.toContain(SECRET.slice(0, 20));
+    // If it never completes, flush emits it verbatim (it wasn't actually a secret).
+    const tail = sr.flush();
+    expect(emitted + tail).toBe(`x ${SECRET.slice(0, 20)}`);
+  });
+});
 
 describe("Redactor (#168)", () => {
   it("replaces known secret values with [REDACTED]", () => {

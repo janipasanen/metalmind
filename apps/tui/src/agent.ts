@@ -47,7 +47,7 @@ import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
 import type { ModelRoutingDecision } from "@metalmind/schemas";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
-import { Redactor, collectSecrets } from "./redact.js";
+import { Redactor, StreamRedactor, collectSecrets } from "./redact.js";
 import { retrieveContext } from "./rag/manager.js";
 import { mentionsContextBlock } from "./mentions.js";
 import { isAllowlisted } from "./approval-allowlist.js";
@@ -1369,10 +1369,14 @@ export class AgentLoop {
         // Time each model request from here so latency is per-request, not cumulative (#209).
         this.attemptStartMs = Date.now();
         let sawError = false;
+        // Redact across chunk boundaries: a secret split over multiple stream
+        // chunks would slip past a per-chunk redact() (#168 stream fix).
+        const streamRedactor = new StreamRedactor(this.redactor);
         for await (const event of this.streamResilient(providers, toolDefs, signal)) {
           if (event.type === "text") {
             assistantText += event.text;
-            yield { type: "text", text: this.redactor.redact(event.text) };
+            const safe = streamRedactor.push(event.text);
+            if (safe) yield { type: "text", text: safe };
           } else if (event.type === "tool-call") {
             pendingToolCalls.push(event.toolCall);
             yield {
@@ -1388,6 +1392,9 @@ export class AgentLoop {
             break;
           }
         }
+        // Flush any tail held back as a possible secret prefix (#168).
+        const flushed = streamRedactor.flush();
+        if (flushed) yield { type: "text", text: flushed };
         if (sawError) { yield { type: "done" }; return; }
         // User cancelled mid-stream: persist partial output and end cleanly.
         if (signal?.aborted) {
