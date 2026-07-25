@@ -1377,6 +1377,11 @@ export class AgentLoop {
             assistantText += event.text;
             const safe = streamRedactor.push(event.text);
             if (safe) yield { type: "text", text: safe };
+          } else if (event.type === "reasoning") {
+            // Reasoning models (gpt-oss, …) stream a thinking trace before the
+            // answer. Surface it live (redacted) so the turn isn't a blank pause,
+            // but never accumulate it into the answer/history.
+            yield { type: "reasoning", text: this.redactor.redact(event.text) };
           } else if (event.type === "tool-call") {
             pendingToolCalls.push(event.toolCall);
             yield {

@@ -7,6 +7,7 @@ export interface UseChatOptions {
 
 export type ChatStreamEvent =
   | { type: "text"; text: string }
+  | { type: "reasoning"; text: string } // live reasoning trace; shown dimmed, not saved as the answer
   | { type: "tool-call"; toolCall: { toolName: string; argumentsJson: string } }
   | { type: "tool-result"; output: string }
   | { type: "done" }
@@ -16,6 +17,7 @@ export function useChat(options: UseChatOptions) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
+  const [streamingReasoning, setStreamingReasoning] = useState("");
   const [activeToolCalls, setActiveToolCalls] = useState<
     Array<{ toolName: string; argumentsJson: string; output?: string }>
   >([]);
@@ -34,6 +36,7 @@ export function useChat(options: UseChatOptions) {
 
       setMessages((prev) => [...prev, userMsg]);
       setStreamingContent("");
+      setStreamingReasoning("");
       setActiveToolCalls([]);
       setIsStreaming(true);
 
@@ -56,6 +59,12 @@ export function useChat(options: UseChatOptions) {
             case "text":
               assistantContent += event.text;
               setStreamingContent(assistantContent);
+              setStreamingReasoning(""); // answer started → drop the live reasoning
+              break;
+
+            case "reasoning":
+              // Keep only a bounded tail so a long trace doesn't grow unbounded.
+              setStreamingReasoning((prev) => (prev + event.text).slice(-2000));
               break;
 
             case "tool-call":
@@ -91,6 +100,7 @@ export function useChat(options: UseChatOptions) {
               };
               setMessages((prev) => [...prev, assistantMsg]);
               setStreamingContent("");
+              setStreamingReasoning("");
               setActiveToolCalls([]);
               break;
             }
@@ -121,6 +131,7 @@ export function useChat(options: UseChatOptions) {
       } finally {
         setIsStreaming(false);
         setStreamingContent("");
+        setStreamingReasoning("");
         abortRef.current = null;
       }
     },
@@ -141,6 +152,7 @@ export function useChat(options: UseChatOptions) {
     sendMessage,
     isStreaming,
     streamingContent,
+    streamingReasoning,
     activeToolCalls,
     cancelStream,
     replaceMessages,

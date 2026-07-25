@@ -247,7 +247,7 @@ export default function App({ config }: AppProps) {
     };
   }, [config]);
 
-  const { messages, sendMessage, isStreaming, streamingContent, activeToolCalls, cancelStream, replaceMessages } = useChat({
+  const { messages, sendMessage, isStreaming, streamingContent, streamingReasoning, activeToolCalls, cancelStream, replaceMessages } = useChat({
     generateResponse: async function* (input: string, signal?: AbortSignal) {
       if (input === "/help") {
         yield { type: "text", text: [
@@ -906,6 +906,11 @@ export default function App({ config }: AppProps) {
     <Box flexDirection="column" padding={1} height="100%">
       <Header projectName={projectName} modelName={getActiveModel()} accent={theme.colors.accent} />
       <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} scrollOffset={scrollOffset} pageSize={CHAT_PAGE_SIZE} />
+      {streamingReasoning && !streamingContent && (
+        <Box>
+          <Text color="gray" dimColor>{"💭 "}reasoning… {streamingReasoning.split("\n").pop()?.slice(-160)}</Text>
+        </Box>
+      )}
       <MultiAgentStatus
         mainModel={activeMain.model}
         mainProvider={activeMain.provider}

@@ -19,6 +19,7 @@ export interface ChatCompletionRequest {
 
 export type ModelStreamEvent =
   | { type: "text"; text: string }
+  | { type: "reasoning"; text: string } // reasoning/"thinking" trace (e.g. gpt-oss); shown live, not part of the answer
   | { type: "tool-call"; toolCall: { toolCallId: string; toolName: string; argumentsJson: string } }
   | { type: "error"; message: string }
   | { type: "usage"; usage: { inputTokens?: number; outputTokens?: number } }

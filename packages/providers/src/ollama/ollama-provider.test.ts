@@ -335,6 +335,27 @@ describe("OllamaProvider streaming", () => {
     expect(textEvents.length).toBeGreaterThan(0);
   });
 
+  it("surfaces reasoning-model thinking as reasoning events, separate from text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      createMockStream(
+        { message: { content: "", thinking: "Let me" } },
+        { message: { content: "", thinking: " think." } },
+        { message: { content: "The answer." } },
+        { done: true },
+      ),
+    );
+
+    const p = new OllamaProvider("gpt-oss:120b");
+    const events: ModelStreamEvent[] = [];
+    for await (const e of p.streamChatCompletion({ messages: [] })) events.push(e);
+
+    const reasoning = events.filter((e) => e.type === "reasoning").map((e) => (e as { text: string }).text).join("");
+    const text = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+    expect(reasoning).toBe("Let me think.");
+    expect(text).toBe("The answer.");
+  });
+
   it("throws on HTTP error during streaming", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: false,

@@ -16,6 +16,9 @@ import { JsonRepair } from "../normalization/json-repair.js";
 interface OllamaMessage {
   role: string;
   content: string;
+  /** Reasoning trace emitted by reasoning models (e.g. gpt-oss); streams before
+   *  the answer content. Surfaced as a "reasoning" event, not part of the answer. */
+  thinking?: string;
   /** Correlation id for a tool result, paired with the assistant tool_call's id.
    *  Gemini (via Ollama Cloud) keys each call's thought_signature to this id and
    *  returns a 400 if the call/response pair can't be matched on a follow-up turn. */
@@ -274,6 +277,9 @@ export class OllamaProvider implements ModelProvider {
               return;
             }
 
+            if (data.message?.thinking) {
+              yield { type: "reasoning", text: data.message.thinking };
+            }
             if (data.message?.content) {
               yield { type: "text", text: data.message.content };
             }
@@ -317,6 +323,9 @@ export class OllamaProvider implements ModelProvider {
           }
           if (data.prompt_eval_count != null || data.eval_count != null) {
             yield { type: "usage", usage: { inputTokens: data.prompt_eval_count, outputTokens: data.eval_count } };
+          }
+          if (data.message?.thinking) {
+            yield { type: "reasoning", text: data.message.thinking };
           }
           if (data.message?.content) {
             yield { type: "text", text: data.message.content };
