@@ -358,7 +358,16 @@ export class OllamaProvider implements ModelProvider {
       if (names.includes(this.modelName) || names.some((n) => n.split(":")[0] === family)) {
         return { ok: true, message: `ollama: ${this.modelName} available` };
       }
-      return { ok: false, message: `Model "${this.modelName}" not pulled. Run: ollama pull ${this.modelName}` };
+      // Not available — cloud endpoints can't be `ollama pull`-ed (the model may be
+      // retired), so surface the real options: switch to an available model.
+      const isCloud = /(^https?:\/\/)?(api\.ollama\.com|ollama\.com)/i.test(this.baseUrl);
+      const available = names.slice(0, 8).join(", ") || "(none)";
+      return {
+        ok: false,
+        message: isCloud
+          ? `Model "${this.modelName}" is not available (retired or unknown). Switch with /model. Available: ${available}`
+          : `Model "${this.modelName}" not pulled. Run: ollama pull ${this.modelName} (or /model to pick an installed one). Available: ${available}`,
+      };
     } catch {
       return { ok: false, message: `Ollama not reachable at ${this.baseUrl} (is it running?)` };
     }

@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
@@ -143,14 +143,14 @@ export interface McpServerConfig {
 
 const DEFAULT_XDG_CONFIG: UserConfig = {
   activeProvider: "ollama",
-  activeModel: "gemini-3-flash-preview:cloud",
+  activeModel: "gpt-oss:120b",
   defaultProvider: "ollama",
-  defaultModel: "gemini-3-flash-preview:cloud",
+  defaultModel: "gpt-oss:120b",
   apiKeys: {},
   models: {
     openai: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
     anthropic: ["claude-sonnet-4-6", "claude-3-5-sonnet"],
-    ollama: ["gemini-3-flash-preview:cloud", "gemma3:27b", "llama3.3:70b"],
+    ollama: ["gpt-oss:120b", "gpt-oss:20b", "gemma3:27b", "llama3.3:70b"],
     mlx: ["mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit"],
   },
   mcpServers: {},
@@ -256,7 +256,18 @@ export function loadXdgConfig(): UserConfig {
 
 export function saveXdgConfig(config: UserConfig): void {
   ensureConfigDir();
-  writeFileSync(XDG_CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+  // Atomic write: serialize to a unique temp file then rename over the target.
+  // rename() is atomic on POSIX, so a concurrent reader (or a crash mid-write)
+  // never sees a truncated/half-written config — it gets the old or new file whole.
+  const tmp = `${XDG_CONFIG_FILE}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(config, null, 2), "utf-8");
+    renameSync(tmp, XDG_CONFIG_FILE);
+    return;
+  } catch {
+    // Fall back to a direct write if temp+rename isn't possible (e.g. cross-device).
+    writeFileSync(XDG_CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+  }
 }
 
 export function updateXdgConfig(updates: Partial<UserConfig>): void {
