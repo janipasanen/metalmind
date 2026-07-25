@@ -488,6 +488,11 @@ export class AgentLoop {
   /** Per-turn @-mention/RAG context blocks, injected into this turn's requests only
    *  (never persisted to history, so they don't accumulate every turn) (#260). */
   private turnContext: string[] = [];
+  /** Set when the project changed (edits, restore) so the system prompt — repo map
+   *  included — is rebuilt at the next turn instead of staying stale (#302). */
+  private systemPromptDirty = false;
+  /** Memoized repo-map string (repo walks are expensive); invalidated via systemPromptDirty. */
+  private repoMapCache: string | null | undefined;
   /** Build vs Plan agent mode. In "plan" mode the agent investigates and proposes
    *  a plan but cannot mutate files/repo (mutating tools are hidden + refused) (#11). */
   private mode: "build" | "plan" = "build";
@@ -961,6 +966,15 @@ export class AgentLoop {
   }
 
   /** Run a single model response fully into a buffer (no streaming to the user). */
+  /** History + transient per-turn context (@-mentions/RAG) for a model request.
+   *  Every request path must use this — collectAttempt previously sent bare
+   *  history, so quality-gated tier attempts never saw the turn context (#289). */
+  private requestMessages(): AgentMessage[] {
+    const messages = [...this.history];
+    for (const block of this.turnContext) messages.push({ role: "system", content: block });
+    return messages;
+  }
+
   private async collectAttempt(
     provider: ModelProvider,
     toolDefs: unknown[],
@@ -970,7 +984,7 @@ export class AgentLoop {
     this.enforceContextBudget(provider);
     try {
       for await (const event of provider.streamChatCompletion({
-        messages: [...this.history],
+        messages: this.requestMessages(),
         tools: toolDefs,
         signal,
       })) {
@@ -1014,11 +1028,10 @@ export class AgentLoop {
         if (signal?.aborted) return;
         let emitted = false;
         try {
-          // Append transient per-request context (per-turn @-mention/RAG blocks
-          // and the iteration-cap notice) to this request only — keep it out of
-          // persisted history (#248, #260).
-          const messages = [...this.history];
-          for (const block of this.turnContext) messages.push({ role: "system", content: block });
+          // Transient per-request context (turn @-mention/RAG blocks via
+          // requestMessages, plus the iteration-cap notice) — never persisted
+          // to history (#248, #260, #289).
+          const messages = this.requestMessages();
           if (this.iterationCapNotice) messages.push({ role: "system", content: this.iterationCapNotice });
           for await (const ev of provider.streamChatCompletion({
             messages,
@@ -1089,6 +1102,12 @@ export class AgentLoop {
   private async *runInner(userInput: string, signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
+    } else if (this.systemPromptDirty && this.history[0]?.role === "system") {
+      // The project changed since the prompt was built (edits/restore) — refresh
+      // it (and the repo map) so the model isn't navigating a stale tree (#302).
+      this.repoMapCache = undefined;
+      this.history[0] = { role: "system", content: this.buildSystemPrompt() };
+      this.systemPromptDirty = false;
     }
     // Auto-compact: when the conversation nears the context window, summarize the
     // older turns (compactHistory) instead of letting enforceContextBudget silently
@@ -1548,10 +1567,23 @@ export class AgentLoop {
 
         yield { type: "tool-result", output };
 
+        // Re-reads supersede stale copies: a second readFile of the same path
+        // shrinks the earlier result to a stub (the message object stays in place
+        // so tool_call/tool_result pairing remains valid) instead of keeping two
+        // whole-file copies in history (#290).
+        const readPath = call.toolName === "readFile" && typeof inputObj.path === "string" ? inputObj.path : undefined;
+        if (readPath) {
+          for (const m of this.history) {
+            if (m.role === "tool" && m.metadata?.filePath === readPath && !String(m.content).startsWith("[stale read")) {
+              m.content = `[stale read of ${readPath} superseded by a later read]`;
+            }
+          }
+        }
+
         this.history.push({
           role: "tool",
           content: output,
-          metadata: { toolCallId: call.toolCallId },
+          metadata: { toolCallId: call.toolCallId, ...(readPath ? { filePath: readPath } : {}) },
         });
       }
     }
@@ -2167,6 +2199,14 @@ export class AgentLoop {
 
   /** Build a token-bounded repository map (tree + exports/symbols) for the prompt (#143). */
   private loadRepoMap(): string | null {
+    // Memoized: repo walks with symbol extraction are expensive; the cache is
+    // invalidated when systemPromptDirty triggers a prompt rebuild (#302).
+    if (this.repoMapCache !== undefined) return this.repoMapCache;
+    this.repoMapCache = this.buildRepoMap();
+    return this.repoMapCache;
+  }
+
+  private buildRepoMap(): string | null {
     try {
       const map = new RepoMapV2(this.projectRoot, {
         maxFiles: 120,
@@ -2248,6 +2288,8 @@ export class AgentLoop {
     if (output.startsWith("Error") || output.startsWith("Blocked")) return output;
     const paths = this.changedPaths(toolName, input);
     if (paths.length === 0) return output;
+    // The tree/symbols changed — rebuild the system prompt (repo map) next turn (#302).
+    this.systemPromptDirty = true;
 
     const editorCfg = loadXdgConfig().editor;
     for (const p of paths) {
@@ -2521,7 +2563,12 @@ export class AgentLoop {
         this.sessionStore = null;
       }
     }
-    if (this.history.length > 0) this.turnCount = this.history.filter((m) => m.role === "user").length;
+    if (this.history.length > 0) {
+      this.turnCount = this.history.filter((m) => m.role === "user").length;
+      // A resumed session's system prompt (and repo map) may predate on-disk
+      // changes — rebuild it on the first turn (#302).
+      this.systemPromptDirty = true;
+    }
     return this.displayMessages();
   }
 

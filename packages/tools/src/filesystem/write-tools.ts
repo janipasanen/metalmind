@@ -63,9 +63,47 @@ const editFileSchema = z.object({
   replaceAll: z.boolean().default(false),
 });
 
+/** A short line-numbered snippet around the first line of `needle` in `content`,
+ *  so the model can verify its edit landed without re-reading the file (#291). */
+function snippetAround(content: string, needle: string, context = 2): string {
+  const firstLine = needle.split("\n")[0];
+  const lines = content.split("\n");
+  const idx = lines.findIndex((l) => l.includes(firstLine));
+  if (idx < 0) return "";
+  const needleLines = needle.split("\n").length;
+  const start = Math.max(0, idx - context);
+  const end = Math.min(lines.length, idx + needleLines + context);
+  const width = String(end).length;
+  return lines.slice(start, end).map((l, i) => `${String(start + i + 1).padStart(width)}→${l}`).join("\n");
+}
+
+/** When oldString doesn't match, explain the most likely reason so the model can
+ *  self-correct instead of retrying blind (#292). */
+function nearMissHint(original: string, oldString: string): string {
+  // Whitespace-insensitive comparison: does it match modulo spacing?
+  const squash = (s: string) => s.replace(/[ \t]+/g, " ").replace(/ ?\n ?/g, "\n").trim();
+  if (squash(original).includes(squash(oldString))) {
+    return "A near-match exists that differs only in whitespace/indentation — re-read the exact lines (readFile shows line numbers) and copy the indentation exactly.";
+  }
+  // Anchor on the longest line of oldString: if present, the mismatch is nearby.
+  const anchor = oldString.split("\n").reduce((a, b) => (b.trim().length > a.trim().length ? b : a), "").trim();
+  if (anchor.length >= 8) {
+    const lines = original.split("\n");
+    const at = lines.findIndex((l) => l.includes(anchor));
+    if (at >= 0) {
+      const start = Math.max(0, at - 2);
+      const excerpt = lines.slice(start, at + 3).map((l, i) => `${start + i + 1}→${l}`).join("\n");
+      return `A similar region exists around line ${at + 1} — the file differs from your oldString. Actual content:\n${excerpt}`;
+    }
+  }
+  return "No similar content found — the file may have changed since you read it. Re-read it before editing.";
+}
+
 export const editFileTool: AgentTool<z.input<typeof editFileSchema>, string> = createTool({
   toolName: "editFile",
-  description: "Edit a file by finding and replacing a specific string.",
+  description:
+    "Edit a file by replacing an exact string. oldString must match the file exactly (including whitespace) " +
+    "and be unique unless replaceAll is set. Returns a snippet of the edited region so you can verify the result.",
   inputSchema: editFileSchema,
   requiresConfirmation: true,
   async execute(input: z.output<typeof editFileSchema>, ctx: ToolExecutionContext): Promise<string> {
@@ -77,32 +115,29 @@ export const editFileTool: AgentTool<z.input<typeof editFileSchema>, string> = c
     const replaceAll = input.replaceAll ?? false;
     if (replaceAll) {
       const count = original.split(input.oldString).length - 1;
-      if (count === 0) throw new Error(`String not found in ${input.path}:\n${input.oldString}`);
-      writeFileSync(
-        safePath,
-        original.replaceAll(input.oldString, input.newString),
-        "utf-8",
-      );
+      if (count === 0) {
+        throw new Error(`String not found in ${input.path}. ${nearMissHint(original, input.oldString)}`);
+      }
+      const updated = original.replaceAll(input.oldString, input.newString);
+      writeFileSync(safePath, updated, "utf-8");
       return `Replaced ${count} occurrence(s) in ${input.path}`;
     }
 
     if (!original.includes(input.oldString)) {
-      throw new Error(`String not found in ${input.path}:\n${input.oldString}`);
+      throw new Error(`String not found in ${input.path}. ${nearMissHint(original, input.oldString)}`);
     }
 
     const occ = original.split(input.oldString).length - 1;
     if (occ > 1) {
       throw new Error(
-        `Found ${occ} occurrences. Use replaceAll: true or be more specific.`,
+        `Found ${occ} occurrences. Use replaceAll: true or include more surrounding context to make the match unique.`,
       );
     }
 
-    writeFileSync(
-      safePath,
-      original.replace(input.oldString, input.newString),
-      "utf-8",
-    );
-    return `Edited ${input.path}`;
+    const updated = original.replace(input.oldString, input.newString);
+    writeFileSync(safePath, updated, "utf-8");
+    const snip = input.newString ? snippetAround(updated, input.newString) : "";
+    return snip ? `Edited ${input.path}. Result:\n${snip}` : `Edited ${input.path}`;
   },
 });
 

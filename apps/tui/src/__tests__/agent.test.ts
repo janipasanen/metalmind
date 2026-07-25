@@ -2092,6 +2092,127 @@ describe("AgentLoop @-mention context is per-turn, not persisted (#260)", () => 
   });
 });
 
+describe("Stale re-reads are superseded in history (#290)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("shrinks the earlier readFile result when the same path is read again", async () => {
+    const root = join(tmpdir(), `mm-290-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    let calls = 0;
+    const seen: Array<Array<{ role: string; content: string }>> = [];
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+        seen.push(req.messages);
+        calls++;
+        if (calls === 1 || calls === 3) {
+          yield { type: "tool-call", toolCall: { toolCallId: `r${calls}`, toolName: "readFile", argumentsJson: JSON.stringify({ path: "a.ts" }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "ok" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("read it"));
+    await collect(loop.run("read it again"));
+
+    // The request AFTER the second read (calls===4) sees the stub in place of the
+    // first read and exactly one full copy of the file content.
+    const lastReq = seen.at(-1)!;
+    const toolContents = lastReq.filter((m) => m.role === "tool").map((m) => m.content);
+    expect(toolContents.some((c) => /stale read .*a\.ts.* superseded/.test(c))).toBe(true);
+    expect(toolContents.filter((c) => c.includes("read:a.ts")).length).toBe(1);
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("System prompt refresh after edits (#302)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("rebuilds the system prompt on the turn after a file edit", async () => {
+    const root = join(tmpdir(), `mm-302-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    // The agent writes AGENTS.md (project instructions feed the system prompt
+    // via loadProjectMemory, which is NOT mocked) — the rebuilt prompt must
+    // contain the new rule on the following turn.
+    const f = join(root, "AGENTS.md");
+    let calls = 0;
+    const seen: Array<Array<{ role: string; content: string }>> = [];
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: 128000 } as never,
+      async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+        seen.push(req.messages);
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "w1", toolName: "writeFile", argumentsJson: JSON.stringify({ path: f, content: "RULE-302-MARKER: always use tabs" }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("create the instructions file"));
+    expect(seen[0][0].content).not.toContain("RULE-302-MARKER");
+    await collect(loop.run("now what?"));
+    // The prompt was rebuilt after the edit, so the new instructions are in it.
+    expect(seen.at(-1)![0].role).toBe("system");
+    expect(seen.at(-1)![0].content).toContain("RULE-302-MARKER");
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("Turn context reaches quality-gated router attempts (#289)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("includes the @-mention block in a routed (collectAttempt) request", async () => {
+    const root = join(tmpdir(), `mm-289-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "export const CTX_MARKER_289 = true;");
+
+    const seen: Array<Array<{ role: string; content: string }>> = [];
+    mockCreateProvider.mockImplementation(() => ({
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: 128000 } as never,
+      async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+        seen.push(req.messages);
+        yield { type: "text", text: "a clear, sufficient answer" };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "SIMPLE" } };
+      },
+    }) as never);
+
+    const router = new ModelRouter({
+      tier1Model: "local-small", tier1Provider: "mlx",
+      tier2Model: "local-small", tier2Provider: "mlx",
+      tier3Model: "claude", tier3Provider: "anthropic",
+      localFirst: true,
+    });
+    const loop = new AgentLoop({ provider: "mlx", model: "local-small", explicit: false }, { projectRoot: root, router });
+    await collect(loop.run("explain @src/a.ts conceptually"));
+
+    // The routed attempt goes through collectAttempt — it must carry the mention.
+    const firstReq = seen[0]?.map((m) => m.content).join("\n") ?? "";
+    expect(firstReq).toContain("CTX_MARKER_289");
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
 describe("AgentLoop auto-compact near the context window (#273)", () => {
   beforeEach(() => vi.clearAllMocks());
 
