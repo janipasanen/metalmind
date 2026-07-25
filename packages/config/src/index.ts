@@ -94,6 +94,11 @@ export interface UserConfig {
     formatOnWrite?: boolean;
     /** Formatter command; the changed file path is appended. Default: prettier. */
     formatCommand?: string;
+    /** Project check command for /check and end-of-turn verification (#282/#295).
+     *  Default: `npx tsc --noEmit` when a tsconfig.json exists. */
+    checkCommand?: string;
+    /** Run the check automatically after turns that edited files (default true) (#282). */
+    checkOnEdit?: boolean;
   };
   /** Soft session spend cap in USD; once reached, cloud routing downgrades to local (#182). */
   budgetUsd?: number;

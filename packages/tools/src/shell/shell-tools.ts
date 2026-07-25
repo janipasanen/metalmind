@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { execSync, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { AgentTool, ToolExecutionContext } from "../types.js";
 import { createTool } from "../types.js";
 
@@ -8,6 +8,59 @@ interface RunResult {
   stderr: string;
   exitCode: number;
   duration: number;
+}
+
+const OUTPUT_CAP = 10 * 1024 * 1024;
+
+/** Async shell runner (#284): spawn instead of execSync so the event loop (and
+ *  the whole Ink TUI) keeps rendering during long commands, with a hard timeout
+ *  and Esc-to-cancel via the turn's AbortSignal. */
+function runShellAsync(command: string, cwd: string, timeoutMs: number | undefined, signal?: AbortSignal): Promise<RunResult> {
+  // Direct execute() calls (tests, registry bypass) may skip zod defaults.
+  const effectiveTimeout = timeoutMs && timeoutMs >= 1000 ? timeoutMs : 120_000;
+  return new Promise((resolvePromise) => {
+    const start = Date.now();
+    const child = spawn(command, { shell: true, cwd });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      if (stdout.length < OUTPUT_CAP) stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      if (stderr.length < OUTPUT_CAP) stderr += d.toString();
+    });
+
+    let settled = false;
+    const settle = (exitCode: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolvePromise({ stdout, stderr, exitCode, duration: Date.now() - start });
+    };
+    const timer = setTimeout(() => {
+      stderr += `\n(timed out after ${effectiveTimeout}ms — killed)`;
+      child.kill("SIGKILL");
+    }, effectiveTimeout);
+    const onAbort = () => {
+      stderr += "\n(cancelled)";
+      child.kill("SIGKILL");
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    child.on("error", (err) => {
+      stderr += String(err);
+      settle(127);
+    });
+    child.on("close", (code) => settle(code ?? 1));
+  });
+}
+
+function render(r: RunResult, trailer: string): string {
+  const body = [r.stdout.trim(), r.stderr.trim()].filter(Boolean).join("\n");
+  return `${body}\n--- ${trailer}, ${r.duration}ms`;
 }
 
 export const runCommandSchema = z.object({
@@ -31,24 +84,8 @@ export const runCommandTool: AgentTool<z.input<typeof runCommandSchema>, string>
       }
     }
 
-    const workDir = input.cwd ?? ctx.projectRoot;
-    const start = Date.now();
-    try {
-      const result = execSync(input.command, {
-        cwd: workDir,
-        encoding: "utf-8",
-        timeout: input.timeout,
-        maxBuffer: 10 * 1024 * 1024,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-
-      const duration = Date.now() - start;
-      return `${result.trim()}\n--- Exit: 0, ${duration}ms`;
-    } catch (err: unknown) {
-      const duration = Date.now() - start;
-      const execErr = err as { stdout?: string; stderr?: string; status?: number };
-      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Exit: ${execErr.status ?? 1}, ${duration}ms`;
-    }
+    const r = await runShellAsync(input.command, input.cwd ?? ctx.projectRoot, input.timeout, ctx.signal);
+    return render(r, `Exit: ${r.exitCode}`);
   },
 });
 
@@ -63,22 +100,8 @@ export const runTestsTool: AgentTool<z.input<typeof runTestsSchema>, string> = c
   inputSchema: runTestsSchema,
   requiresConfirmation: false,
   async execute(input: z.output<typeof runTestsSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const start = Date.now();
-    try {
-      const result = execSync(input.command, {
-        cwd: ctx.projectRoot,
-        encoding: "utf-8",
-        timeout: input.timeout,
-        maxBuffer: 10 * 1024 * 1024,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      const duration = Date.now() - start;
-      return `${result.trim()}\n--- Tests passed, ${duration}ms`;
-    } catch (err: unknown) {
-      const duration = Date.now() - start;
-      const execErr = err as { stdout?: string; stderr?: string; status?: number };
-      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Tests FAILED, ${duration}ms`;
-    }
+    const r = await runShellAsync(input.command ?? "npm test", ctx.projectRoot, input.timeout, ctx.signal);
+    return render(r, r.exitCode === 0 ? "Tests passed" : "Tests FAILED");
   },
 });
 
@@ -93,22 +116,8 @@ export const runBuildTool: AgentTool<z.input<typeof runBuildSchema>, string> = c
   inputSchema: runBuildSchema,
   requiresConfirmation: false,
   async execute(input: z.output<typeof runBuildSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const start = Date.now();
-    try {
-      const result = execSync(input.command, {
-        cwd: ctx.projectRoot,
-        encoding: "utf-8",
-        timeout: input.timeout,
-        maxBuffer: 10 * 1024 * 1024,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      const duration = Date.now() - start;
-      return `${result.trim()}\n--- Build succeeded, ${duration}ms`;
-    } catch (err: unknown) {
-      const duration = Date.now() - start;
-      const execErr = err as { stdout?: string; stderr?: string; status?: number };
-      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Build FAILED, ${duration}ms`;
-    }
+    const r = await runShellAsync(input.command ?? "npm run build", ctx.projectRoot, input.timeout, ctx.signal);
+    return render(r, r.exitCode === 0 ? "Build succeeded" : "Build FAILED");
   },
 });
 
@@ -123,22 +132,8 @@ export const runLintTool: AgentTool<z.input<typeof runLintSchema>, string> = cre
   inputSchema: runLintSchema,
   requiresConfirmation: false,
   async execute(input: z.output<typeof runLintSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const start = Date.now();
-    try {
-      const result = execSync(input.command, {
-        cwd: ctx.projectRoot,
-        encoding: "utf-8",
-        timeout: input.timeout,
-        maxBuffer: 10 * 1024 * 1024,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      const duration = Date.now() - start;
-      return `${result.trim()}\n--- Lint passed, ${duration}ms`;
-    } catch (err: unknown) {
-      const duration = Date.now() - start;
-      const execErr = err as { stdout?: string; stderr?: string; status?: number };
-      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Lint failed, ${duration}ms`;
-    }
+    const r = await runShellAsync(input.command ?? "npm run lint", ctx.projectRoot, input.timeout, ctx.signal);
+    return render(r, r.exitCode === 0 ? "Lint passed" : "Lint failed");
   },
 });
 
@@ -155,21 +150,10 @@ export const runFormatTool: AgentTool<z.input<typeof runFormatSchema>, string> =
   inputSchema: runFormatSchema,
   requiresConfirmation: false,
   async execute(input: z.output<typeof runFormatSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const cmd = input.path ? `${input.command} ${JSON.stringify(input.path)}` : input.command;
-    const start = Date.now();
-    try {
-      const result = execSync(cmd, {
-        cwd: ctx.projectRoot,
-        encoding: "utf-8",
-        timeout: input.timeout,
-        maxBuffer: 10 * 1024 * 1024,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      return `${result.trim()}\n--- Format complete, ${Date.now() - start}ms`;
-    } catch (err: unknown) {
-      const execErr = err as { stdout?: string; stderr?: string };
-      return `${execErr.stdout?.trim() ?? ""}\n${execErr.stderr?.trim() ?? ""}\n--- Format failed, ${Date.now() - start}ms`;
-    }
+    const base = input.command ?? "npx prettier --write";
+    const cmd = input.path ? `${base} ${JSON.stringify(input.path)}` : base;
+    const r = await runShellAsync(cmd, ctx.projectRoot, input.timeout, ctx.signal);
+    return render(r, r.exitCode === 0 ? "Format complete" : "Format failed");
   },
 });
 

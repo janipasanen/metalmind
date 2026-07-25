@@ -38,7 +38,8 @@ interface McpToolClient {
 import { zodToJsonSchema } from "./zod-to-json.js";
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve, join, dirname, extname } from "node:path";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, execFileSync, spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
 import type { ModelProvider, RouteDecision, TriageLabel, ModelCapabilities, ModelStreamEvent, SafetyViolation } from "@metalmind/core";
 import type { ToolAuditEntry } from "@metalmind/tools";
@@ -222,6 +223,38 @@ const TASK_TOOL_DEF = {
 };
 
 /** Model-facing definition for the long-term memory tool (#218). */
+/** A single item on the model-managed task list (#276). */
+export interface TodoItem {
+  text: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+const SET_TODOS_TOOL_DEF = {
+  name: "setTodos",
+  description:
+    "Maintain a visible task list for multi-step work. Call with the FULL list each time (it replaces the " +
+    "previous one): mark the current step in_progress, finished steps completed, and the rest pending. " +
+    "Use it whenever a request takes 3+ distinct steps, and update it as you complete each step.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      todos: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "Short imperative step description." },
+            status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+          },
+          required: ["text", "status"],
+        },
+        description: "The complete, ordered task list (replaces the previous list).",
+      },
+    },
+    required: ["todos"],
+  },
+};
+
 const REMEMBER_TOOL_DEF = {
   name: "remember",
   description:
@@ -444,6 +477,8 @@ export interface AgentLoopOptions {
   onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
   /** Called when the coordinator plan changes. */
   onCoordinatorPlan?: (steps: PlanStep[]) => void;
+  /** Model-managed task list updates (setTodos tool) (#276). */
+  onTodos?: (todos: TodoItem[]) => void;
   /** Called before each turn with the history token usage vs the active model's limit. */
   onContextUsage?: (used: number, limit: number) => void;
   /** Called when real token usage is reported by a provider (#157). */
@@ -461,6 +496,8 @@ export class AgentLoop {
   private onCoordinatorPhase?: (phase: CoordinatorPhase) => void;
   private onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
   private onCoordinatorPlan?: (steps: PlanStep[]) => void;
+  private onTodos?: (todos: TodoItem[]) => void;
+  private todos: TodoItem[] = [];
   private onContextUsage?: (used: number, limit: number) => void;
   private onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
   private sessionUsage = { inputTokens: 0, outputTokens: 0 };
@@ -491,6 +528,10 @@ export class AgentLoop {
   /** Set when the project changed (edits, restore) so the system prompt — repo map
    *  included — is rebuilt at the next turn instead of staying stale (#302). */
   private systemPromptDirty = false;
+  /** True once this turn edited a file — end-of-turn verification runs then (#282). */
+  private editedThisTurn = false;
+  /** Remaining fix-it retries for a failing end-of-turn check (#282). */
+  private verifyRetriesLeft = 2;
   /** Memoized repo-map string (repo walks are expensive); invalidated via systemPromptDirty. */
   private repoMapCache: string | null | undefined;
   /** Build vs Plan agent mode. In "plan" mode the agent investigates and proposes
@@ -528,6 +569,7 @@ export class AgentLoop {
     this.onCoordinatorPhase = options.onCoordinatorPhase;
     this.onCoordinatorRouting = options.onCoordinatorRouting;
     this.onCoordinatorPlan = options.onCoordinatorPlan;
+    this.onTodos = options.onTodos;
     this.onContextUsage = options.onContextUsage;
     this.onUsage = options.onUsage;
     this.onApprovalRequest = options.onApprovalRequest;
@@ -634,6 +676,262 @@ export class AgentLoop {
       saveXdgConfig({ ...xdg, remoteBrain: on });
     } catch {
       // best-effort
+    }
+  }
+
+  /** Validate + store the model's task list and mirror it to the UI (#276). */
+  private handleSetTodos(input: Record<string, unknown>): string {
+    const raw = Array.isArray(input.todos) ? input.todos : null;
+    if (!raw) return "setTodos requires { todos: [{ text, status }] }.";
+    const valid: TodoItem[] = [];
+    for (const t of raw.slice(0, 30)) {
+      const text = typeof (t as TodoItem).text === "string" ? (t as TodoItem).text.trim() : "";
+      const status = (t as TodoItem).status;
+      if (!text || !["pending", "in_progress", "completed"].includes(status)) continue;
+      valid.push({ text: text.slice(0, 200), status });
+    }
+    this.todos = valid;
+    this.onTodos?.(valid);
+    const done = valid.filter((t) => t.status === "completed").length;
+    return `Task list updated: ${done}/${valid.length} completed.`;
+  }
+
+  /** Current model-managed task list (#276). */
+  getTodos(): TodoItem[] {
+    return [...this.todos];
+  }
+
+  /** `git status --porcelain` snapshot; null when not a git repo (#296/#297). */
+  private gitStatusSnapshot(): string | null {
+    try {
+      return execFileSync("git", ["status", "--porcelain"], {
+        cwd: this.projectRoot, encoding: "utf-8", timeout: 10_000, maxBuffer: 4 * 1024 * 1024,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /** After an MCP/shell tool ran, detect files it changed (git-status diff) and
+   *  put them through the same post-edit pipeline as built-in edits: re-index,
+   *  prompt refresh, end-of-turn verification, and diagnostics (#296). */
+  private async postMutationScan(preStatus: string | null, output: string): Promise<string> {
+    if (preStatus === null) return output;
+    const post = this.gitStatusSnapshot();
+    if (post === null || post === preStatus) return output;
+    const pre = new Set(preStatus.split("\n").filter(Boolean));
+    const changed = post
+      .split("\n")
+      .filter((l) => l && !pre.has(l))
+      .map((l) => l.slice(3).trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    if (changed.length === 0) return output;
+    this.systemPromptDirty = true;
+    this.editedThisTurn = true;
+    for (const p of changed) {
+      try { indexFile(this.resolveProjectPath(p)); } catch { /* unparseable */ }
+    }
+    const diag = await this.diagnosticsFor(changed[0]);
+    return diag ? `${output}\n\n[diagnostics: ${changed[0]}]\n${diag}` : output;
+  }
+
+  // --- Turn-level git checkpoints (#297): a worktree snapshot before the first
+  // mutating tool of a turn, restorable with /rollback even after shell/git
+  // mutations that the file-level undo stack can't see. Uses a TEMP index so the
+  // user's real index/staging area is never touched.
+  private turnCheckpoints: Array<{ turn: number; sha: string; at: string }> = [];
+  private checkpointedThisTurn = false;
+
+  private gitCheckpoint(): void {
+    if (this.checkpointedThisTurn) return;
+    const tmpIndex = join(tmpdir(), `mm-ckpt-${process.pid}-${Date.now()}`);
+    const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+    try {
+      execFileSync("git", ["add", "-A"], { cwd: this.projectRoot, env, timeout: 30_000 });
+      const tree = execFileSync("git", ["write-tree"], { cwd: this.projectRoot, env, encoding: "utf-8", timeout: 10_000 }).trim();
+      const sha = execFileSync(
+        "git", ["commit-tree", tree, "-m", `metalmind checkpoint (turn ${this.turnCount})`],
+        { cwd: this.projectRoot, env, encoding: "utf-8", timeout: 10_000 },
+      ).trim();
+      this.turnCheckpoints.push({ turn: this.turnCount, sha, at: new Date().toISOString() });
+      if (this.turnCheckpoints.length > 50) this.turnCheckpoints.shift();
+      this.checkpointedThisTurn = true;
+    } catch {
+      // not a git repo / git unavailable — checkpointing silently disabled
+    } finally {
+      rmSync(tmpIndex, { force: true });
+    }
+  }
+
+  /** List turn checkpoints for /checkpoints (#297). */
+  listCheckpoints(): string {
+    if (this.turnCheckpoints.length === 0) return "No checkpoints yet — one is taken before each turn's first mutating tool.";
+    return this.turnCheckpoints
+      .map((c) => `  turn ${c.turn}  ${c.sha.slice(0, 10)}  ${c.at}`)
+      .join("\n");
+  }
+
+  /** Restore the worktree to a checkpoint (#297). Files created after the
+   *  checkpoint are left in place; tracked files are restored to the snapshot. */
+  rollbackToCheckpoint(turn?: number): string {
+    const ckpt = turn != null ? this.turnCheckpoints.find((c) => c.turn === turn) : this.turnCheckpoints.at(-1);
+    if (!ckpt) return turn != null ? `No checkpoint for turn ${turn}. See /checkpoints.` : "No checkpoints to roll back to.";
+    const tmpIndex = join(tmpdir(), `mm-restore-${process.pid}-${Date.now()}`);
+    const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+    try {
+      execFileSync("git", ["read-tree", ckpt.sha], { cwd: this.projectRoot, env, timeout: 30_000 });
+      execFileSync("git", ["checkout-index", "-af"], { cwd: this.projectRoot, env, timeout: 60_000 });
+      this.systemPromptDirty = true;
+      return `Restored the worktree to the turn-${ckpt.turn} checkpoint (${ckpt.sha.slice(0, 10)}). Files created since remain; delete them manually if unwanted.`;
+    } catch (err) {
+      return `Rollback failed: ${errText(err)}`;
+    } finally {
+      rmSync(tmpIndex, { force: true });
+    }
+  }
+
+  /** Resolve the project check command: config editor.checkCommand, else tsc when
+   *  a tsconfig exists; empty string / checkOnEdit:false disables (#282). */
+  private checkCommand(): string | null {
+    const cfg = loadXdgConfig().editor;
+    if (cfg?.checkOnEdit === false) return null;
+    if (typeof cfg?.checkCommand === "string") return cfg.checkCommand.trim() || null;
+    return existsSync(join(this.projectRoot, "tsconfig.json")) ? "npx tsc --noEmit" : null;
+  }
+
+  /** Run the project check synchronously; null on pass or no command, else the
+   *  (bounded) failure output (#282). */
+  private runProjectCheck(): string | null {
+    const cmd = this.checkCommand();
+    if (!cmd) return null;
+    try {
+      execSync(cmd, { cwd: this.projectRoot, timeout: 60_000, stdio: "pipe", encoding: "utf-8", maxBuffer: 4 * 1024 * 1024 });
+      return null;
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string };
+      const out = `${e.stdout ?? ""}\n${e.stderr ?? ""}`.trim();
+      return (out || "check command failed").slice(0, 4_000);
+    }
+  }
+
+  /** /test, /check, /lint (#295): run the verification tool through the approval
+   *  gate and record the result in history so the model sees it next turn. */
+  async verifyFlow(kind: "test" | "check" | "lint", cmdOverride?: string): Promise<string> {
+    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted };
+    let toolName: string;
+    let input: Record<string, unknown>;
+    if (kind === "check") {
+      const cmd = cmdOverride?.trim() || this.checkCommand();
+      if (!cmd) return "No check command available — set editor.checkCommand in ~/.config/metalmind/config.json.";
+      toolName = "runCommand";
+      input = { command: cmd };
+    } else {
+      toolName = kind === "test" ? "runTests" : "runLint";
+      input = cmdOverride?.trim() ? { command: cmdOverride.trim() } : {};
+    }
+    if ((await this.requestApproval(toolName, input)) === "reject") return `/${kind} cancelled.`;
+    let out: string;
+    try {
+      out = String(await this.registry.execute(toolName, input, ctx));
+    } catch (err) {
+      out = `Error: ${errText(err)}`;
+    }
+    out = this.redactor.redact(out).slice(0, 8_000);
+    // Feed the result into history so the model can act on failures next turn (#295).
+    this.history.push({ role: "system", content: `[/${kind} result]\n${out}` });
+    this.saveSession();
+    return out;
+  }
+
+  /** Deterministic /commit flow (#274): stage everything, generate a Conventional
+   *  Commit message from the staged diff via the active model, then commit —
+   *  both mutations pass through the normal approval gate. */
+  async commitFlow(extraContext = ""): Promise<string> {
+    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted };
+    const status = String(await this.registry.execute("gitStatus", {}, ctx));
+    if (!status.trim() || status.includes("git exit")) {
+      return status.includes("git exit") ? `Not a git repository?\n${status}` : "Working tree clean — nothing to commit.";
+    }
+
+    // Stage all changes (approval-gated like a model-initiated call).
+    if ((await this.requestApproval("gitAdd", { paths: ["."] })) === "reject") return "Commit cancelled (staging rejected).";
+    const addOut = String(await this.registry.execute("gitAdd", { paths: ["."] }, ctx));
+    if (addOut.includes("git exit")) return `Staging failed:\n${addOut}`;
+
+    const diff = String(await this.registry.execute("gitDiff", { staged: true }, ctx)).slice(0, 12_000);
+    if (!diff.trim()) return "Nothing staged after git add — nothing to commit.";
+
+    // Generate a Conventional Commit message from the diff.
+    let message = "chore: update";
+    try {
+      const provider = this.getProvider(this.config.provider, this.config.model);
+      const res = await provider.completeChat({
+        messages: [
+          {
+            role: "system",
+            content:
+              "Write a Conventional Commit message for this diff: a `type: summary` line (feat/fix/chore/refactor/test/docs, " +
+              "imperative, ≤72 chars), then a blank line and a concise body explaining what and why. Output ONLY the message.",
+          },
+          { role: "user", content: `${extraContext ? `Context from the user: ${extraContext}\n\n` : ""}Diff:\n${diff}` },
+        ],
+      });
+      const m = res.message.content.trim();
+      if (m) message = m.replace(/^```[a-z]*\n?|```$/g, "").trim();
+    } catch {
+      /* fall back to the default message */
+    }
+
+    if ((await this.requestApproval("gitCommit", { message })) === "reject") return "Commit cancelled.";
+    const out = String(await this.registry.execute("gitCommit", { message }, ctx));
+    return out.includes("git exit") ? `Commit failed:\n${out}` : `Committed:\n${message.split("\n")[0]}\n\n${out}`;
+  }
+
+  /** /pr flow (#275): push the branch, generate a PR title/body from its commits,
+   *  create the PR with gh — push and PR creation are approval-gated. */
+  async prFlow(extraContext = ""): Promise<string> {
+    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted };
+    const branch = String(await this.registry.execute("gitCurrentBranch", {}, ctx)).trim();
+    if (!branch || branch.includes("git exit")) return `Could not determine the current branch:\n${branch}`;
+    if (branch === "main" || branch === "master") {
+      return `You are on ${branch} — create a feature branch first (gitCreateBranch or /model the agent to do it).`;
+    }
+
+    if ((await this.requestApproval("gitPush", {})) === "reject") return "PR cancelled (push rejected).";
+    const pushOut = String(await this.registry.execute("gitPush", {}, ctx));
+    if (pushOut.includes("git exit")) return `Push failed:\n${pushOut}`;
+
+    const log = String(await this.registry.execute("gitLog", { count: 15 }, ctx)).slice(0, 4_000);
+    let title = `${branch}`;
+    let body = "";
+    try {
+      const provider = this.getProvider(this.config.provider, this.config.model);
+      const res = await provider.completeChat({
+        messages: [
+          {
+            role: "system",
+            content:
+              'Write a GitHub PR title and body for these commits. Reply as exactly:\nTITLE: <one line>\nBODY:\n<markdown summary of the changes>',
+          },
+          { role: "user", content: `Branch: ${branch}\n${extraContext ? `Context: ${extraContext}\n` : ""}Recent commits:\n${log}` },
+        ],
+      });
+      const text = res.message.content;
+      const tm = /TITLE:\s*(.+)/.exec(text);
+      const bm = /BODY:\s*\n?([\s\S]+)/.exec(text);
+      if (tm) title = tm[1].trim().slice(0, 200);
+      if (bm) body = bm[1].trim();
+    } catch {
+      body = `Commits:\n${log}`;
+    }
+
+    if ((await this.requestApproval("createPullRequest", { title, body })) === "reject") return "PR cancelled.";
+    try {
+      const out = String(await this.registry.execute("createPullRequest", { title, body }, ctx));
+      return `PR created: ${out}`;
+    } catch (err) {
+      return `PR creation failed: ${errText(err)}`;
     }
   }
 
@@ -900,7 +1198,9 @@ export class AgentLoop {
     const task = this.subagentDepth === 0 && !planMode ? [TASK_TOOL_DEF] : [];
     // Long-term memory tool, top-level only (#218); it writes, so not in plan mode.
     const remember = this.subagentDepth === 0 && !planMode ? [REMEMBER_TOOL_DEF] : [];
-    return [...builtIn, ...mcp, ...delegate, ...task, ...remember];
+    // Task-list tool, top-level only; non-mutating, so plan mode keeps it (#276).
+    const todos = this.subagentDepth === 0 ? [SET_TODOS_TOOL_DEF] : [];
+    return [...builtIn, ...mcp, ...delegate, ...task, ...remember, ...todos];
   }
 
   /** Provider for the cheap triage classification — prefer a local model so an
@@ -1132,6 +1432,9 @@ export class AgentLoop {
     this.pendingImages = [];
     this.history.push({ role: "user", content: userInput, images });
     this.turnCount++;
+    this.editedThisTurn = false;
+    this.verifyRetriesLeft = 2;
+    this.checkpointedThisTurn = false;
     const toolDefs = this.toolDefs();
 
     if (!this.router) {
@@ -1435,6 +1738,21 @@ export class AgentLoop {
 
       if (pendingToolCalls.length === 0) {
         if (assistantText) this.history.push({ role: "assistant", content: this.redactor.redact(assistantText) });
+        // End-of-turn verification (#282): if this turn edited files, run the
+        // project check before finishing; on failure, feed the errors back and
+        // let the model fix them (bounded retries so it can't loop).
+        if (this.editedThisTurn && this.verifyRetriesLeft > 0 && this.mode !== "plan") {
+          const failure = this.runProjectCheck();
+          if (failure) {
+            this.verifyRetriesLeft--;
+            this.history.push({
+              role: "system",
+              content: `The project check failed after your edits. Fix these errors, then summarize:\n${failure}`,
+            });
+            yield { type: "text", text: `\n[project check failed — asking the model to fix]\n` };
+            continue;
+          }
+        }
         yield { type: "done" };
         return;
       }
@@ -1521,6 +1839,9 @@ export class AgentLoop {
             yield { type: "tool-result", output };
             continue;
           }
+          // A mutating tool is about to run — take the turn's git checkpoint so
+          // /rollback can restore even shell/git-driven changes (#297).
+          this.gitCheckpoint();
         }
 
         // Snapshot affected files before any mutation so /undo can revert (#144).
@@ -1529,6 +1850,9 @@ export class AgentLoop {
         let output: string;
         try {
           const mcpEntry = this.mcpTools.get(call.toolName);
+          // MCP/shell tools can change files without going through changedPaths —
+          // snapshot git status so we can detect and post-process their edits (#296).
+          const preStatus = SHELL_COMMAND_TOOLS.has(call.toolName) || mcpEntry ? this.gitStatusSnapshot() : null;
           if (call.toolName === "delegateToLocal") {
             // Cloud brain offloads bounded subtasks to the local model (#187).
             output = await this.handleDelegateToLocal(inputObj);
@@ -1538,6 +1862,9 @@ export class AgentLoop {
           } else if (call.toolName === "remember") {
             // Persist a durable fact to long-term memory (#218).
             output = this.rememberFact(typeof inputObj.fact === "string" ? inputObj.fact : "");
+          } else if (call.toolName === "setTodos") {
+            // Model-managed task list, mirrored to the UI (#276).
+            output = this.handleSetTodos(inputObj);
           } else if (mcpEntry) {
             // Validate args against the server-advertised schema before calling,
             // the same protection built-in tools get from their zod schema (#240).
@@ -1553,10 +1880,15 @@ export class AgentLoop {
               projectRoot: this.projectRoot,
               workspaceRoots: this.workspaceRoots,
               auditLog: this.auditLogRedacted, // record every built-in tool call (#147)
+              signal, // Esc cancels long-running tools mid-flight (#284)
             });
             output = typeof result === "string" ? result : JSON.stringify(result);
             // Post-edit feedback loop: re-index, optional format, append diagnostics.
             output = await this.postEditHook(call.toolName, inputObj, output);
+          }
+          // Post-process MCP/shell mutations through the same pipeline (#296).
+          if (preStatus !== null && !output.startsWith("Error")) {
+            output = await this.postMutationScan(preStatus, output);
           }
         } catch (err) {
           output = `Error: ${errText(err)}`;
@@ -2288,8 +2620,10 @@ export class AgentLoop {
     if (output.startsWith("Error") || output.startsWith("Blocked")) return output;
     const paths = this.changedPaths(toolName, input);
     if (paths.length === 0) return output;
-    // The tree/symbols changed — rebuild the system prompt (repo map) next turn (#302).
+    // The tree/symbols changed — rebuild the system prompt (repo map) next turn (#302),
+    // and verify the project before this turn ends (#282).
     this.systemPromptDirty = true;
+    this.editedThisTurn = true;
 
     const editorCfg = loadXdgConfig().editor;
     for (const p of paths) {

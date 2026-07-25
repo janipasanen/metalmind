@@ -170,6 +170,8 @@ export class SafetyValidator {
       "gitAdd",
       "gitRestore",
       "gitCreateBranch",
+      "gitPush",
+      "createPullRequest",
       "runCommand",
       "runBackground",
       // These accept a model-overridable `command`, so they must be gated and

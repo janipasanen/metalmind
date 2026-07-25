@@ -98,6 +98,18 @@ vi.mock("@metalmind/tools", async () => {
       if (name === "readFile") {
         return `read:${input.path}`;
       }
+      // Deterministic stand-ins for the /commit, /pr, and /test flows (M28).
+      if (name === "runTests") return "42 tests passed\n--- Tests passed, 5ms";
+      if (name === "runLint") return "clean\n--- Lint passed, 5ms";
+      if (name === "runCommand") return "ok\n--- Exit: 0, 5ms";
+      if (name === "gitStatus") return " M a.ts";
+      if (name === "gitAdd") return "";
+      if (name === "gitDiff") return "diff --git a/a.ts b/a.ts\n+new line";
+      if (name === "gitCommit") return "[main abc123] committed";
+      if (name === "gitCurrentBranch") return "feature/x";
+      if (name === "gitPush") return "branch pushed";
+      if (name === "gitLog") return "abc123 feat: earlier work";
+      if (name === "createPullRequest") return "https://github.com/x/y/pull/7";
       throw new Error("tool not found");
     }
   },
@@ -2264,4 +2276,147 @@ describe("AgentLoop auto-compact near the context window (#273)", () => {
     expect(texts.some((t) => t.includes("[auto-compact]"))).toBe(false);
     rmSync(root, { recursive: true, force: true });
   });
+});
+
+describe("M28 — agentic dev workflow", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function textProvider(reply: string) {
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: "ok" };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: reply } };
+      },
+    } as never;
+  }
+
+  it("/commit flow stages, generates a message, and commits (#274)", async () => {
+    const root = join(tmpdir(), `mm-commit-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    mockCreateProvider.mockReturnValue(textProvider("feat: add the new thing\n\nDetails about why."));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const result = await loop.commitFlow();
+    expect(result).toContain("Committed:");
+    expect(result).toContain("feat: add the new thing");
+    expect(result).toContain("[main abc123]");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("/pr flow pushes and creates a PR with a generated title (#275)", async () => {
+    const root = join(tmpdir(), `mm-pr-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    mockCreateProvider.mockReturnValue(textProvider("TITLE: Add the new thing\nBODY:\n- adds it"));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const result = await loop.prFlow();
+    expect(result).toContain("PR created:");
+    expect(result).toContain("pull/7");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("/test flow runs tests and reports the result (#295)", async () => {
+    const root = join(tmpdir(), `mm-verify-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    mockCreateProvider.mockReturnValue(textProvider(""));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const result = await loop.verifyFlow("test");
+    expect(result).toContain("Tests passed");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("setTodos updates the task list and notifies the UI (#276)", async () => {
+    const root = join(tmpdir(), `mm-todos-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    let calls = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield {
+            type: "tool-call",
+            toolCall: {
+              toolCallId: "t1",
+              toolName: "setTodos",
+              argumentsJson: JSON.stringify({
+                todos: [
+                  { text: "step one", status: "completed" },
+                  { text: "step two", status: "in_progress" },
+                  { text: "step three", status: "pending" },
+                ],
+              }),
+            },
+          };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const updates: Array<Array<{ text: string; status: string }>> = [];
+    const loop = new AgentLoop(
+      { provider: "stub", model: "test", explicit: true },
+      { projectRoot: root, onTodos: (t) => updates.push(t) },
+    );
+    const events = await collect(loop.run("do the multi-step thing"));
+    expect(updates).toHaveLength(1);
+    expect(updates[0].map((t) => t.status)).toEqual(["completed", "in_progress", "pending"]);
+    expect(loop.getTodos()).toHaveLength(3);
+    const result = events.find((e) => e.type === "tool-result") as { output?: string } | undefined;
+    expect(result?.output).toContain("1/3 completed");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("git checkpoint is taken before the first mutating tool and /rollback restores it (#297)", async () => {
+    const root = join(tmpdir(), `mm-ckpt-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    const { execSync } = await import("node:child_process");
+    execSync("git init -b main && git config user.email t@t && git config user.name T", { cwd: root });
+    const f = join(root, "tracked.ts");
+    writeFileSync(f, "ORIGINAL CONTENT");
+    execSync("git add -A && git commit -m init", { cwd: root });
+
+    mockCreateProvider.mockReturnValue(toolThenDoneProviderFor("writeFile", { path: f, content: "MODIFIED BY AGENT" }));
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    await collect(loop.run("modify the file"));
+
+    expect(readFileSync(f, "utf-8")).toBe("MODIFIED BY AGENT");
+    expect(loop.listCheckpoints()).toContain("turn 1");
+
+    const report = loop.rollbackToCheckpoint();
+    expect(report).toContain("Restored");
+    expect(readFileSync(f, "utf-8")).toBe("ORIGINAL CONTENT");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function toolThenDoneProviderFor(toolName: string, args: Record<string, unknown>) {
+    let n = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        n++;
+        if (n === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "tc1", toolName, argumentsJson: JSON.stringify(args) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "finished" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
 });

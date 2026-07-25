@@ -6,6 +6,15 @@ import { vimKey, initialVimState } from "../vim.js";
 
 const SLASH_COMMANDS = [
   { syntax: "/help",        description: "Show available commands" },
+  { syntax: "/plan",        description: "Plan mode: read-only, proposes a plan" },
+  { syntax: "/build",       description: "Build mode: executes changes (default)" },
+  { syntax: "/commit ",     description: "Stage + AI-generated Conventional Commit" },
+  { syntax: "/pr ",         description: "Push branch + create a GitHub PR (gh)" },
+  { syntax: "/test ",       description: "Run tests; result feeds the model" },
+  { syntax: "/check",       description: "Run the project check (tsc/config)" },
+  { syntax: "/lint ",       description: "Run the linter; result feeds the model" },
+  { syntax: "/tree",        description: "Browse project files" },
+  { syntax: "/notifications", description: "Show recent notifications" },
   { syntax: "/tier ",       description: "Force a tier: 1|2|3|auto [model]" },
   { syntax: "/cost",        description: "Show this session's token usage" },
   { syntax: "/budget ",     description: "View or set the session spend cap" },

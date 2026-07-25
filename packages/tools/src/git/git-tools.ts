@@ -7,6 +7,8 @@ import { PathValidator } from "../path-validator.js";
 // Run git with an argv array via execFileSync (no shell), so paths, commit
 // messages, and branch names can never be interpreted as shell syntax — closes
 // the $()/backtick/`;` command-injection vector of the old string interpolation (#255).
+// Failures are SURFACED, not swallowed: a nonzero exit always carries an explicit
+// "--- git exit: N" trailer so the model/user can tell an error from output (#301).
 function gitCmd(args: string[], cwd: string): string {
   try {
     return execFileSync("git", args, {
@@ -17,9 +19,10 @@ function gitCmd(args: string[], cwd: string): string {
     }).trim();
   } catch (err: unknown) {
     const execErr = err as { status?: number; stderr?: string; stdout?: string };
-    const msg = execErr.stderr?.trim() || execErr.stdout?.trim() || String(err);
-    if (execErr.status === 128 && !msg) return "";
-    return msg;
+    const msg = execErr.stderr?.trim() || execErr.stdout?.trim() || "";
+    const status = execErr.status ?? "unknown";
+    if (!msg) return `git ${args[0]} exited with status ${status} (no output)`;
+    return `${msg}\n--- git exit: ${status}`;
   }
 }
 
@@ -35,15 +38,21 @@ export const gitStatusTool: AgentTool<z.input<typeof gitStatusSchema>, string> =
   },
 });
 
-export const gitDiffSchema = z.object({});
+export const gitDiffSchema = z.object({
+  /** Show the staged (--cached) diff instead of the working-tree diff. */
+  staged: z.boolean().default(false),
+});
 
 export const gitDiffTool: AgentTool<z.input<typeof gitDiffSchema>, string> = createTool({
   toolName: "gitDiff",
-  description: "Show changes between the working tree and the index or a tree.",
+  description: "Show changes between the working tree and the index (or the staged diff with staged:true).",
   inputSchema: gitDiffSchema,
   requiresConfirmation: false,
-  async execute(_input, ctx: ToolExecutionContext): Promise<string> {
-    return gitCmd(["diff", "--unified=3"], ctx.projectRoot);
+  async execute(input, ctx: ToolExecutionContext): Promise<string> {
+    const args = ["diff"];
+    if (input.staged) args.push("--cached");
+    args.push("--unified=3");
+    return gitCmd(args, ctx.projectRoot);
   },
 });
 
@@ -139,6 +148,79 @@ export const gitCurrentBranchTool: AgentTool<z.input<typeof gitCurrentBranchSche
   },
 });
 
+export const gitLogSchema = z.object({
+  /** Number of commits to show (default 10). */
+  count: z.number().int().min(1).max(100).default(10),
+  /** Optional revision range, e.g. "main..HEAD". Validated to bare rev syntax. */
+  range: z.string().regex(/^[a-zA-Z0-9._/~^-]+(\.\.\.?[a-zA-Z0-9._/~^-]+)?$/).optional(),
+});
+
+export const gitLogTool: AgentTool<z.input<typeof gitLogSchema>, string> = createTool({
+  toolName: "gitLog",
+  description: "Show recent commits (oneline). Optional range like main..HEAD to see branch-only commits.",
+  inputSchema: gitLogSchema,
+  requiresConfirmation: false,
+  async execute(input, ctx: ToolExecutionContext): Promise<string> {
+    const args = ["log", "--oneline", `-${input.count ?? 10}`];
+    if (input.range) args.push(input.range);
+    return gitCmd(args, ctx.projectRoot);
+  },
+});
+
+export const gitPushSchema = z.object({
+  /** Push the current branch and set upstream (git push -u origin HEAD). */
+  setUpstream: z.boolean().default(true),
+});
+
+export const gitPushTool: AgentTool<z.input<typeof gitPushSchema>, string> = createTool({
+  toolName: "gitPush",
+  description: "Push the current branch to origin (sets upstream by default).",
+  inputSchema: gitPushSchema,
+  requiresConfirmation: true,
+  async execute(input, ctx: ToolExecutionContext): Promise<string> {
+    const args = input.setUpstream === false ? ["push"] : ["push", "-u", "origin", "HEAD"];
+    return gitCmd(args, ctx.projectRoot);
+  },
+});
+
+export const createPullRequestSchema = z.object({
+  title: z.string().min(1).max(300),
+  body: z.string().default(""),
+  /** Base branch (defaults to the repo's default branch when omitted). */
+  base: z.string().regex(/^[a-zA-Z0-9._/-]+$/).optional(),
+  draft: z.boolean().default(false),
+});
+
+export const createPullRequestTool: AgentTool<z.input<typeof createPullRequestSchema>, string> = createTool({
+  toolName: "createPullRequest",
+  description:
+    "Create a GitHub pull request for the current branch via the gh CLI (must be installed and authenticated). " +
+    "Push the branch first (gitPush).",
+  inputSchema: createPullRequestSchema,
+  requiresConfirmation: true,
+  async execute(input, ctx: ToolExecutionContext): Promise<string> {
+    // argv array via execFileSync — title/body can never be shell-interpreted (#255).
+    const args = ["pr", "create", "--title", input.title, "--body", input.body ?? ""];
+    if (input.base) args.push("--base", input.base);
+    if (input.draft) args.push("--draft");
+    try {
+      return execFileSync("gh", args, {
+        cwd: ctx.projectRoot,
+        encoding: "utf-8",
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+      }).trim();
+    } catch (err: unknown) {
+      const e = err as { code?: string; status?: number; stderr?: string; stdout?: string };
+      if (e.code === "ENOENT") {
+        throw new Error("gh CLI not found. Install it (brew install gh) and authenticate (gh auth login) to create PRs.");
+      }
+      const msg = e.stderr?.trim() || e.stdout?.trim() || String(err);
+      throw new Error(`gh pr create failed (exit ${e.status ?? "?"}): ${msg}`);
+    }
+  },
+});
+
 export const allGitTools = [
   gitStatusTool,
   gitDiffTool,
@@ -148,4 +230,7 @@ export const allGitTools = [
   gitRestoreTool,
   gitCreateBranchTool,
   gitCurrentBranchTool,
+  gitLogTool,
+  gitPushTool,
+  createPullRequestTool,
 ];

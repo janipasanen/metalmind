@@ -47,6 +47,8 @@ export class LspClient {
   private connected = false;
   private rootPath: string;
   private diagnostics = new Map<string, LspDiagnostic[]>();
+  /** Pending getDiagnostics waiters per uri, resolved on the next publish (#283). */
+  private diagWaiters = new Map<string, Array<{ resolve: () => void }>>();
   private opened = new Set<string>();
   private docVersions = new Map<string, number>();
 
@@ -104,8 +106,21 @@ export class LspClient {
     // so diagnostics were computed against an empty buffer) (#221).
     const uri = this.syncDocument(filePath);
 
-    // Wait briefly for diagnostics to arrive
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for the server to PUBLISH diagnostics for this uri (registered before
+    // the publish can race us, so any arrival is post-sync) instead of a blind
+    // 500 ms sleep that routinely returned stale/empty results. 3 s deadline —
+    // on timeout, return whatever is cached rather than blocking the turn (#283).
+    await new Promise<void>((resolve) => {
+      const waiter = { resolve: () => { clearTimeout(timer); resolve(); } };
+      const list = this.diagWaiters.get(uri) ?? [];
+      list.push(waiter);
+      this.diagWaiters.set(uri, list);
+      const timer = setTimeout(() => {
+        const l = this.diagWaiters.get(uri);
+        if (l) this.diagWaiters.set(uri, l.filter((w) => w !== waiter));
+        resolve();
+      }, 3_000);
+    });
 
     return this.diagnostics.get(uri) ?? [];
   }
@@ -343,6 +358,12 @@ export class LspClient {
       source: d.source,
     }));
     this.diagnostics.set(fileUri, diags);
+    // Wake any getDiagnostics call waiting on this uri (#283).
+    const waiters = this.diagWaiters.get(fileUri);
+    if (waiters?.length) {
+      this.diagWaiters.delete(fileUri);
+      for (const w of waiters) w.resolve();
+    }
   }
 
   private mapSeverity(

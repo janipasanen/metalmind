@@ -105,6 +105,7 @@ export default function App({ config }: AppProps) {
   const [pendingApproval, setPendingApproval] = useState<{ req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null>(null);
   const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number } | undefined>(undefined);
   const [agentMode, setAgentMode] = useState<"build" | "plan">("build");
+  const [todos, setTodos] = useState<Array<{ text: string; status: "pending" | "in_progress" | "completed" }>>([]);
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
@@ -148,6 +149,7 @@ export default function App({ config }: AppProps) {
           onApprovalRequest: (req) =>
             new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
           onUsage: (u) => setUsage(u),
+          onTodos: (t) => setTodos(t),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -200,6 +202,7 @@ export default function App({ config }: AppProps) {
           onApprovalRequest: (req) =>
             new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
           onUsage: (u) => setUsage(u),
+          onTodos: (t) => setTodos(t),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -274,6 +277,10 @@ export default function App({ config }: AppProps) {
           "  /brain [on|off]   - Remote-brain mode: cloud coordinates, delegates to local",
           "  /plan | /build    - Plan mode (read-only, proposes a plan) vs Build mode (executes)",
           "  /tree | /files    - Browse the project files (↑↓ move, →/Enter expand, Esc close)",
+          "  /commit [context] - Stage everything + AI-generated Conventional Commit (approval-gated)",
+          "  /pr [context]     - Push the branch + create a GitHub PR via gh (approval-gated)",
+          "  /test|/check|/lint [cmd] - Run tests / project check / lint; results feed the model",
+          "  /checkpoints | /rollback [turn] - List / restore turn-level git worktree checkpoints",
           "  /notifications    - Show recent notifications (errors, warnings, MCP status)",
           "  /keychain         - save | load | status — macOS keychain key storage",
           "  /retry            - Re-run the last prompt (drops the prior answer)",
@@ -538,6 +545,55 @@ export default function App({ config }: AppProps) {
       if (input === "/routes") {
         const text = agentRef.current?.getRoutingSummary() ?? "Agent not initialised.";
         yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/commit" || input.startsWith("/commit ")) {
+        const agent = agentRef.current;
+        if (!agent) { yield { type: "text", text: "Agent not initialised." } as const; }
+        else {
+          yield { type: "text", text: "Generating commit…" } as const;
+          yield { type: "text", text: `\n${await agent.commitFlow(input.slice(7).trim())}` } as const;
+        }
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/pr" || input.startsWith("/pr ")) {
+        const agent = agentRef.current;
+        if (!agent) { yield { type: "text", text: "Agent not initialised." } as const; }
+        else {
+          yield { type: "text", text: "Preparing pull request…" } as const;
+          yield { type: "text", text: `\n${await agent.prFlow(input.slice(3).trim())}` } as const;
+        }
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/checkpoints") {
+        yield { type: "text", text: agentRef.current?.listCheckpoints() ?? "Agent not initialised." } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/rollback" || input.startsWith("/rollback ")) {
+        const arg = input.slice(9).trim();
+        const turn = arg ? Number(arg) : undefined;
+        const text = agentRef.current?.rollbackToCheckpoint(Number.isFinite(turn) ? turn : undefined) ?? "Agent not initialised.";
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (/^\/(test|check|lint)( |$)/.test(input)) {
+        const agent = agentRef.current;
+        const kind = input.slice(1).split(" ")[0] as "test" | "check" | "lint";
+        if (!agent) { yield { type: "text", text: "Agent not initialised." } as const; }
+        else {
+          yield { type: "text", text: `Running /${kind}…` } as const;
+          yield { type: "text", text: `\n${await agent.verifyFlow(kind, input.slice(kind.length + 2).trim() || undefined)}` } as const;
+        }
         yield { type: "done" } as const;
         return;
       }
@@ -928,6 +984,17 @@ export default function App({ config }: AppProps) {
         </Box>
       )}
       <Notifications items={notifications} />
+      {todos.length > 0 && (
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+          <Text bold dimColor>Tasks ({todos.filter((t) => t.status === "completed").length}/{todos.length})</Text>
+          {todos.slice(0, 8).map((t, i) => (
+            <Text key={i} color={t.status === "completed" ? "green" : t.status === "in_progress" ? "yellow" : undefined} dimColor={t.status === "pending"}>
+              {t.status === "completed" ? "✓" : t.status === "in_progress" ? "→" : "·"} {t.text}
+            </Text>
+          ))}
+          {todos.length > 8 && <Text dimColor>… {todos.length - 8} more</Text>}
+        </Box>
+      )}
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} />}
       <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null || anyOverlayOpen} vimMode={vimMode} />
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />

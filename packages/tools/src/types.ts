@@ -5,6 +5,8 @@ export interface ToolExecutionContext {
   /** Additional directories the agent is allowed to read/write. */
   workspaceRoots?: string[];
   auditLog?: (entry: ToolAuditEntry) => void;
+  /** Turn-level abort signal — long-running tools should honour it (#284). */
+  signal?: AbortSignal;
 }
 
 export interface ToolAuditEntry {
