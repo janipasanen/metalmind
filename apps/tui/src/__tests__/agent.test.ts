@@ -1770,6 +1770,10 @@ import { handleRagCommand } from "../rag/manager.js";
 
 describe("M18 — sub-agents get RAG context (#229)", () => {
   it("injects retrieved document context into the sub-agent's turn", async () => {
+    // Force the offline hashing embedder so the test doesn't depend on (or hang on)
+    // a locally-running ollama's embeddings endpoint.
+    const prevEmbedder = process.env.METALMIND_EMBEDDER;
+    process.env.METALMIND_EMBEDDER = "hashing";
     const root = join(tmpdir(), `mm-subrag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
     mkdirSync(join(root, "docs"), { recursive: true });
     writeFileSync(join(root, "docs", "auth.md"), "# Auth\nLogin uses a JWT token kept in a session cookie.");
@@ -1804,6 +1808,8 @@ describe("M18 — sub-agents get RAG context (#229)", () => {
       expect(sys).toContain("JWT token");
     } finally {
       rmSync(root, { recursive: true, force: true });
+      if (prevEmbedder === undefined) delete process.env.METALMIND_EMBEDDER;
+      else process.env.METALMIND_EMBEDDER = prevEmbedder;
     }
   });
 });

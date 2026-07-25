@@ -1,10 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { HashingEmbedder, OllamaEmbedder, tokenize, l2normalize, cosine } from "../rag/embedder.js";
 import { RagIndex, chunkText } from "../rag/rag-index.js";
 import { handleRagCommand, retrieveContext, loadRagIndex } from "../rag/manager.js";
+
+// Force the offline hashing embedder so handleRagCommand/retrieveContext are
+// deterministic and never probe or embed against a locally-running ollama.
+let __prevEmbedder: string | undefined;
+beforeAll(() => { __prevEmbedder = process.env.METALMIND_EMBEDDER; process.env.METALMIND_EMBEDDER = "hashing"; });
+afterAll(() => { if (__prevEmbedder === undefined) delete process.env.METALMIND_EMBEDDER; else process.env.METALMIND_EMBEDDER = __prevEmbedder; });
 
 describe("embedder (#179)", () => {
   it("tokenizes, dropping stopwords and short tokens", () => {

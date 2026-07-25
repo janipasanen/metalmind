@@ -92,6 +92,12 @@ export class OllamaEmbedder implements Embedder {
 
 /** Pick the best available embedder: Ollama embedding model if reachable, else hashing. */
 export async function selectEmbedder(baseUrl = "http://127.0.0.1:11434", model = "nomic-embed-text"): Promise<Embedder> {
+  // Explicit override: force offline hashing (deterministic, no probe) or force
+  // the ollama embedder, so behaviour doesn't silently depend on whether a local
+  // ollama happens to be running (also keeps RAG tests hermetic).
+  const forced = (process.env.METALMIND_EMBEDDER ?? "").toLowerCase();
+  if (forced === "hashing" || forced === "hash" || forced === "offline") return new HashingEmbedder();
+  if (forced === "ollama") return new OllamaEmbedder(model, 768, baseUrl);
   try {
     const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(2000) });
     if (res.ok) {
