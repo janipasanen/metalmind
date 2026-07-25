@@ -1090,6 +1090,11 @@ export class AgentLoop {
     if (this.history.length === 0) {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     }
+    // Auto-compact: when the conversation nears the context window, summarize the
+    // older turns (compactHistory) instead of letting enforceContextBudget silently
+    // drop them mid-turn. Runs before this turn's user message is added (#273).
+    const compactNote = await this.maybeAutoCompact();
+    if (compactNote) yield { type: "text", text: `${compactNote}\n` };
     // @-file mentions and RAG are PER-TURN context: inject them into this turn's
     // request only (via this.turnContext, like the iteration-cap notice) instead
     // of pushing them into this.history, where they'd persist and accumulate a new
@@ -2646,6 +2651,42 @@ export class AgentLoop {
   }
 
   /** Summarize older turns into one message to reclaim context window (#145). */
+  /** Estimated tokens of the persisted history (content + tool calls + images). */
+  private historyTokens(): number {
+    const IMAGE_TOKEN_ESTIMATE = 1_100;
+    return this.history.reduce(
+      (s, m) =>
+        s +
+        estimateTokens(m.content) +
+        (m.toolCalls?.length ? estimateTokens(JSON.stringify(m.toolCalls)) : 0) +
+        (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE,
+      0,
+    );
+  }
+
+  /** Auto-compact when history nears the context window (#273). Returns a user
+   *  notice when compaction ran, null otherwise. Best-effort: any failure means
+   *  the turn proceeds and enforceContextBudget still guards the hard limit. */
+  private async maybeAutoCompact(): Promise<string | null> {
+    let limit = 32_768;
+    try {
+      limit = this.getProvider(this.config.provider, this.config.model).supportedCapabilities?.maximumContextTokens ?? limit;
+    } catch {
+      /* keyless/unbuildable provider — use the conservative default */
+    }
+    // Mirror enforceContextBudget's budget (limit − reserve) and fire at 90% of
+    // it, so summarization always happens BEFORE the hard message-dropping guard.
+    const reserve = Math.max(2048, Math.floor(limit * 0.2));
+    const budget = limit - reserve;
+    if (budget <= 0 || this.historyTokens() < budget * 0.9) return null;
+    try {
+      const report = await this.compactHistory();
+      return report.startsWith("Compacted") ? `[auto-compact] ${report}` : null;
+    } catch {
+      return null;
+    }
+  }
+
   async compactHistory(): Promise<string> {
     const systemPart = this.history[0]?.role === "system" ? [this.history[0]] : [];
     const rest = this.history.slice(systemPart.length);

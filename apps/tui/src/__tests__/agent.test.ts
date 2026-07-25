@@ -2091,3 +2091,56 @@ describe("AgentLoop @-mention context is per-turn, not persisted (#260)", () => 
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("AgentLoop auto-compact near the context window (#273)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function bigTextProvider(maxTokens: number, chunk: string) {
+    return {
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: maxTokens } as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: chunk };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "SUMMARY-MARKER: earlier work condensed." } };
+      },
+    } as never;
+  }
+
+  it("summarizes older turns automatically instead of only dropping them", async () => {
+    const root = join(tmpdir(), `mm-autocompact-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    // Window 6000 → budget 6000-2048=3952 → auto-compact fires at ~3557 tokens.
+    // ~600 tokens/turn (2400 chars) so the message COUNT clears compactHistory's
+    // minimum (KEEP_RECENT+2) well before the token threshold is crossed.
+    mockCreateProvider.mockReturnValue(bigTextProvider(6000, "x".repeat(2400)));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const texts: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const events = await collect(loop.run(`turn ${i}: continue the work`));
+      texts.push(...events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text));
+    }
+
+    // Auto-compact announced itself...
+    expect(texts.some((t) => t.includes("[auto-compact]"))).toBe(true);
+    // ...and the summary actually replaced older turns in history.
+    const hist = loop.conversation();
+    expect(hist.some((m) => m.content.includes("SUMMARY-MARKER"))).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("does not compact a short conversation", async () => {
+    const root = join(tmpdir(), `mm-nocompact-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(root, { recursive: true });
+    mockCreateProvider.mockReturnValue(bigTextProvider(128_000, "short answer"));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true }, { projectRoot: root });
+    const events = await collect(loop.run("hello"));
+    const texts = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text);
+    expect(texts.some((t) => t.includes("[auto-compact]"))).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+});
