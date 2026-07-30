@@ -27,7 +27,13 @@ function portOpen(port) {
  */
 function findMlxPython() {
   const venvPy = join(homedir(), ".local", "share", "metalmind", ".venv", "bin", "python3");
-  if (existsSync(venvPy)) return venvPy;
+  // Existence is not enough (#403): a postinstall whose pip step failed leaves a
+  // venv WITHOUT mlx_lm, and preferring it blindly disabled the MLX tier forever
+  // even when a perfectly good system python was available. Verify it works.
+  if (existsSync(venvPy)) {
+    const ok = spawnSync(venvPy, ["-c", "import mlx_lm"], { stdio: "pipe" });
+    if (ok.status === 0) return venvPy;
+  }
 
   const check = spawnSync("python3", ["-c", "import mlx_lm"], { stdio: "pipe" });
   if (check.status === 0) return "python3";

@@ -12,7 +12,7 @@
  * step is skipped.
  */
 import { execFileSync } from "child_process";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -66,8 +66,26 @@ try {
   execFileSync(venvPython, ["-m", "pip", "install", "--quiet", "--upgrade",
     "mlx-lm", "fastapi", "uvicorn"], { stdio: "inherit" });
 
+  // Verify the venv can actually import mlx_lm before declaring success (#403):
+  // a pip step that fails part-way used to leave a venv the bin shim then
+  // PREFERRED forever, permanently disabling the MLX tier with no diagnostic.
+  if (!mlxImportable(venvPython)) {
+    throw new Error("the .venv was created but mlx_lm is not importable from it");
+  }
+
   console.log("metalmind: MLX ready — Apple Silicon GPU will be used for local inference.");
 } catch (err) {
+  // Remove a half-built venv so the shim falls back to system python (or simply
+  // runs without MLX) instead of pinning itself to a broken interpreter (#403).
+  try {
+    if (existsSync(venvDir) && !mlxImportable(venvPython)) {
+      rmSync(venvDir, { recursive: true, force: true });
+      console.warn("metalmind: removed an incomplete .venv so MetalMind falls back cleanly.");
+    }
+  } catch {
+    /* best-effort */
+  }
   console.warn("metalmind: MLX setup skipped —", err.message);
   console.warn("  To set up manually: python3 -m pip install mlx-lm fastapi uvicorn");
+  console.warn("  MetalMind still runs — local tier 1 falls back to Ollama; check `/doctor` in the app.");
 }

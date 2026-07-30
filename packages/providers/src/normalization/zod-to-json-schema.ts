@@ -7,6 +7,14 @@ interface ZodDefLike {
   description?: string;
   options?: unknown[];
   defaultValue?: () => unknown;
+  /** ZodCatch's fallback factory (#390). */
+  catchValue?: (ctx: { error: unknown; input: unknown }) => unknown;
+  /** ZodEffects' wrapped schema (#390). */
+  schema?: unknown;
+  /** ZodLiteral's value (#390). */
+  value?: unknown;
+  /** ZodRecord's value type (#390). */
+  valueType?: unknown;
 }
 
 function defOf(schema: unknown): ZodDefLike | undefined {
@@ -51,6 +59,27 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
       }
       return inner;
     }
+    case "ZodCatch": {
+      // z.…​.catch(x) wraps its inner type. Without this case the whole schema
+      // collapsed to {} — for classifyUserIntent that erased every property,
+      // so the routing model got an unconstrained object and its output failed
+      // validation (#390).
+      const inner = def.innerType ? zodToJsonSchema(def.innerType) : {};
+      if (typeof def.catchValue === "function") {
+        try { return { ...inner, default: def.catchValue({ error: undefined, input: undefined }) }; } catch { /* ignore */ }
+      }
+      return inner;
+    }
+    case "ZodEffects":
+      // .refine()/.transform() wrap a schema; describe the underlying shape
+      // instead of emitting an unconstrained object (#390).
+      return def.schema ? zodToJsonSchema(def.schema) : {};
+    case "ZodLiteral":
+      return def.value !== undefined
+        ? { type: typeof def.value === "number" ? "number" : typeof def.value === "boolean" ? "boolean" : "string", enum: [def.value] }
+        : {};
+    case "ZodRecord":
+      return { type: "object", additionalProperties: def.valueType ? zodToJsonSchema(def.valueType) : true };
     case "ZodUnion": {
       // e.g. spreadsheet cell `string | number` → anyOf, not a bare object (#243).
       const options = Array.isArray(def.options) ? def.options : [];
@@ -63,7 +92,13 @@ export function zodToJsonSchema(schema: unknown): Record<string, unknown> {
       for (const [key, val] of Object.entries(shape)) {
         properties[key] = zodToJsonSchema(val);
         const fieldType = defOf(val)?.typeName;
-        if (fieldType !== "ZodOptional" && fieldType !== "ZodDefault" && fieldType !== "ZodNullable") {
+        // ZodCatch always yields a value, so it is never required either (#390).
+        if (
+          fieldType !== "ZodOptional" &&
+          fieldType !== "ZodDefault" &&
+          fieldType !== "ZodNullable" &&
+          fieldType !== "ZodCatch"
+        ) {
           required.push(key);
         }
       }

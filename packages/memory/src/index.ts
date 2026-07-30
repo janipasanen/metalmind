@@ -11,6 +11,14 @@ export interface SessionRecord {
   tags: string;
 }
 
+/** Raised when an optimistic save loses a race with another instance (#388). */
+export class SessionConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionConflictError";
+  }
+}
+
 export class SqliteSessionStore {
   private db: Database.Database;
   /** Set when a corrupt db file was quarantined and a fresh one created (#332).
@@ -56,6 +64,19 @@ export class SqliteSessionStore {
     if (!sessionCols.some((c) => c.name === "tags")) {
       this.db.exec("ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT ''");
     }
+    // Concurrency guard (#388): saveMessages rewrites a session's whole message
+    // list, so two instances sharing a session id silently deleted each other's
+    // turns. `rev` makes the write optimistic; owner_pid/heartbeat let a second
+    // instance SEE that a session is live before adopting it.
+    if (!sessionCols.some((c) => c.name === "rev")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN rev INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!sessionCols.some((c) => c.name === "owner_pid")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN owner_pid INTEGER");
+    }
+    if (!sessionCols.some((c) => c.name === "heartbeat")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN heartbeat TEXT");
+    }
     // Persist image attachments and message metadata (e.g. tool_call_id) so resume
     // doesn't lose vision input or break tool_call/tool_result pairing (#236).
     const msgCols = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
@@ -98,6 +119,49 @@ export class SqliteSessionStore {
     return id;
   }
 
+  /** Revision this process last wrote per session, for optimistic saves (#388). */
+  private knownRev = new Map<string, number>();
+
+  /** Adopt a session for writing: record its current revision and claim it.
+   *  Call once after resolving which session this process will write to. */
+  claimSession(sessionId: string): void {
+    const row = this.db.prepare("SELECT rev FROM sessions WHERE id = ?").get(sessionId) as { rev?: number } | undefined;
+    this.knownRev.set(sessionId, row?.rev ?? 0);
+    try {
+      this.db
+        .prepare("UPDATE sessions SET owner_pid = ?, heartbeat = datetime('now') WHERE id = ?")
+        .run(process.pid, sessionId);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Whether another LIVE process is currently writing this session (#388).
+   *  "Live" = a different pid that still exists and beat within `staleSeconds`. */
+  activeOwner(sessionId: string, staleSeconds = 120): number | null {
+    const row = this.db
+      .prepare("SELECT owner_pid AS pid, (julianday('now') - julianday(heartbeat)) * 86400 AS age FROM sessions WHERE id = ?")
+      .get(sessionId) as { pid?: number | null; age?: number | null } | undefined;
+    const pid = row?.pid ?? null;
+    if (!pid || pid === process.pid) return null;
+    if (row?.age == null || row.age > staleSeconds) return null;
+    try {
+      process.kill(pid, 0); // signal 0 = existence check
+      return pid;
+    } catch (err) {
+      // EPERM means the process EXISTS but belongs to another user — still a
+      // live owner. Only ESRCH ("no such process") means the session is free.
+      if ((err as { code?: string }).code === "EPERM") return pid;
+      return null;
+    }
+  }
+
+  /**
+   * Persist a session's messages. The write is OPTIMISTIC (#388): it only lands
+   * if the row's revision still matches what this process last saw. If another
+   * instance wrote in between, the save is refused instead of silently deleting
+   * that instance's turns — the caller surfaces it and can branch to a new id.
+   */
   saveMessages(sessionId: string, messages: AgentMessage[]): void {
     const insertMsg = this.db.prepare(
       "INSERT INTO messages (session_id, role, content, tool_calls, images, metadata) VALUES (?, ?, ?, ?, ?, ?)",
@@ -105,11 +169,22 @@ export class SqliteSessionStore {
 
     const deleteAll = this.db.prepare("DELETE FROM messages WHERE session_id = ?");
 
-    const updateSession = this.db.prepare(
-      "UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
+    const bumpRev = this.db.prepare(
+      "UPDATE sessions SET updated_at = datetime('now'), heartbeat = datetime('now'), owner_pid = ?, rev = rev + 1 WHERE id = ? AND rev = ?",
     );
 
+    const expected = this.knownRev.get(sessionId);
+    // First write from this process for this session — adopt whatever is there.
+    if (expected === undefined) this.claimSession(sessionId);
+    const rev = this.knownRev.get(sessionId) ?? 0;
+
+    let conflicted = false;
     const transaction = this.db.transaction(() => {
+      const res = bumpRev.run(process.pid, sessionId, rev);
+      if (res.changes === 0) {
+        conflicted = true;
+        return; // leave the other instance's messages untouched
+      }
       deleteAll.run(sessionId);
       for (const msg of messages) {
         insertMsg.run(
@@ -121,10 +196,17 @@ export class SqliteSessionStore {
           msg.metadata ? JSON.stringify(msg.metadata) : null,
         );
       }
-      updateSession.run(sessionId);
     });
 
     transaction();
+    if (conflicted) {
+      throw new SessionConflictError(
+        `Session ${sessionId} was modified by another MetalMind instance (pid ${
+          (this.db.prepare("SELECT owner_pid AS pid FROM sessions WHERE id = ?").get(sessionId) as { pid?: number })?.pid ?? "?"
+        }). This turn was NOT saved to it.`,
+      );
+    }
+    this.knownRev.set(sessionId, rev + 1);
   }
 
   loadMessages(sessionId: string): AgentMessage[] {

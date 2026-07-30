@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
@@ -197,7 +197,25 @@ const DEFAULT_XDG_CONFIG: UserConfig = {
 
 function ensureConfigDir(): void {
   if (!existsSync(XDG_CONFIG_DIR)) {
-    mkdirSync(XDG_CONFIG_DIR, { recursive: true });
+    // 0700: the directory holds api keys and OAuth tokens; the default 0755
+    // left them readable by every account on the machine (#396).
+    mkdirSync(XDG_CONFIG_DIR, { recursive: true, mode: 0o700 });
+    return;
+  }
+  // Tighten an existing directory created before this (or by an older version).
+  try {
+    chmodSync(XDG_CONFIG_DIR, 0o700);
+  } catch {
+    /* best-effort — a read-only or foreign-owned dir must not break startup */
+  }
+}
+
+/** Restrict a credential-bearing file to the owner (#396). */
+function restrictPermissions(file: string): void {
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -224,6 +242,10 @@ export function loadXdgConfig(): UserConfig {
     saveXdgConfig(fresh);
     return fresh;
   }
+
+  // Repair permissions on an EXISTING install too (#396): waiting for the next
+  // save would leave a world-readable key file sitting there indefinitely.
+  restrictPermissions(XDG_CONFIG_FILE);
 
   try {
     const raw = readFileSync(XDG_CONFIG_FILE, "utf-8");
@@ -290,12 +312,16 @@ export function saveXdgConfig(config: UserConfig): void {
   // never sees a truncated/half-written config — it gets the old or new file whole.
   const tmp = `${XDG_CONFIG_FILE}.${process.pid}.${Date.now()}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify(config, null, 2), "utf-8");
+    // mode 0600 at CREATE time, so the key is never briefly world-readable
+    // between write and chmod (#396).
+    writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
     renameSync(tmp, XDG_CONFIG_FILE);
+    restrictPermissions(XDG_CONFIG_FILE); // rename preserves the tmp's mode, but be explicit
     return;
   } catch {
     // Fall back to a direct write if temp+rename isn't possible (e.g. cross-device).
-    writeFileSync(XDG_CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+    writeFileSync(XDG_CONFIG_FILE, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
+    restrictPermissions(XDG_CONFIG_FILE);
   }
 }
 

@@ -101,3 +101,43 @@ describe("ReferenceIndex", () => {
     expect(refs.length).toBe(0);
   });
 });
+
+describe("re-indexing and scale (#398/#399)", () => {
+  it("does not duplicate references when the same file is indexed repeatedly", () => {
+    const index = new ReferenceIndex();
+    const source = ["export function target() {}", "target();", "target();"].join("\n");
+    const parsed = parseSource(source, "typescript");
+
+    index.indexFile("/p/a.ts", parsed, source);
+    const first = index.findSymbol("target").references.length;
+
+    // Ten more saves of the same file must not multiply the reference count.
+    for (let i = 0; i < 10; i++) index.indexFile("/p/a.ts", parsed, source);
+    expect(index.findSymbol("target").references.length).toBe(first);
+    expect(index.getFiles()).toEqual(["/p/a.ts"]);
+  });
+
+  it("drops entries for a file that no longer defines a symbol", () => {
+    const index = new ReferenceIndex();
+    const withSym = "export function gone() {}\ngone();";
+    index.indexFile("/p/b.ts", parseSource(withSym, "typescript"), withSym);
+    expect(index.findSymbol("gone").definitions).toHaveLength(1);
+
+    const without = "export function other() {}";
+    index.indexFile("/p/b.ts", parseSource(without, "typescript"), without);
+    expect(index.findSymbol("gone").definitions).toHaveLength(0);
+    expect(index.findSymbol("gone").references).toHaveLength(0);
+  });
+
+  it("builds the call graph in linear time over many functions", () => {
+    const index = new ReferenceIndex();
+    // 300 functions, each calling the next: the old O(functions^2) regex scan
+    // made this pathological; it must now finish quickly.
+    const src = Array.from({ length: 300 }, (_, i) => `function f${i}() { f${i + 1}(); }`).join("\n");
+    const started = process.hrtime.bigint();
+    index.indexFile("/p/big.ts", parseSource(src, "typescript"), src);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    expect(index.findSymbol("f10").definitions).toHaveLength(1);
+    expect(ms).toBeLessThan(3000);
+  });
+});

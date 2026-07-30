@@ -55,15 +55,52 @@ describe("zodToJsonSchema (#175)", () => {
     expect(js.anyOf).toContainEqual({ anyOf: [{ type: "string" }, { type: "number" }] });
   });
 
-  it("emits an unconstrained schema for unsupported nodes rather than mislabelling them as objects (#243)", () => {
-    // ZodRecord isn't modelled — it must not be advertised as {type:'object'}.
-    const js = zodToJsonSchema(z.record(z.string()));
-    expect(js).toEqual({});
+  it("emits an unconstrained schema for genuinely unsupported nodes (#243)", () => {
+    // ZodRecord IS modelled now (#390); a node with no mapping still degrades to
+    // an unconstrained schema rather than being mislabelled as a plain object.
+    expect(zodToJsonSchema(z.promise(z.string()))).toEqual({});
+    expect(zodToJsonSchema(undefined)).toEqual({ type: "object" });
   });
 
   it("advertises a union-typed object field (e.g. a spreadsheet cell) (#243)", () => {
     const schema = z.object({ cell: z.union([z.string(), z.number()]) });
     const js = zodToJsonSchema(schema) as { properties: Record<string, { anyOf?: unknown[] }> };
     expect(js.properties.cell.anyOf).toEqual([{ type: "string" }, { type: "number" }]);
+  });
+});
+
+describe("wrapper node types (#390)", () => {
+  it("unwraps ZodCatch instead of collapsing the schema to {}", () => {
+    const schema = z.object({
+      tier: z.enum(["tier1-local", "tier2-medium", "tier3-cloud"]).catch("tier2-medium"),
+      confidence: z.number().catch(0.5),
+      reason: z.string(),
+    });
+    const json = zodToJsonSchema(schema) as {
+      type: string;
+      properties: Record<string, { type?: string; enum?: string[] }>;
+      required?: string[];
+    };
+    expect(json.type).toBe("object");
+    expect(Object.keys(json.properties).sort()).toEqual(["confidence", "reason", "tier"]);
+    expect(json.properties.tier.enum).toEqual(["tier1-local", "tier2-medium", "tier3-cloud"]);
+    expect(json.properties.confidence.type).toBe("number");
+    // A .catch() field always produces a value, so it is not required.
+    expect(json.required).toEqual(["reason"]);
+  });
+
+  it("describes ZodEffects, ZodLiteral and ZodRecord instead of emitting {}", () => {
+    const eff = zodToJsonSchema(z.string().refine((v) => v.length > 2)) as { type?: string };
+    expect(eff.type).toBe("string");
+
+    const lit = zodToJsonSchema(z.literal("md")) as { type?: string; enum?: unknown[] };
+    expect(lit.enum).toEqual(["md"]);
+
+    const rec = zodToJsonSchema(z.record(z.string(), z.number())) as {
+      type?: string;
+      additionalProperties?: { type?: string };
+    };
+    expect(rec.type).toBe("object");
+    expect(rec.additionalProperties?.type).toBe("number");
   });
 });

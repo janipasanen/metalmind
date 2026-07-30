@@ -55,6 +55,17 @@ export function indexFile(filePath: string): void {
 /**
  * findSymbol tool — locates a symbol definition and its references.
  */
+/** Up to 5 indexed symbol names closest to `name` (case-insensitive substring,
+ *  then prefix), so a miss points somewhere useful instead of dumping paths (#395). */
+function nearestSymbols(index: { allSymbolNames?: () => string[] }, name: string): string[] {
+  const all = index.allSymbolNames?.() ?? [];
+  if (all.length === 0) return [];
+  const q = name.toLowerCase();
+  const contains = all.filter((n) => n.toLowerCase().includes(q));
+  const prefix = all.filter((n) => q.length >= 3 && n.toLowerCase().startsWith(q.slice(0, 3)));
+  return [...new Set([...contains, ...prefix])].slice(0, 5);
+}
+
 export const findSymbolTool: AgentTool = createTool({
   toolName: "findSymbol",
   description:
@@ -67,7 +78,17 @@ export const findSymbolTool: AgentTool = createTool({
     const result = index.findSymbol(input.name);
 
     if (result.definitions.length === 0) {
-      return `No symbol "${input.name}" found in indexed files. Indexed files: ${index.getFiles().join(", ") || "(none)"}`;
+      // Do NOT dump every indexed path (#395): with 400 absolute paths that was
+      // 6-40KB of unactionable text on a FAILURE path, crowding out context the
+      // model needs. Give the count plus an actionable next step instead.
+      const files = index.getFiles();
+      const near = files.length
+        ? nearestSymbols(index, input.name)
+        : [];
+      const hint = near.length
+        ? ` Similar indexed symbols: ${near.join(", ")}.`
+        : " Try `search` for a text match, or check the spelling/casing.";
+      return `No symbol "${input.name}" found across ${files.length} indexed file(s).${hint}`;
     }
 
     const defLines = result.definitions.map(

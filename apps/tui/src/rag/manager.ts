@@ -96,10 +96,22 @@ export async function handleRagCommand(rawArgs: string, projectRoot: string, onP
     }
     if (!existsSync(target)) return `Path not found: ${rest}`;
 
-    // Reuse the existing index's embedder so vectors stay compatible; else pick one.
-    const existing = existsSync(path)
-      ? embedderFromId((JSON.parse(readFileSync(path, "utf-8")) as { embedderId?: string }).embedderId ?? "hash-v1")
-      : await selectEmbedder();
+    // Reuse the existing index's embedder so vectors stay compatible; else pick
+    // one. A corrupt/truncated index must not throw a raw SyntaxError at the
+    // user — quarantine it and start fresh (#389).
+    let corrupt = false;
+    let existing: Embedder;
+    if (existsSync(path)) {
+      try {
+        existing = embedderFromId((JSON.parse(readFileSync(path, "utf-8")) as { embedderId?: string }).embedderId ?? "hash-v1");
+      } catch {
+        corrupt = true;
+        RagIndex.deleteIndexFile(path);
+        existing = await selectEmbedder();
+      }
+    } else {
+      existing = await selectEmbedder();
+    }
     const index = new RagIndex(existing, path);
     index.load();
 
@@ -117,7 +129,8 @@ export async function handleRagCommand(rawArgs: string, projectRoot: string, onP
     }
     index.persist();
     const s = index.status();
-    return `Indexed ${files.length} file(s) → ${chunks} new chunk(s). Index now: ${s.files} files / ${s.chunks} chunks (${s.embedder}).`;
+    const note = corrupt ? " (the previous index file was corrupt and was rebuilt)" : "";
+    return `Indexed ${files.length} file(s) → ${chunks} new chunk(s). Index now: ${s.files} files / ${s.chunks} chunks (${s.embedder}).${note}`;
   }
 
   if (sub === "search") {
@@ -130,9 +143,11 @@ export async function handleRagCommand(rawArgs: string, projectRoot: string, onP
   }
 
   if (sub === "clear") {
-    const index = loadRagIndex(projectRoot);
-    if (index) index.clear();
-    return "RAG index cleared.";
+    // Delete the FILE, not just the in-memory chunks (#389): a corrupt index
+    // can't be loaded, so the old `if (index) index.clear()` silently did
+    // nothing while still reporting success — and every later `add` threw.
+    const removed = RagIndex.deleteIndexFile(path);
+    return removed ? "RAG index cleared." : "RAG index was already empty.";
   }
 
   // status

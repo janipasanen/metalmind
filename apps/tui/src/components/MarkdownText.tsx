@@ -57,8 +57,13 @@ function parseInline(raw: string, accent: string): React.ReactNode {
 
   if (segments.length === 0) return <Text>{raw}</Text>;
 
+  // ONE <Text> parent wrapping the styled spans (#400). Returning a fragment of
+  // sibling <Text> elements made Ink lay each span out as its own FLEX ITEM
+  // inside the parent <Box>: every formatted line was shattered into staggered
+  // columns and individual characters were dropped at the wrap points. Nested
+  // <Text> is inline, so the line flows and wraps as a single run of text.
   return (
-    <>
+    <Text>
       {segments.map((seg, i) => {
         if (seg.code) return <Text key={i} color="green">{seg.text}</Text>;
         if (seg.bold) return <Text key={i} bold>{seg.text}</Text>;
@@ -67,7 +72,7 @@ function parseInline(raw: string, accent: string): React.ReactNode {
         if (seg.italic) return <Text key={i} italic>{seg.text}</Text>;
         return <Text key={i}>{seg.text}</Text>;
       })}
-    </>
+    </Text>
   );
 }
 

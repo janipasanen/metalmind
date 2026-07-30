@@ -76,22 +76,57 @@ export class StreamRedactor {
   }
 }
 
-/** Collect candidate secret values from XDG config api keys + MCP server headers. */
+/** Values in an MCP server's env/args that look like credentials (#397).
+ *  Header tokens were scrubbed but these were not, so a stdio server configured
+ *  with `env: { GITHUB_TOKEN: "ghp_…" }` leaked its token to the cloud model the
+ *  moment it appeared in tool output or an error, while the api key sitting next
+ *  to it in the same file was masked. */
+const CREDENTIAL_KEY = /(token|key|secret|password|passwd|credential|auth|bearer|api[_-]?key)/i;
+/** A bare argv value that looks like a credential even without a telling name. */
+const SECRETISH_VALUE = /^(?:sk-|ghp_|gho_|github_pat_|xox[abposr]-|AKIA|ya29\.|eyJ[A-Za-z0-9_-]{10,}\.)/;
+
+/** Collect candidate secret values from XDG config api keys, MCP server
+ *  headers/env/args, and stored OAuth tokens. */
 export function collectSecrets(
   apiKeys: Record<string, string> | undefined,
   extra: Array<string | undefined>,
-  mcpServers?: Record<string, { headers?: Record<string, string> }>,
+  mcpServers?: Record<
+    string,
+    { headers?: Record<string, string>; env?: Record<string, string>; args?: string[] }
+  >,
+  mcpTokens?: Record<string, { accessToken?: string; refreshToken?: string }>,
 ): string[] {
   const out: string[] = [];
+  const pushToken = (v: string | undefined) => {
+    if (!v) return;
+    out.push(v);
+    // "Bearer sk-…" / "Token abc" — capture the bare token too.
+    const m = /\b(?:Bearer|Token)\s+(\S+)/i.exec(v);
+    if (m) out.push(m[1]);
+  };
+
   for (const v of Object.values(apiKeys ?? {})) out.push(v);
   for (const v of extra) if (v) out.push(v);
   for (const srv of Object.values(mcpServers ?? {})) {
-    for (const h of Object.values(srv.headers ?? {})) {
-      // A header like "Bearer sk-..." — capture both the whole value and the token.
-      out.push(h);
-      const m = /\b(?:Bearer|Token)\s+(\S+)/i.exec(h);
-      if (m) out.push(m[1]);
+    for (const h of Object.values(srv.headers ?? {})) pushToken(h);
+    // env values whose NAME looks credential-ish (#397).
+    for (const [name, value] of Object.entries(srv.env ?? {})) {
+      if (CREDENTIAL_KEY.test(name)) pushToken(value);
     }
+    // argv: either `--token=<v>` / `--token <v>`, or a value that looks like a
+    // well-known credential format on its own.
+    const args = srv.args ?? [];
+    args.forEach((arg, i) => {
+      const eq = /^--?([A-Za-z0-9_-]+)=(.+)$/.exec(arg);
+      if (eq && CREDENTIAL_KEY.test(eq[1])) pushToken(eq[2]);
+      else if (/^--?[A-Za-z0-9_-]+$/.test(arg) && CREDENTIAL_KEY.test(arg) && args[i + 1]) pushToken(args[i + 1]);
+      else if (SECRETISH_VALUE.test(arg)) pushToken(arg);
+    });
+  }
+  // OAuth access/refresh tokens obtained via /mcp auth (#397).
+  for (const t of Object.values(mcpTokens ?? {})) {
+    pushToken(t?.accessToken);
+    pushToken(t?.refreshToken);
   }
   return out;
 }

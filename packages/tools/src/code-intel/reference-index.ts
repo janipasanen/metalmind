@@ -19,6 +19,11 @@ export class ReferenceIndex {
    * Index symbols and references from a parsed file.
    */
   indexFile(filePath: string, result: ParseResult, source: string): void {
+    // Re-indexing the same file used to APPEND its references again, so every
+    // save inflated findReferences counts (10 edits => 10x the real hits) and
+    // grew memory without bound. Drop this file's previous entries first (#399).
+    this.purgeFile(filePath);
+
     const fileDefs = new Map<string, SymbolInfo>();
 
     // Register definitions
@@ -192,6 +197,28 @@ export class ReferenceIndex {
     return refs;
   }
 
+  /** Remove every entry contributed by `filePath` (#399). */
+  private purgeFile(filePath: string): void {
+    const previous = this.definitions.get(filePath);
+    this.definitions.delete(filePath);
+    for (const [name, refs] of this.references) {
+      const kept = refs.filter((r) => r.filePath !== filePath);
+      if (kept.length === 0) this.references.delete(name);
+      else if (kept.length !== refs.length) this.references.set(name, kept);
+    }
+    // Call-graph entries are keyed by symbol name; drop the ones this file owned.
+    for (const name of previous?.keys() ?? []) this.callGraph.delete(name);
+  }
+
+  /** All indexed symbol names — used to suggest near-misses on a lookup (#395). */
+  allSymbolNames(): string[] {
+    const names = new Set<string>();
+    for (const fileDefs of this.definitions.values()) {
+      for (const n of fileDefs.keys()) names.add(n);
+    }
+    return [...names];
+  }
+
   private extractCalls(sym: SymbolInfo, source: string): void {
     if (sym.kind !== "function") return;
 
@@ -200,17 +227,17 @@ export class ReferenceIndex {
     const bodyLines = lines.slice(sym.range.startRow, sym.range.endRow + 1);
     const bodyText = bodyLines.join("\n");
 
-    // Find function calls in the body (simple heuristic: known function names followed by `(`)
-    
-
+    // Scan the body ONCE for `identifier(` and intersect with known function
+    // names, instead of running a fresh regex over the body for every known
+    // function (#398). The old loop was O(functions x symbols x bodySize) — on a
+    // large monorepo that is minutes of blocked event loop; this is linear.
     const callees = new Set<string>();
-    for (const funcName of this.allFunctionNames) {
-      if (funcName === sym.name) continue; // skip self
-      // Check if funcName appears followed by ( in the body
-      const callPattern = new RegExp(`\\b${escapeRegex(funcName)}\\s*\\(`);
-      if (callPattern.test(bodyText)) {
-        callees.add(funcName);
-      }
+    const CALL = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+    let m: RegExpExecArray | null;
+    while ((m = CALL.exec(bodyText)) !== null) {
+      const name = m[1];
+      if (name === sym.name) continue; // skip self
+      if (this.allFunctionNames.has(name)) callees.add(name);
     }
 
     if (callees.size > 0) {
@@ -219,6 +246,3 @@ export class ReferenceIndex {
   }
 }
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}

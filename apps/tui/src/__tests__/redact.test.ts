@@ -75,3 +75,36 @@ describe("Redactor (#168)", () => {
     expect(secrets).toContain("tok-abcdefgh123456"); // token extracted from Bearer
   });
 });
+
+describe("secret collection covers MCP env/args and OAuth tokens (#397)", () => {
+  it("collects credential-ish env values and argv tokens from MCP servers", () => {
+    const secrets = collectSecrets(
+      { ollama: "config-key-1234567890" },
+      [],
+      {
+        gh: {
+          env: { GITHUB_TOKEN: "ghp_aaaaaaaaaaaaaaaaaaaa", HOME: "/Users/x" },
+          args: ["--api-key", "argv-secret-abcdefgh", "--verbose", "sk-loose-value-123456"],
+        },
+        other: { headers: { Authorization: "Bearer header-token-999999" } },
+      },
+      { gh: { accessToken: "oauth-access-7777777", refreshToken: "oauth-refresh-8888888" } },
+    );
+    expect(secrets).toContain("ghp_aaaaaaaaaaaaaaaaaaaa");
+    expect(secrets).toContain("argv-secret-abcdefgh");
+    expect(secrets).toContain("sk-loose-value-123456");
+    expect(secrets).toContain("oauth-access-7777777");
+    expect(secrets).toContain("oauth-refresh-8888888");
+    expect(secrets).toContain("header-token-999999");
+    // Non-credential env values must NOT be redacted (would mangle output).
+    expect(secrets).not.toContain("/Users/x");
+    expect(secrets).not.toContain("--verbose");
+  });
+
+  it("actually scrubs those values from text", () => {
+    const r = new Redactor(
+      collectSecrets(undefined, [], { s: { env: { API_TOKEN: "tok-verysecret-1234" } } }, undefined),
+    );
+    expect(r.redact("the server said tok-verysecret-1234 loudly")).toBe("the server said [REDACTED] loudly");
+  });
+});

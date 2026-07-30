@@ -17,10 +17,17 @@ interface DiffViewProps {
 
 function parseDiff(raw: string): DiffLine[] {
   const lines: DiffLine[] = [];
+  // File headers appear ONLY at the top of a patch, before the first @@ hunk.
+  // Without this flag, a deleted line whose content starts with `--` (a SQL or
+  // Lua comment, a YAML document marker, an `---` markdown rule) or an added
+  // line starting with `++` (a C increment) was classified as diff metadata and
+  // rendered identically to it — a deletion looked like a header (#401).
+  let inHunk = false;
   for (const line of raw.split("\n")) {
-    if (line.startsWith("---") || line.startsWith("+++")) {
+    if (!inHunk && (line.startsWith("--- ") || line.startsWith("+++ "))) {
       lines.push({ text: line, type: "header" });
     } else if (line.startsWith("@@")) {
+      inHunk = true;
       lines.push({ text: line, type: "info" });
     } else if (line.startsWith("-")) {
       lines.push({ text: line, type: "remove" });

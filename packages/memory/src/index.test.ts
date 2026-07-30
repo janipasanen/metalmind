@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { rmSync } from "node:fs";
+import { rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SqliteSessionStore } from "./index.js";
+import { SqliteSessionStore, SessionConflictError } from "./index.js";
 
 describe("SqliteSessionStore", () => {
   const testDir = join(tmpdir(), `metalmind-sessions-${Date.now()}`);
@@ -213,6 +213,67 @@ describe("SqliteSessionStore persists images + metadata (#236)", () => {
     const loaded = store.loadMessages(id);
     expect(loaded[0].images).toEqual(["data:image/png;base64,AAAA"]);
     expect(loaded[2].metadata?.toolCallId).toBe("tc1"); // tool_call/tool_result pairing preserved
+    store.close();
+  });
+});
+
+describe("concurrent instances (#388)", () => {
+  let dir: string;
+  let dbPath: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mm-conc-"));
+    dbPath = join(dir, "sessions.db");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("refuses a stale save instead of deleting the other instance's turns", () => {
+    const a = new SqliteSessionStore(dbPath);
+    const b = new SqliteSessionStore(dbPath);
+    const id = a.createSession("shared");
+    a.claimSession(id);
+    b.claimSession(id); // second instance adopts the same session
+
+    a.saveMessages(id, [{ role: "user", content: "A1" }, { role: "assistant", content: "A2" }]);
+
+    // B's view of the revision is now stale — its save must be refused.
+    expect(() => b.saveMessages(id, [{ role: "user", content: "B1" }])).toThrow(SessionConflictError);
+    expect(a.loadMessages(id).map((m) => m.content)).toEqual(["A1", "A2"]);
+
+    a.close();
+    b.close();
+  });
+
+  it("lets the owner keep saving across many turns", () => {
+    const a = new SqliteSessionStore(dbPath);
+    const id = a.createSession();
+    a.claimSession(id);
+    for (let i = 1; i <= 5; i++) {
+      a.saveMessages(id, Array.from({ length: i }, (_, k) => ({ role: "user" as const, content: `turn ${k + 1}` })));
+    }
+    expect(a.loadMessages(id)).toHaveLength(5);
+    a.close();
+  });
+
+  it("reports a live foreign owner and ignores a dead or stale one", () => {
+    const store = new SqliteSessionStore(dbPath);
+    const id = store.createSession();
+    const raw = (store as unknown as { db: { prepare(s: string): { run(...a: unknown[]): unknown } } }).db;
+
+    // A different, definitely-alive pid (pid 1 always exists on macOS).
+    raw.prepare("UPDATE sessions SET owner_pid = 1, heartbeat = datetime('now') WHERE id = ?").run(id);
+    expect(store.activeOwner(id)).toBe(1);
+
+    // Same pid as us → never blocks ourselves.
+    raw.prepare("UPDATE sessions SET owner_pid = ?, heartbeat = datetime('now') WHERE id = ?").run(process.pid, id);
+    expect(store.activeOwner(id)).toBeNull();
+
+    // A stale heartbeat frees the session even if the pid is alive.
+    raw.prepare("UPDATE sessions SET owner_pid = 1, heartbeat = datetime('now', '-10 minutes') WHERE id = ?").run(id);
+    expect(store.activeOwner(id)).toBeNull();
+
+    // A pid that cannot exist frees it too.
+    raw.prepare("UPDATE sessions SET owner_pid = 999999, heartbeat = datetime('now') WHERE id = ?").run(id);
+    expect(store.activeOwner(id)).toBeNull();
     store.close();
   });
 });

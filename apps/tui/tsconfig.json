@@ -1,7 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "./dist",
+    // tsc emits TYPES/JS here, tsup emits the published bundle to ./dist (#402).
+    // They used to share ./dist, so a plain `tsc -b` (or `npm run typecheck`)
+    // silently replaced the bundled entry point with unbundled output that
+    // imports @metalmind/* — packages that do not exist in the published tarball.
+    "outDir": "./dist-tsc",
     "rootDir": "./src",
     "jsx": "react-jsx",
     "composite": true

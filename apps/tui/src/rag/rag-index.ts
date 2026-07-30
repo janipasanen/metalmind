@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { cosine, type Embedder } from "./embedder.js";
 
@@ -103,11 +103,42 @@ export class RagIndex {
     this.persist();
   }
 
+  /** Delete the on-disk index outright. Used by `/rag clear` so a CORRUPT file
+   *  (which can't be loaded, so `clear` never even saw it) is actually removed
+   *  instead of being reported as cleared while it keeps breaking `add` (#389). */
+  static deleteIndexFile(path: string): boolean {
+    try {
+      if (!existsSync(path)) return false;
+      rmSync(path, { force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   persist(): void {
     if (!this.path) return;
     mkdirSync(dirname(this.path), { recursive: true });
     const data: IndexFile = { embedderId: this.embedder.id, chunks: this.chunks };
-    writeFileSync(this.path, JSON.stringify(data), "utf-8");
+    // Atomic write (#389): the index is multi-MB, so a crash or Ctrl+C during
+    // the write left a truncated JSON file that permanently bricked /rag —
+    // status reported "empty", `clear` claimed success without deleting it, and
+    // `add` threw a raw SyntaxError. temp+rename is the same pattern
+    // saveXdgConfig already uses: a reader sees the old file or the new one.
+    const tmp = `${this.path}.${process.pid}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(data), "utf-8");
+      renameSync(tmp, this.path);
+    } catch {
+      // Cross-device or permission failure — fall back to a direct write rather
+      // than losing the index entirely.
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        /* ignore */
+      }
+      writeFileSync(this.path, JSON.stringify(data), "utf-8");
+    }
   }
 
   /** Load persisted chunks if the file exists and was built with the same embedder. */

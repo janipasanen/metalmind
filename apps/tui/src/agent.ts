@@ -23,6 +23,9 @@ interface SessionStore {
   renameSession(id: string, title: string): void;
   tagSession(id: string, tags: string): void;
   getSession?(id: string): SessionRecordLite | undefined;
+  /** Concurrency support (#388) — present on the sqlite store. */
+  claimSession?(id: string): void;
+  activeOwner?(id: string, staleSeconds?: number): number | null;
   close?(): void;
 }
 
@@ -1351,11 +1354,17 @@ export class AgentLoop {
       }));
     // Expose the namespaced key (serverId:toolName) to the model so collisions
     // across servers stay distinct; dispatch maps it back to the original name.
-    const mcp = [...this.mcpTools.entries()].map(([namespacedName, { def }]) => ({
-      name: namespacedName,
-      description: def.description,
-      inputSchema: def.inputSchema,
-    }));
+    // MCP tools can do anything the server implements — writes, network calls,
+    // deployments. Plan mode claims to be read-only, so they must be withheld
+    // there too; they used to be advertised AND executable, contradicting the
+    // prompt's own statement (#391).
+    const mcp = planMode
+      ? []
+      : [...this.mcpTools.entries()].map(([namespacedName, { def }]) => ({
+          name: namespacedName,
+          description: def.description,
+          inputSchema: def.inputSchema,
+        }));
     // In remote-brain mode the cloud model can offload bounded subtasks to the
     // small local model — but only expose it when a local worker actually exists,
     // so the model can't call into a runtime failure (#186/#187/#233).
@@ -1819,11 +1828,36 @@ export class AgentLoop {
    * After classification the real work always goes to the appropriate tier.
    */
   private async *runWithCoordinator(userInput: string, toolDefs: unknown[], signal?: AbortSignal): AsyncGenerator<ChatStreamEvent> {
+    // Esc must work during the PRE-STREAM phase too (#393): intent
+    // classification and plan generation are model calls that can take many
+    // seconds, and neither took a signal — Esc did nothing until the first token
+    // of the real answer. Race each phase against the abort so the turn ends
+    // promptly; the underlying request is abandoned rather than awaited.
+    const untilAbort = <T>(p: Promise<T>, fallback: T): Promise<T> => {
+      if (!signal) return p;
+      if (signal.aborted) return Promise.resolve(fallback);
+      return new Promise<T>((resolve) => {
+        const onAbort = () => resolve(fallback);
+        signal.addEventListener("abort", onAbort, { once: true });
+        void p.then(
+          (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+          () => { signal.removeEventListener("abort", onAbort); resolve(fallback); },
+        );
+      });
+    };
+
     const historyTokens = this.history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-    const { decision: coordDecision, localResult } = await this.coordinator!.processRequest(userInput, {
-      inputTokenEstimate: historyTokens,
-      input: { userMessage: userInput },
-    });
+    const { decision: coordDecision, localResult } = await untilAbort(
+      this.coordinator!.processRequest(userInput, {
+        inputTokenEstimate: historyTokens,
+        input: { userMessage: userInput },
+      }),
+      { decision: null as never, localResult: undefined as never },
+    );
+    if (signal?.aborted) {
+      yield { type: "done" };
+      return;
+    }
 
     this.onCoordinatorRouting?.(coordDecision);
 
@@ -1853,7 +1887,14 @@ export class AgentLoop {
     if (this.shouldPlan(userInput)) {
       try {
         const pd = this.router.decisionForTier("tier2-medium", "planning");
-        const plan = await this.coordinator!.buildPlan(userInput, this.getProvider(pd.provider, pd.modelId));
+        const plan = await untilAbort(
+          this.coordinator!.buildPlan(userInput, this.getProvider(pd.provider, pd.modelId)),
+          null,
+        );
+        if (signal?.aborted) {
+          yield { type: "done" };
+          return;
+        }
         if (plan) {
           if (this.remoteBrain) {
             // Cloud is the brain: auto-run the local-worker steps on the small local
@@ -1887,16 +1928,34 @@ export class AgentLoop {
     }
 
     let attempt = await this.collectAttempt(provider, toolDefs, signal);
+    // Esc during a gated attempt is a USER decision, not a model failure (#392).
+    // Treating it as one recorded a bogus tier failure, escalated to a more
+    // expensive model, and — once the budget cap pinned every tier to local —
+    // spun this loop without ever passing the gate.
+    if (signal?.aborted) {
+      if (attempt.text) this.history.push({ role: "assistant", content: this.redactor.redact(attempt.text) });
+      yield { type: "done" };
+      return;
+    }
     let verdict = evaluateQuality({ text: attempt.text, toolCalls: attempt.toolCalls, errored: attempt.errored });
 
+    let escalations = 0;
     while (!verdict.passed && decision.tier !== "tier3-cloud") {
-      this.router.recordFailure(decision.tier);
       const nextTier = this.router.escalateTier(decision.tier);
+      // Guard against a non-advancing escalation (e.g. the budget cap maps every
+      // tier back to local): without this the loop never terminates (#392).
+      if (nextTier === decision.tier || ++escalations > 3) break;
+      this.router.recordFailure(decision.tier);
       decision = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
       this.recordRoute(decision);
       yield { type: "text", text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n` };
       provider = this.getProvider(decision.provider, decision.modelId);
       attempt = await this.collectAttempt(provider, toolDefs, signal);
+      if (signal?.aborted) {
+        if (attempt.text) this.history.push({ role: "assistant", content: this.redactor.redact(attempt.text) });
+        yield { type: "done" };
+        return;
+      }
       verdict = evaluateQuality({ text: attempt.text, toolCalls: attempt.toolCalls, errored: attempt.errored });
     }
 
@@ -2107,7 +2166,16 @@ export class AgentLoop {
         // is defense-in-depth — it keeps "plan" read-only no matter what.
         if (this.mode === "plan") {
           const tool = this.registry.list().find((t) => t.toolName === call.toolName);
-          const mutating = tool?.requiresConfirmation || MUTATING_FILE_TOOLS.has(call.toolName);
+          const mutating =
+            tool?.requiresConfirmation ||
+            MUTATING_FILE_TOOLS.has(call.toolName) ||
+            DOCUMENT_WRITE_TOOLS.has(call.toolName) ||
+            // Any MCP tool: the server decides what it does, so plan mode can't
+            // assume it's read-only (#391).
+            this.mcpTools.has(call.toolName) ||
+            // `remember` writes MEMORY.md; `task` spawns an agent that can write.
+            call.toolName === "remember" ||
+            call.toolName === "task";
           if (mutating) {
             const output = `Plan mode: "${call.toolName}" was not executed (no changes made). Switch to /build to apply changes.`;
             this.auditLogRedacted({
@@ -2778,7 +2846,7 @@ export class AgentLoop {
       (p) => providerCredentials(p).apiKey,
     );
     this.redactor = new Redactor(
-      collectSecrets(xdg.apiKeys, [this.config.apiKey, ...providerKeys], xdg.mcpServers),
+      collectSecrets(xdg.apiKeys, [this.config.apiKey, ...providerKeys], xdg.mcpServers, xdg.mcpTokens),
     );
   }
 
@@ -3490,12 +3558,14 @@ export class AgentLoop {
       "",
       `Additional workspace paths:\n${workspaceList}`,
       "",
-      `Configured MCP servers:\n${mcpList}`,
+      this.mode === "plan"
+        ? `Configured MCP servers (tools withheld in plan mode):\n${mcpList}`
+        : `Configured MCP servers:\n${mcpList}`,
       "",
       `Available tools: ${toolNames}`,
       "",
       this.mode === "plan"
-        ? "PLAN MODE: investigate the request using read-only tools (read/list/find/search/symbols/web) and produce a concrete, ordered, step-by-step plan for the user to review. You CANNOT modify files, run shell commands, or commit — those tools are unavailable and will be refused. Do not claim you made changes; end with the plan and tell the user to run /build to execute it."
+        ? "PLAN MODE: investigate the request using read-only tools (read/list/find/search/symbols/web) and produce a concrete, ordered, step-by-step plan for the user to review. You CANNOT modify files, run shell commands, commit, call MCP server tools, delegate to a sub-agent, or write to memory — those tools are unavailable and will be refused. Do not claim you made changes; end with the plan and tell the user to run /build to execute it."
         : "You are a fully agentic assistant. You can read files, write and edit files, run shell commands (gh, git, npm, etc.), and use git. Use your tools proactively to complete tasks — do not just suggest code, implement it.",
       "You have access to the entire filesystem. Sensitive paths (.ssh, .aws, .env, credentials) are blocked automatically.",
       "When the user mentions a directory path, you can read files from it directly without any setup.",
@@ -3616,6 +3686,16 @@ export class AgentLoop {
         if (!known) {
           this.onPersistenceIssue?.(`--resume ${opts.resumeId}: no such session — started a new one instead.`);
           this.sessionId = this.sessionStore.createSession();
+        } else if (this.sessionStore.activeOwner?.(opts.resumeId)) {
+          // A live instance owns it — adopting would make both processes
+          // overwrite each other's turns (#388). Fork instead of colliding.
+          const owner = this.sessionStore.activeOwner(opts.resumeId);
+          const forked = this.sessionStore.createSession(`fork of ${opts.resumeId}`);
+          this.history = this.sessionStore.loadMessages(opts.resumeId);
+          this.sessionId = forked;
+          this.onPersistenceIssue?.(
+            `Session ${opts.resumeId} is open in another MetalMind instance (pid ${owner}) — continuing here as a copy (${forked}) so neither history is overwritten.`,
+          );
         } else {
           this.sessionId = opts.resumeId;
           // Don't clobber an already-adopted in-memory history (#368): after a
@@ -3626,7 +3706,10 @@ export class AgentLoop {
           }
         }
       } else if (opts.continue) {
-        const recent = this.sessionStore.listSessions()[0];
+        // --continue picks the most recently updated session, which is exactly
+        // the one a concurrently running instance keeps bumping. Skip sessions
+        // owned by a live process rather than colliding with them (#388).
+        const recent = this.sessionStore.listSessions().find((s) => !this.sessionStore?.activeOwner?.(s.id));
         if (recent) {
           this.sessionId = recent.id;
           this.history = this.sessionStore.loadMessages(recent.id);
@@ -3636,6 +3719,8 @@ export class AgentLoop {
       } else {
         this.sessionId = this.sessionStore.createSession();
       }
+      // Claim whatever we settled on so our saves are revision-checked (#388).
+      if (this.sessionId) this.sessionStore.claimSession?.(this.sessionId);
     } catch {
       try {
         this.sessionId = this.sessionStore.createSession();
@@ -3724,6 +3809,7 @@ export class AgentLoop {
     if (!this.sessionStore) return null;
     try {
       const id = this.sessionStore.createSession("branch");
+      this.sessionStore.claimSession?.(id); // own it before writing (#388)
       this.sessionStore.saveMessages(id, this.history);
       this.sessionId = id;
       return id;
@@ -3744,6 +3830,23 @@ export class AgentLoop {
         if (firstUser) this.sessionStore.renameSession(this.sessionId, firstUser.replace(/\s+/g, " ").slice(0, 60));
       }
     } catch (err) {
+      // Another instance owns this session and wrote to it first (#388). Do NOT
+      // overwrite their turns: move this conversation to a fresh session so
+      // BOTH histories survive, and say so.
+      if ((err as { name?: string })?.name === "SessionConflictError") {
+        try {
+          const fresh = this.sessionStore.createSession("recovered (concurrent instance)");
+          this.sessionStore.claimSession?.(fresh);
+          this.sessionId = fresh;
+          this.sessionStore.saveMessages(fresh, this.history);
+          this.onPersistenceIssue?.(
+            `Another MetalMind instance is writing the previous session; this conversation moved to a new session (${fresh}) so neither history is lost.`,
+          );
+          return;
+        } catch {
+          /* fall through to the generic report below */
+        }
+      }
       // Persistence failure must never break a turn — but surface it ONCE per
       // distinct error so silent history loss can't go unnoticed (#332).
       const msg = errText(err);
@@ -3800,8 +3903,21 @@ export class AgentLoop {
   resumeSession(id: string): AgentMessage[] {
     if (!this.sessionStore) return [];
     try {
-      this.history = this.sessionStore.loadMessages(id);
-      this.sessionId = id;
+      // Don't take over a session another live instance is writing (#388).
+      const owner = this.sessionStore.activeOwner?.(id);
+      if (owner) {
+        this.history = this.sessionStore.loadMessages(id);
+        const forked = this.sessionStore.createSession(`fork of ${id}`);
+        this.sessionStore.claimSession?.(forked);
+        this.sessionId = forked;
+        this.onPersistenceIssue?.(
+          `Session ${id} is open in another MetalMind instance (pid ${owner}) — resumed here as a copy (${forked}).`,
+        );
+      } else {
+        this.history = this.sessionStore.loadMessages(id);
+        this.sessionId = id;
+        this.sessionStore.claimSession?.(id);
+      }
       this.turnCount = this.history.filter((m) => m.role === "user").length;
       // Mirror initPersistence: the resumed prompt's repo map/instructions may
       // predate on-disk changes — rebuild on the next turn (#302). And the
@@ -3827,6 +3943,7 @@ export class AgentLoop {
     if (this.sessionStore) {
       try {
         this.sessionId = this.sessionStore.createSession();
+        this.sessionStore.claimSession?.(this.sessionId); // own it before writing (#388)
       } catch {
         // keep going in-memory
       }

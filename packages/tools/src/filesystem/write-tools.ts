@@ -10,7 +10,7 @@ import {
   rmSync,
   rmdirSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { AgentTool, ToolExecutionContext } from "../types.js";
 import { PathValidator } from "../path-validator.js";
@@ -345,8 +345,13 @@ export const replaceInProjectTool: AgentTool<z.input<typeof replaceInProjectSche
 
     const buffers = new Map(snapshots);
     let totalReplacements = 0;
+    const unchanged: string[] = [];
     try {
-      const re = input.isRegex ? new RegExp(input.find, "g") : null;
+      // MULTILINE (#394): ripgrep matches line by line, so `^`/`$` anchor to
+      // lines. Applying the same pattern to the whole file WITHOUT `m` anchored
+      // them to the file instead — rg reported N matching files, the JS regex
+      // replaced nothing in some of them, and the tool still claimed success.
+      const re = input.isRegex ? new RegExp(input.find, "gm") : null;
       for (const [path, content] of buffers) {
         let count: number;
         let updated: string;
@@ -360,6 +365,10 @@ export const replaceInProjectTool: AgentTool<z.input<typeof replaceInProjectSche
         if (count > 0) {
           buffers.set(path, updated);
           totalReplacements += count;
+        } else {
+          // rg matched this file but our apply phase did not — report it rather
+          // than silently counting it as replaced (#394).
+          unchanged.push(relative(ctx.projectRoot, path) || path);
         }
       }
       for (const [path, content] of buffers) writeFileSync(path, content, "utf-8");
@@ -376,7 +385,17 @@ export const replaceInProjectTool: AgentTool<z.input<typeof replaceInProjectSche
       );
     }
 
-    return `Replaced ${totalReplacements} occurrence(s) across ${snapshots.size} file(s).`;
+    const changedFiles = snapshots.size - unchanged.length;
+    let report = `Replaced ${totalReplacements} occurrence(s) across ${changedFiles} file(s).`;
+    if (unchanged.length > 0) {
+      // Actionable partial-success signal: name the files so the model can fix
+      // its pattern instead of believing the refactor is complete (#394).
+      report +=
+        `\n⚠ ${unchanged.length} file(s) matched the search but were NOT modified — the apply-phase pattern found nothing in them: ` +
+        `${unchanged.slice(0, 10).join(", ")}${unchanged.length > 10 ? `, …(+${unchanged.length - 10})` : ""}.` +
+        `\nThis usually means the regex relies on ripgrep-specific behaviour (e.g. multiline spans or PCRE features). Adjust the pattern and retry.`;
+    }
+    return report;
   },
 });
 
