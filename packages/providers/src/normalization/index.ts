@@ -7,6 +7,7 @@ export type { NormalizationResult } from "./message-normalizer.js";
 export {
   ProviderError,
   isRetryableError,
+  isProviderScopedError,
   isAbortError,
   parseRetryAfter,
   providerErrorFromResponse,

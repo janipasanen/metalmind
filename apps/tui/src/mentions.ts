@@ -10,16 +10,30 @@ import { isBlockedPath } from "@metalmind/tools";
 
 const MAX_FILE_BYTES = 64 * 1024;
 
-/** Extract @-mention paths from text (tokens after @ that look like paths). */
+/** Extract @-mention paths from text.
+ *  Two forms (#386):
+ *    @path/to/file            — a whitespace-delimited token
+ *    @"path with spaces.md"   — quoted, so real filenames with spaces work
+ *  The autocomplete and the file tree insert the quoted form automatically when
+ *  a path contains a space; unquoted space-containing paths were silently
+ *  truncated at the space and reported as missing. */
 export function parseMentions(text: string): string[] {
   const out: string[] = [];
-  const re = /(?:^|\s)@([^\s@]+)/g;
+  const re = /(?:^|\s)@(?:"([^"\n]+)"|'([^'\n]+)'|([^\s@]+))/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
-    const p = m[1].replace(/[.,;:]+$/, ""); // strip trailing punctuation
+    const quoted = m[1] ?? m[2];
+    // Only strip trailing punctuation from the UNQUOTED form — inside quotes it
+    // is part of the filename.
+    const p = quoted ?? m[3].replace(/[.,;:]+$/, "");
     if (p) out.push(p);
   }
   return out;
+}
+
+/** Render a path as an @-mention, quoting it when it contains whitespace (#386). */
+export function formatMention(path: string): string {
+  return /\s/.test(path) ? `@"${path}"` : `@${path}`;
 }
 
 export interface ExpandedMentions {
@@ -33,9 +47,12 @@ export function expandMentions(text: string, projectRoot: string): ExpandedMenti
   const missing: string[] = [];
   for (const rel of parseMentions(text)) {
     const abs = isAbsolute(rel) ? rel : join(projectRoot, rel);
-    // Stay inside the project and never read sensitive paths (#239).
+    // Stay away from sensitive paths (#239). An ABSOLUTE path inside the project
+    // (or inside an allowed workspace root) is fine — rejecting every absolute
+    // path meant a pasted full path silently resolved to nothing (#386); what
+    // actually matters is that the resolved target stays within the project.
     const rel2 = relative(projectRoot, abs);
-    if (isBlockedPath(abs) || rel2.startsWith("..") || isAbsolute(rel)) {
+    if (isBlockedPath(abs) || rel2.startsWith("..") || rel2 === "") {
       missing.push(rel);
       continue;
     }

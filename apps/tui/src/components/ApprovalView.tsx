@@ -31,9 +31,14 @@ export default function ApprovalView({ req, accent = "cyan", diffScroll = 0 }: A
         </Box>
       ) : null}
 
+      {/* State the exact scope of [a] rather than a vague "for this target" (#377). */}
       <Box marginTop={1}>
+        <Text dimColor>[a] allows, for the rest of this session: {req.scopeLabel ?? `every “${req.toolName}” call`}</Text>
+      </Box>
+
+      <Box>
         <Text color={accent}>
-          [y] approve once   [j/k] scroll diff   [a] always allow {req.filePath ? `“${req.toolName}” for ${req.filePath}` : req.command ? `this command` : `“${req.toolName}” for this target`} (session)   [n] reject (Esc)
+          [y] approve once   [j/k] scroll diff   [a] always allow   [n] reject (Esc)
         </Text>
       </Box>
     </Box>

@@ -11,8 +11,13 @@ describe("MetalmindConfigSchema", () => {
     expect(MetalmindConfigSchema.safeParse(raw).success).toBe(true);
   });
 
-  it("rejects missing models", () => {
-    expect(MetalmindConfigSchema.safeParse({}).success).toBe(false);
+  it("treats models as optional, defaulting to {} (#383)", () => {
+    const parsed = MetalmindConfigSchema.safeParse({});
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.models).toEqual({});
+    // A models-free file that configures other sections still parses.
+    const partial = MetalmindConfigSchema.safeParse({ tools: { shell: false } });
+    expect(partial.success).toBe(true);
   });
 
   it("parses full config with all options", () => {

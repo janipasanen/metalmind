@@ -17,6 +17,7 @@ import { handleAllowCommand } from "../approval-allowlist.js";
 import { diagnosticsReport } from "../error-log.js";
 import { handleCopyCommand } from "../copy-command.js";
 import { sanitizeForDisplay, sanitizeAndTruncate } from "../sanitize.js";
+import { formatMention } from "../mentions.js";
 import { VIM_HELP } from "../vim.js";
 import { loadUserCommands, expandUserCommand } from "../user-commands.js";
 import type { TuiConfig } from "../config.js";
@@ -117,6 +118,9 @@ export default function App({ config }: AppProps) {
   const [reasoningSecs, setReasoningSecs] = useState(0);
   /** Live tail of the currently-running tool's output (already redacted). */
   const [liveTool, setLiveTool] = useState<{ name: string; tail: string } | null>(null);
+  // Staged vision attachments (#375): without a persistent indicator an image
+  // staged before /clear was invisible but still attached to the next message.
+  const [stagedImages, setStagedImages] = useState(0);
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
@@ -371,6 +375,7 @@ export default function App({ config }: AppProps) {
         agentRef.current?.newSession();
         replaceMessages([]);
         setScrollOffset(0);
+        setStagedImages(0); // /clear drops staged attachments too (#375)
         yield { type: "text", text: "Cleared." } as const;
         yield { type: "done" } as const;
         return;
@@ -429,6 +434,7 @@ export default function App({ config }: AppProps) {
         } else {
           const restored = agent.resumeSession(sub);
           replaceMessages(restoredToChatMessages(restored));
+          setStagedImages(0); // resuming drops staged attachments (#375)
           yield { type: "text", text: `Resumed session ${sub} (${restored.length} messages).` } as const;
         }
         yield { type: "done" } as const;
@@ -785,6 +791,9 @@ export default function App({ config }: AppProps) {
         // Re-sync the chat view to the trimmed history, then re-run the turn.
         replaceMessages(restoredToChatMessages(agent.conversation()));
         setScrollOffset(0);
+        // popLastExchange re-stages the popped turn's images so /retry and
+        // /edit send them again (#375) — reflect that in the indicator.
+        setStagedImages(agent.pendingImageCount());
         yield { type: "text", text: `↻ ${newText}\n` } as const;
         yield* agent.run(newText, signal);
         return;
@@ -858,6 +867,7 @@ export default function App({ config }: AppProps) {
             yield { type: "text", text: error } as const;
           } else if (url) {
             agent.stageImage(url);
+            setStagedImages(agent.pendingImageCount());
             yield { type: "text", text: `Attached image (${agent.pendingImageCount()} staged). Ask your question about it next — needs a vision-capable model.` } as const;
           }
         }
@@ -1041,6 +1051,7 @@ export default function App({ config }: AppProps) {
   const handleSend = useCallback((text: string) => {
     setScrollOffset(0); // jump back to the live tail on a new turn (#159)
     setLiveTool(null);
+    setStagedImages(0); // the staged images ride along with this message (#375)
     sendMessage(text);
   }, [sendMessage]);
 
@@ -1185,6 +1196,11 @@ export default function App({ config }: AppProps) {
       )}
       {pendingApproval && <ApprovalView req={pendingApproval.req} accent={theme.colors.accent} diffScroll={approvalScroll} />}
       <InputBar onSubmit={handleSend} disabled={isStreaming || pendingApproval !== null || anyOverlayOpen} vimMode={vimMode} projectRoot={agentRef.current?.projectRootPath ?? process.cwd()} insertText={pendingInsert} />
+      {stagedImages > 0 && (
+        <Box>
+          <Text color="magenta">🖼 {stagedImages} image{stagedImages === 1 ? "" : "s"} attached to your next message</Text>
+        </Box>
+      )}
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />
 
       {showCommandPalette && (
@@ -1224,7 +1240,7 @@ export default function App({ config }: AppProps) {
           root={agentRef.current?.projectRootPath ?? process.cwd()}
           onClose={() => setShowFileTree(false)}
           accent={theme.colors.accent}
-          onSelectFile={(rel) => setPendingInsert({ text: `@${rel}`, nonce: Date.now() })}
+          onSelectFile={(rel) => setPendingInsert({ text: formatMention(rel), nonce: Date.now() })}
         />
       )}
       {tierModelPickerFor !== null && (

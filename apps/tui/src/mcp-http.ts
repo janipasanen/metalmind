@@ -22,6 +22,11 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
+/** Handshake/list calls happen at startup and must not hang the TUI; tool calls
+ *  get a longer budget because real work happens behind them (#379). */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
+const CALL_TIMEOUT_MS = 60_000;
+
 export class McpHttpClient {
   private nextId = 1;
 
@@ -30,13 +35,25 @@ export class McpHttpClient {
     private readonly extraHeaders: Record<string, string> = {},
   ) {}
 
-  private async rpc(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  private async rpc(method: string, params: Record<string, unknown> = {}, timeoutMs = HANDSHAKE_TIMEOUT_MS): Promise<unknown> {
     const id = this.nextId++;
-    const res = await fetch(this.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...this.extraHeaders },
-      body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-    });
+    // Every request is time-bounded (#379): an unresponsive server used to block
+    // startup forever behind a "connecting…" line with no way out but Ctrl+C.
+    let res: Response;
+    try {
+      res = await fetch(this.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...this.extraHeaders },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err) {
+      const name = (err as { name?: string })?.name;
+      if (name === "TimeoutError" || name === "AbortError") {
+        throw new Error(`MCP ${method} timed out after ${Math.round(timeoutMs / 1000)}s (${this.url} did not respond).`);
+      }
+      throw new Error(`MCP ${method} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (!res.ok) {
       if (res.status === 401) {
         throw new Error(`MCP ${method} failed: 401 Unauthorized — run "/mcp auth <server>" to (re)authorize.`);
@@ -59,6 +76,7 @@ export class McpHttpClient {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.extraHeaders },
       body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      signal: AbortSignal.timeout(HANDSHAKE_TIMEOUT_MS),
     }).catch(() => undefined);
   }
 
@@ -71,7 +89,7 @@ export class McpHttpClient {
     const result = (await this.rpc("tools/call", {
       name,
       arguments: args ?? {},
-    })) as {
+    }, CALL_TIMEOUT_MS)) as {
       content?: Array<{ type: string; text?: string }>;
       isError?: boolean;
     };

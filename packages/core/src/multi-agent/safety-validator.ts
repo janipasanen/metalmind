@@ -200,6 +200,20 @@ export class SafetyValidator {
       "runBuild",
       "runLint",
       "runFormat",
+      // Document/spreadsheet writers take an arbitrary `path` and overwrite
+      // whatever is there — including source files. They were missing from this
+      // set, so they wrote with no prompt, no diff and no safety net (#376).
+      "writeDocument",
+      "createHtml",
+      "createLatex",
+      "createMarkdown",
+      "createDocx",
+      "createOdt",
+      "createPptx",
+      "createOdp",
+      "createXlsx",
+      "createOds",
+      "createCsv",
     ]);
     return APPROVAL_REQUIRED_TOOLS.has(toolName);
   }

@@ -36,6 +36,20 @@ export function isRetryableError(err: unknown): boolean {
   return err instanceof Error && !/\b(4\d\d)\b/.test(err.message);
 }
 
+/** True for errors that are fatal for THIS provider but that another provider in
+ *  the fallback chain may well survive (#384): bad/missing credentials (401),
+ *  payment/quota (402), forbidden (403), and unknown model/endpoint (404).
+ *  These must not end the turn while a different tier is still available. */
+export function isProviderScopedError(err: unknown): boolean {
+  const status =
+    err instanceof ProviderError
+      ? err.status
+      : err instanceof Error
+        ? Number(/\b(4\d\d)\b/.exec(err.message)?.[1])
+        : undefined;
+  return status === 401 || status === 402 || status === 403 || status === 404;
+}
+
 /** True when the error represents a user-triggered AbortController cancellation. */
 export function isAbortError(err: unknown): boolean {
   return (

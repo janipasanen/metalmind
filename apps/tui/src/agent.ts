@@ -1,6 +1,6 @@
-import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
+import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, isProviderScopedError, ProviderError } from "@metalmind/providers";
 import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, runShellAsync, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
-import { loadConfigFromFile, loadMergedConfig, loadXdgConfig, saveXdgConfig, XDG_CONFIG_DIR } from "@metalmind/config";
+import { loadConfigFromFile, loadMergedConfig, loadXdgConfig, saveXdgConfig, getConfigLoadIssue, XDG_CONFIG_DIR } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
 import { SkillLoader, SkillManager } from "@metalmind/skills";
@@ -29,6 +29,8 @@ interface SessionStore {
 /** Unified MCP tool client — both the HTTP and stdio transports satisfy this. */
 interface McpToolClient {
   callTool(name: string, input: unknown): Promise<string>;
+  /** Present on the stdio client: false once the server process has exited (#378). */
+  isHealthy?(): boolean;
   // Optional resource/prompt support (#219) — present on the HTTP client.
   listResources?(): Promise<Array<{ uri: string; name?: string; description?: string }>>;
   readResource?(uri: string): Promise<string>;
@@ -37,7 +39,8 @@ interface McpToolClient {
 }
 import { zodToJsonSchema } from "./zod-to-json.js";
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
-import { isAbsolute, resolve, join, dirname, extname } from "node:path";
+import { createHash } from "node:crypto";
+import { isAbsolute, resolve, join, dirname, extname, relative } from "node:path";
 import { execSync, execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import type { AgentMessage, MetalmindConfig } from "@metalmind/schemas";
@@ -172,6 +175,13 @@ async function mapBounded<T, R>(items: T[], limit: number, fn: (item: T) => Prom
 
 /** File-mutating tools whose targets are snapshotted before execution for /undo. */
 const MUTATING_FILE_TOOLS = new Set(["writeFile", "createFile", "editFile", "deleteFile"]);
+/** Document/spreadsheet writers: they take a `path` and overwrite it, so they
+ *  need the same checkpoint + /undo snapshot + re-index treatment as the plain
+ *  file writers — previously they had none of it (#376). */
+const DOCUMENT_WRITE_TOOLS = new Set([
+  "writeDocument", "createHtml", "createLatex", "createMarkdown", "createDocx",
+  "createOdt", "createPptx", "createOdp", "createXlsx", "createOds", "createCsv",
+]);
 /** Tools that execute a model-overridable shell command — all must be validated (#252). */
 const SHELL_COMMAND_TOOLS = new Set(["runCommand", "runBackground", "runTests", "runBuild", "runLint", "runFormat"]);
 /** Numeric rank of a tier so escalation can detect when it isn't moving up (#249). */
@@ -301,7 +311,21 @@ const REMEMBER_TOOL_DEF = {
 
 interface EditSet {
   turn: number;
-  files: Array<{ path: string; before: string | null }>;
+  /** `before` is the pre-edit content (null = the file did not exist).
+   *  `afterHash` is the content hash right AFTER the agent's write, so /undo can
+   *  tell "unchanged since the agent touched it" from "the user edited it
+   *  afterwards" and refuse to clobber the user's work (#382). */
+  files: Array<{ path: string; before: string | null; afterHash?: string | null }>;
+}
+
+/** Content hash for undo-safety comparisons; null when the file is absent. */
+function contentHash(path: string): string | null {
+  try {
+    if (!existsSync(path)) return null;
+    return createHash("sha1").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 interface TierTarget {
@@ -493,6 +517,18 @@ export interface ApprovalRequest {
   /** Shell command for runCommand/runBackground. */
   command?: string;
   filePath?: string;
+  /** Human-readable description of what an "always allow" would cover (#377). */
+  scopeLabel?: string;
+}
+
+/** Render an approval scope key as something a human can judge (#377). */
+function scopeLabel(scope: string): string {
+  const idx = scope.indexOf(":");
+  if (idx === -1) return `every "${scope}" call this session`;
+  const tool = scope.slice(0, idx);
+  const target = scope.slice(idx + 1);
+  const shown = target.length > 90 ? target.slice(0, 89) + "…" : target;
+  return `"${tool}" with exactly these arguments: ${shown}`;
 }
 
 export type ApprovalDecision = "approve" | "reject" | "always";
@@ -644,6 +680,9 @@ export class AgentLoop {
     this.indexProjectInBackground();
     // Discover skills; activating one updates the live system prompt (#156).
     this.skillManager.setToolRegistry(this.registry);
+    // Skills may require/bind MCP tools, which live outside the built-in
+    // registry; give the manager a live view of them (#380).
+    this.skillManager.setExternalToolSource(() => this.mcpTools.keys());
     this.skillManager.onSystemPromptChange(() => {
       if (this.history[0]?.role === "system") {
         this.history[0] = { role: "system", content: this.buildSystemPrompt() };
@@ -1164,6 +1203,8 @@ export class AgentLoop {
           const adapter: McpToolClient = {
             callTool: async (name, input) =>
               normalizeMcpResult(await stdio.callTool(name, (input ?? {}) as Record<string, unknown>)),
+            // Liveness so a dead server is detected before the next call (#378).
+            isHealthy: () => stdio.isHealthy(),
           };
           let count = 0;
           for (const tool of stdio.tools) {
@@ -1171,6 +1212,17 @@ export class AgentLoop {
             count++;
           }
           this.mcpServerStatus.set(id, { connected: true, toolCount: count });
+          // React the moment the process exits instead of waiting for a call to
+          // time out: retire its tools and mark it disconnected in /mcp status (#378).
+          stdio.on("disconnect", (code: unknown) => {
+            const dropped = this.retireMcpClient(adapter);
+            this.mcpServerStatus.set(id, {
+              connected: false,
+              toolCount: 0,
+              error: `server exited (code ${String(code)}) — ${dropped} tool(s) withdrawn; /mcp reconnect to retry`,
+            });
+            this.onPersistenceIssue?.(`MCP server "${id}" exited — ${dropped} tool(s) withdrawn. Run /mcp reconnect to bring it back.`);
+          });
         }
         // else: neither url nor command configured — nothing to connect.
       } catch (err) {
@@ -1329,6 +1381,20 @@ export class AgentLoop {
     const check = (ok: boolean, label: string, detail: string) => lines.push(`  ${ok ? "✓" : "✗"} ${label} — ${detail}`);
 
     lines.push(`  · node ${process.version} on ${process.platform}`);
+
+    // Project metalmind.yaml: a file that fails to parse/validate is discarded
+    // WHOLE, so say so instead of letting every section vanish silently (#383).
+    loadConfigFromFile(this.projectRoot);
+    const cfgIssue = getConfigLoadIssue();
+    if (cfgIssue) {
+      check(false, "metalmind.yaml", `IGNORED (${cfgIssue.path}): ${cfgIssue.reason} — every section in it is inactive until this is fixed`);
+    } else {
+      const yaml = loadConfigFromFile(this.projectRoot);
+      const sections = ["models", "routing", "permissions", "tools", "ui", "mcp"].filter(
+        (k) => (yaml as Record<string, unknown>)[k] && Object.keys((yaml as Record<string, Record<string, unknown>>)[k] ?? {}).length > 0,
+      );
+      check(true, "metalmind.yaml", sections.length ? `active sections: ${sections.join(", ")}` : "none found (using defaults)");
+    }
 
     // Local Ollama daemon
     try {
@@ -1580,10 +1646,13 @@ export class AgentLoop {
             await sleep(waitMs, signal);
             continue; // retry same provider
           }
-          if (retryable && moreProviders) {
+          // 401/402/403/404 are fatal for THIS provider (no point retrying it)
+          // but the whole reason a fallback chain exists is that another tier may
+          // work — a bad cloud key used to end the turn with local models idle (#384).
+          if (moreProviders && (retryable || isProviderScopedError(err))) {
             yield {
               type: "text",
-              text: `\n[${provider.providerName} unavailable (${errText(err)}); falling back to ${providers[p + 1].providerName}]\n`,
+              text: `\n[${provider.providerName} unavailable (${errText(err).slice(0, 120)}); falling back to ${providers[p + 1].providerName}]\n`,
             };
             break; // advance to next provider in the chain
           }
@@ -2368,6 +2437,9 @@ export class AgentLoop {
       const decision = await this.onApprovalRequest({
         ...req,
         summary: this.redactor.redact(req.summary),
+        // Tell the user EXACTLY what "always allow" will cover — the prompt used
+        // to claim "for this target" even when the key was tool-wide (#377).
+        scopeLabel: this.redactor.redact(scopeLabel(scope)),
         ...(req.diff ? { diff: this.redactor.redact(req.diff) } : {}),
         ...(req.command ? { command: this.redactor.redact(req.command) } : {}),
       });
@@ -2393,6 +2465,24 @@ export class AgentLoop {
     if (toolName === "replaceInProject" && typeof input.find === "string") {
       return `replaceInProject:${input.find}`;
     }
+    // Plural-path tools (gitAdd's `paths`) must key on the actual set, not the
+    // tool name — "always allow" on `gitAdd ["src/a.ts"]` used to silently cover
+    // a later `gitAdd ["."]` (#377).
+    if (Array.isArray(input.paths)) {
+      return `${toolName}:${[...new Set((input.paths as unknown[]).map(String))].sort().join(",")}`;
+    }
+    // MCP tools carry server-specific arguments and no `path`/`command`, so they
+    // all collapsed onto a bare tool name. Key on the argument payload so an
+    // approval covers the call the user actually saw (#377).
+    if (this.mcpTools.has(toolName)) {
+      let args = "";
+      try {
+        args = JSON.stringify(input);
+      } catch {
+        args = String(Object.keys(input).sort().join(","));
+      }
+      return `${toolName}:${args.slice(0, 500)}`;
+    }
     return toolName;
   }
 
@@ -2413,6 +2503,23 @@ export class AgentLoop {
           Boolean(input.replaceAll),
         ).patch;
         return { toolName, kind: "write", summary: `Edit ${path}`, diff, filePath: path };
+      }
+      // Document/spreadsheet writers overwrite `path` wholesale (#376). Show a
+      // real diff for text-ish formats; for binary ones say plainly that the
+      // file will be replaced, and warn when the target already exists.
+      if (DOCUMENT_WRITE_TOOLS.has(toolName) && path) {
+        const abs = this.resolveProjectPath(path);
+        const exists = existsSync(abs);
+        const textual = /\.(md|markdown|html?|tex|csv|txt)$/i.test(path);
+        const content = typeof input.content === "string" ? input.content : "";
+        const diff = textual && content ? DiffGenerator.previewWrite(path, this.projectRoot, content).patch : undefined;
+        return {
+          toolName,
+          kind: "write",
+          summary: `${exists ? "OVERWRITE existing" : "Create"} ${path} via ${toolName}`,
+          diff,
+          filePath: path,
+        };
       }
     } catch {
       // diff generation is best-effort; fall through to a summary
@@ -2494,7 +2601,7 @@ export class AgentLoop {
 
   private snapshotEdit(turn: number, toolName: string, input: Record<string, unknown>): void {
     const targets: string[] = [];
-    if (MUTATING_FILE_TOOLS.has(toolName) && typeof input.path === "string") {
+    if ((MUTATING_FILE_TOOLS.has(toolName) || DOCUMENT_WRITE_TOOLS.has(toolName)) && typeof input.path === "string") {
       targets.push(input.path);
     } else if (toolName === "moveFile") {
       if (typeof input.source === "string") targets.push(input.source);
@@ -2540,10 +2647,21 @@ export class AgentLoop {
     // Earliest snapshot per path holds the target content for this direction.
     const earliest = new Map<string, string | null>();
     for (const f of set.files) if (!earliest.has(f.path)) earliest.set(f.path, f.before);
+    // Post-edit hash per path, for the "did the user touch this since?" check (#382).
+    const expected = new Map<string, string | null | undefined>();
+    for (const f of set.files) if (!expected.has(f.path)) expected.set(f.path, f.afterHash);
 
     const inverse: EditSet = { turn: set.turn, files: [] };
     const changed: string[] = [];
+    const skipped: string[] = [];
     for (const [path, before] of earliest) {
+      // Refuse to overwrite a file the user edited AFTER the agent did: undo is
+      // a safety net for the AGENT's changes, not a way to lose your own (#382).
+      const wanted = expected.get(path);
+      if (wanted !== undefined && contentHash(path) !== wanted) {
+        skipped.push(path);
+        continue;
+      }
       // Capture the current content as the inverse snapshot (for redo/undo back).
       let current: string | null = null;
       try {
@@ -2551,7 +2669,7 @@ export class AgentLoop {
       } catch {
         current = null;
       }
-      inverse.files.push({ path, before: current });
+      inverse.files.push({ path, before: current, afterHash: before === null ? null : undefined });
 
       try {
         if (before === null) {
@@ -2568,8 +2686,18 @@ export class AgentLoop {
         changed.push(`FAILED ${path}: ${errText(err)}`);
       }
     }
-    pushInverseTo.push(inverse);
-    return changed.map((r) => `  • ${r}`).join("\n");
+    // Only record an inverse for what we actually touched, so redo can't resurrect
+    // a skipped path.
+    if (inverse.files.length > 0) pushInverseTo.push(inverse);
+    const lines = changed.map((r) => `  • ${r}`);
+    if (skipped.length > 0) {
+      lines.push(
+        `  ⚠ skipped ${skipped.length} file(s) modified since the agent edited them (your changes were kept): ${skipped
+          .map((p) => relative(this.projectRoot, p) || p)
+          .join(", ")}`,
+      );
+    }
+    return lines.join("\n");
   }
 
   /** Revert the most recent agent edit set; repeatable for multi-level undo (#144, #176). */
@@ -2598,6 +2726,17 @@ export class AgentLoop {
     let output = "";
     let success = true;
     let error: string | undefined;
+    // A stdio server that died mid-session kept its tools advertised, and every
+    // call sat out the 30s request timeout before failing. Check liveness first
+    // and retire the dead server's tools so the model stops calling them (#378).
+    if (client.isHealthy && !client.isHealthy()) {
+      const dropped = this.retireMcpClient(client);
+      error = `MCP server for "${toolName}" is not running (it exited earlier). Removed ${dropped} tool(s) from this session; run "/mcp reconnect" to bring it back.`;
+      output = `Error: ${error}`;
+      this.auditLogRedacted({ timestamp, toolName, input, output, success: false, error });
+      this.onPersistenceIssue?.(error);
+      return output;
+    }
     try {
       output = await client.callTool(toolName, input);
       return output;
@@ -2609,6 +2748,19 @@ export class AgentLoop {
     } finally {
       this.auditLogRedacted({ timestamp, toolName, input, output, success, error });
     }
+  }
+
+  /** Remove every tool advertised by a dead MCP client; returns how many (#378). */
+  private retireMcpClient(client: McpToolClient): number {
+    let n = 0;
+    for (const [name, entry] of [...this.mcpTools]) {
+      if (entry.client === client) {
+        this.mcpTools.delete(name);
+        n++;
+      }
+    }
+    if (n > 0) this.systemPromptDirty = true; // the advertised tool list changed
+    return n;
   }
 
   /** Recent tool-call audit entries for the in-session /audit view (#147). */
@@ -3098,7 +3250,7 @@ export class AgentLoop {
 
   /** Files a tool mutated, for re-indexing / format-on-write / diagnostics. */
   private changedPaths(toolName: string, input: Record<string, unknown>): string[] {
-    if (MUTATING_FILE_TOOLS.has(toolName) && typeof input.path === "string") return [input.path];
+    if ((MUTATING_FILE_TOOLS.has(toolName) || DOCUMENT_WRITE_TOOLS.has(toolName)) && typeof input.path === "string") return [input.path];
     if (toolName === "moveFile" && typeof input.destination === "string") return [input.destination];
     if (toolName === "multiEdit" && Array.isArray(input.edits)) {
       return [...new Set((input.edits as Array<{ path?: unknown }>).filter((e) => typeof e?.path === "string").map((e) => e.path as string))];
@@ -3143,6 +3295,19 @@ export class AgentLoop {
         indexFile(abs);
       } catch {
         // ignore
+      }
+    }
+
+    // Remember what the agent LEFT each file looking like — AFTER formatting, so
+    // the recorded state matches what's on disk. /undo compares against this to
+    // detect a later hand-edit instead of silently overwriting it (#382).
+    const currentSet = this.editStack[this.editStack.length - 1];
+    if (currentSet) {
+      for (const p of paths) {
+        const abs = this.resolveProjectPath(p);
+        for (const entry of currentSet.files) {
+          if (entry.path === abs && entry.afterHash === undefined) entry.afterHash = contentHash(abs);
+        }
       }
     }
 
@@ -3232,7 +3397,17 @@ export class AgentLoop {
         content = content.replace(/\s*$/, "") + "\n\n## Learned facts\n";
       }
       const stamp = new Date().toISOString().slice(0, 10);
-      content = content.replace("## Learned facts\n", `## Learned facts\n- [${stamp}] ${fact}\n`);
+      // Insert by index, never via a replacement string (#381): String.replace
+      // treats $&, $', $` and $1 in the REPLACEMENT specially, so a fact
+      // containing them injected the matched text (or the whole preceding file)
+      // into MEMORY.md and corrupted it.
+      const heading = "## Learned facts\n";
+      const at = content.indexOf(heading);
+      const entry = `- [${stamp}] ${fact.replace(/\r?\n/g, " ")}\n`;
+      content =
+        at === -1
+          ? `${content.replace(/\s*$/, "")}\n\n${heading}${entry}`
+          : content.slice(0, at + heading.length) + entry + content.slice(at + heading.length);
       writeFileSync(file, content, "utf8");
       return `Remembered: "${fact}" → .metalmind/MEMORY.md (loads in future sessions).`;
     } catch (err) {
@@ -3395,6 +3570,21 @@ export class AgentLoop {
     this.turnContext = [];
     this.iterationCapNotice = null;
     this.editedThisTurn = false;
+    this.pendingImages = []; // a staged image must not ride into the new session (#375)
+    // The restore stacks are keyed by TURN NUMBER, which just restarted at 0.
+    // Keeping them meant `/rollback 1` resolved to the PREVIOUS conversation's
+    // snapshot (first match wins) and `/undo` merged new edits into the old
+    // conversation's edit set — both silently destroying work (#374).
+    this.resetRestoreState();
+  }
+
+  /** Drop turn-keyed checkpoint/undo state. Must run whenever turnCount is
+   *  reset or recomputed, or the turn labels collide across conversations (#374). */
+  private resetRestoreState(): void {
+    this.turnCheckpoints = [];
+    this.editStack = [];
+    this.redoStack = [];
+    this.checkpointedThisTurn = false;
   }
 
   /**
@@ -3519,6 +3709,11 @@ export class AgentLoop {
     }
     if (userIdx === -1) return null;
     const text = this.history[userIdx].content;
+    // Re-stage the popped turn's attachments so /retry and /edit send the SAME
+    // images again. They used to be dropped silently: a vision turn re-run
+    // without its image made the model answer about nothing (#375).
+    const images = this.history[userIdx].images;
+    if (images?.length) this.pendingImages = [...images];
     this.history = this.history.slice(0, userIdx);
     this.turnCount = Math.max(0, this.turnCount - 1);
     return text;
@@ -3616,6 +3811,10 @@ export class AgentLoop {
       this.todos = [];
       this.onTodos?.([]);
       this.turnContext = [];
+      this.pendingImages = []; // don't carry a staged image into the resumed session (#375)
+      // turnCount was just recomputed from the resumed history, so the previous
+      // conversation's turn-keyed checkpoints/edit sets would collide (#374).
+      this.resetRestoreState();
       return this.displayMessages();
     } catch {
       return [];

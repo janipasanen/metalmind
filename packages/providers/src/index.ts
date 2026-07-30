@@ -8,6 +8,7 @@ export { createProvider, DEFAULT_MLX_BASE_URL, DEFAULT_OLLAMA_CLOUD_URL } from "
 export {
   ProviderError,
   isRetryableError,
+  isProviderScopedError,
   isAbortError,
   parseRetryAfter,
   providerErrorFromResponse,

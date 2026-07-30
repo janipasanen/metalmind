@@ -97,9 +97,29 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Model-facing cap for a shell result (~8k tokens). The runner still buffers up
+ *  to OUTPUT_CAP for the live panel; this bounds what enters the context (#387). */
+const RESULT_CHAR_CAP = 32_000;
+
+/** Bound a command's output for the model, keeping BOTH ends (#387).
+ *  Output used to be returned uncapped and, when anything did trim it, head-first
+ *  — the worst possible choice: a test runner puts the failures and the summary
+ *  at the END, so the model saw a wall of passing tests and none of the errors. */
+function boundOutput(text: string): string {
+  if (text.length <= RESULT_CHAR_CAP) return text;
+  const head = Math.floor(RESULT_CHAR_CAP * 0.3);
+  const tail = RESULT_CHAR_CAP - head;
+  const omitted = text.length - RESULT_CHAR_CAP;
+  return (
+    text.slice(0, head) +
+    `\n\n…[${omitted.toLocaleString()} characters omitted from the middle — the end of the output is shown below, where errors and summaries usually appear]…\n\n` +
+    text.slice(text.length - tail)
+  );
+}
+
 function render(r: RunResult, trailer: string): string {
   const body = [r.stdout.trim(), r.stderr.trim()].filter(Boolean).join("\n");
-  return `${body}\n--- ${trailer}, ${r.duration}ms`;
+  return `${boundOutput(body)}\n--- ${trailer}, ${r.duration}ms`;
 }
 
 export const runCommandSchema = z.object({

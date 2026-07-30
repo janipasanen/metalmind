@@ -111,8 +111,16 @@ describe("validateConfig", () => {
     expect(result.errors?.length).toBeGreaterThan(0);
   });
 
-  it("rejects config with missing models", () => {
+  it("accepts a config with no models section, defaulting it to {} (#383)", () => {
+    // `models` used to be required, so a metalmind.yaml that only configured
+    // permissions/tools/mcp failed validation and the WHOLE file was discarded.
     const result = validateConfig({});
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    expect(result.config?.models).toEqual({});
+  });
+
+  it("still rejects a config whose sections have the wrong shape", () => {
+    expect(validateConfig({ tools: { shell: "yes" } }).success).toBe(false);
+    expect(validateConfig({ models: { a: { provider: 1 } } }).success).toBe(false);
   });
 });

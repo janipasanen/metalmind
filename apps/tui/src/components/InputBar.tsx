@@ -3,6 +3,7 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { parseBracketedPaste, endsWithContinuation, applyContinuation } from "../multiline.js";
 import { vimKey, initialVimState } from "../vim.js";
+import { formatMention } from "../mentions.js";
 import { readdirSync } from "node:fs";
 import { loadUserCommands, type UserCommand } from "../user-commands.js";
 import { join } from "node:path";
@@ -98,6 +99,9 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   const history = useRef<string[]>([]);
   const historyIdx = useRef(-1);
   const draft = useRef("");
+  // Set when a Ctrl/Alt chord was claimed, so the edit ink-text-input makes for
+  // that same keystroke is discarded instead of typing the chord letter (#385).
+  const suppressChange = useRef(false);
 
   const pathsRef = useRef<string[] | null>(null);
 
@@ -148,7 +152,8 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   }
   wasAtMatch.current = atMatch !== null;
   const suggestions: Array<{ label: string; description: string }> = atMatch
-    ? pathMatches.map((pp) => ({ label: `@${pp}`, description: "" }))
+    // Quote paths with spaces so the mention parser keeps them whole (#386).
+    ? pathMatches.map((pp) => ({ label: formatMention(pp), description: "" }))
     : slashMatches.map((c) => ({ label: c.syntax, description: c.description }));
   const filtered = suggestions;
   const showSuggestions = !disabled && filtered.length > 0 && !dismissed;
@@ -165,6 +170,16 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   };
 
   useInput((_input, key) => {
+    // Modifier chords (Ctrl+P palette, Ctrl+O panel, Ctrl+U/W …) are app
+    // shortcuts. ink-text-input only filters Ctrl+C, so every OTHER chord used
+    // to be inserted into the buffer as a bare letter. Claim them here and tell
+    // handleChange to discard the edit TextInput is about to make (#385).
+    if (key.ctrl || key.meta) {
+      suppressChange.current = true;
+      return;
+    }
+    suppressChange.current = false;
+
     // Suggestion navigation claims ONLY its nav keys; every other key falls
     // through so typing keeps working. (Previously the open menu swallowed all
     // keys, which froze the input entirely in vim mode — no TextInput is
@@ -223,6 +238,12 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   }, { isActive: !disabled });
 
   const handleChange = (v: string) => {
+    // The keystroke was a Ctrl/Alt chord claimed above — drop TextInput's edit
+    // instead of letting the chord's letter land in the buffer (#385).
+    if (suppressChange.current) {
+      suppressChange.current = false;
+      return;
+    }
     // Strip bracketed-paste markers; multi-line pastes stay in the buffer (#160).
     const { text } = parseBracketedPaste(v);
     setValue(text);

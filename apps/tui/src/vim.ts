@@ -20,6 +20,9 @@ export interface VimKey {
   delete?: boolean;
   leftArrow?: boolean;
   rightArrow?: boolean;
+  /** Modifier chords (Ctrl+P, Alt+…) are app shortcuts, never buffer input (#385). */
+  ctrl?: boolean;
+  meta?: boolean;
 }
 
 export interface VimResult {
@@ -38,6 +41,12 @@ const clamp = (n: number, max: number) => Math.max(0, Math.min(n, max));
 export function vimKey(state: VimState, input: string, key: VimKey = {}): VimResult {
   const { value } = state;
   const len = value.length;
+
+  // A Ctrl/Alt chord belongs to the app (Ctrl+P palette, Ctrl+O panel …). It
+  // must neither be typed into the buffer in insert mode nor interpreted as a
+  // vim command in normal mode — Ctrl+P used to insert "p" and also fire the
+  // paste command (#385).
+  if (key.ctrl || key.meta) return { state };
 
   if (state.mode === "insert") {
     if (key.escape) {

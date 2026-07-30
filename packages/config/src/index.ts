@@ -19,9 +19,23 @@ export function loadConfig(raw: unknown): MetalmindConfig {
   return parsed.data;
 }
 
+/** Why the last loadConfigFromFile call fell back to defaults, if it did (#383).
+ *  A metalmind.yaml that fails to parse or validate is discarded WHOLE — every
+ *  section in it stops applying — so the reason must be surfacable to the user
+ *  (/doctor reads this) instead of vanishing. */
+export interface ConfigLoadIssue {
+  path: string;
+  reason: string;
+}
+let lastConfigIssue: ConfigLoadIssue | null = null;
+export function getConfigLoadIssue(): ConfigLoadIssue | null {
+  return lastConfigIssue;
+}
+
 export function loadConfigFromFile(
   directory: string = process.cwd(),
 ): MetalmindConfig {
+  lastConfigIssue = null;
   const configPath = findConfigFile(directory);
   if (!configPath) return structuredClone(defaultConfig);
 
@@ -30,13 +44,23 @@ export function loadConfigFromFile(
 
   try {
     data = parseYaml(raw);
-  } catch {
+  } catch (err) {
+    lastConfigIssue = { path: configPath, reason: `YAML parse error: ${err instanceof Error ? err.message : String(err)}` };
     return structuredClone(defaultConfig);
   }
 
-  if (!data || typeof data !== "object") return structuredClone(defaultConfig);
+  if (!data || typeof data !== "object") {
+    lastConfigIssue = { path: configPath, reason: "file is empty or not a YAML mapping" };
+    return structuredClone(defaultConfig);
+  }
   const parsed = MetalmindConfigSchema.safeParse(data);
-  if (!parsed.success) return structuredClone(defaultConfig);
+  if (!parsed.success) {
+    lastConfigIssue = {
+      path: configPath,
+      reason: parsed.error.errors.map((e) => `${e.path.join(".") || "(root)"}: ${e.message}`).join("; "),
+    };
+    return structuredClone(defaultConfig);
+  }
   return parsed.data;
 }
 

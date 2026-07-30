@@ -2423,3 +2423,69 @@ describe("M28 — agentic dev workflow", () => {
     } as never;
   }
 });
+
+describe("undo/checkpoint safety net (gap7 #374/#382)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function writeProvider(path: string, content: string) {
+    let calls = 0;
+    return {
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        if (calls === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: `tc-${path}-${content}`, toolName: "writeFile", argumentsJson: JSON.stringify({ path, content }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("/clear drops the turn-keyed undo stack so it cannot revert the previous conversation (#374)", async () => {
+    const file = join(tmpdir(), `mm-clear-undo-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`);
+    writeFileSync(file, "ORIGINAL");
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+
+    mockCreateProvider.mockReturnValue(writeProvider(file, "CONVERSATION-A"));
+    await collect(loop.run("edit it"));
+    expect(readFileSync(file, "utf8")).toBe("CONVERSATION-A");
+
+    // New conversation: the old edit set must not be reachable any more.
+    loop.clearHistory();
+    expect(loop.undoLastEdit()).toMatch(/Nothing to undo/);
+    expect(readFileSync(file, "utf8")).toBe("CONVERSATION-A"); // untouched
+    rmSync(file, { force: true });
+  });
+
+  it("/clear drops turn-keyed checkpoints so /rollback <n> cannot hit a foreign snapshot (#374)", async () => {
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    loop.clearHistory();
+    expect(loop.listCheckpoints()).toMatch(/No checkpoints/i);
+    expect(loop.rollbackToCheckpoint(1)).toMatch(/No checkpoint|no checkpoints/i);
+  });
+
+  it("undo refuses to clobber a file the user edited after the agent (#382)", async () => {
+    const file = join(tmpdir(), `mm-handedit-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`);
+    writeFileSync(file, "ORIGINAL");
+    mockCreateProvider.mockReturnValue(writeProvider(file, "AGENT"));
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    await collect(loop.run("edit it"));
+    expect(readFileSync(file, "utf8")).toBe("AGENT");
+
+    // The user hand-edits the file afterwards.
+    writeFileSync(file, "USER EDIT AFTER THE AGENT");
+
+    const report = loop.undoLastEdit();
+    expect(report).toMatch(/skipped/i);
+    expect(readFileSync(file, "utf8")).toBe("USER EDIT AFTER THE AGENT"); // preserved
+    rmSync(file, { force: true });
+  });
+});

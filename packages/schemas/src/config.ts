@@ -47,7 +47,10 @@ export const McpServerConfigSchema = z.object({
 export const McpServersConfigSchema = z.record(z.string(), McpServerConfigSchema);
 
 export const MetalmindConfigSchema = z.object({
-  models: z.record(z.string(), ModelConfigSchema),
+  // `models` is OPTIONAL (#383): it used to be required, so a metalmind.yaml
+  // that only set permissions/tools/mcp/ui failed validation and the WHOLE file
+  // was silently discarded — every section in it quietly stopped applying.
+  models: z.record(z.string(), ModelConfigSchema).default({}),
   routing: RoutingConfigSchema.optional(),
   permissions: PermissionsConfigSchema.optional(),
   tools: ToolsConfigSchema.optional(),

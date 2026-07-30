@@ -14,12 +14,28 @@ export class SkillManager {
   private activeSkills = new Map<string, ActiveSkill>();
   private toolRegistry: ToolRegistry | null = null;
   private onPromptUpdate?: (systemPrompt: string) => void;
+  /** Names of tools that exist OUTSIDE the built-in registry (MCP servers).
+   *  Without this a skill that requires or binds an MCP tool could never
+   *  activate — the registry only knows the built-ins (#380). */
+  private externalTools: () => Iterable<string> = () => [];
 
   /**
    * Set the tool registry for dynamic tool registration.
    */
   setToolRegistry(registry: ToolRegistry): void {
     this.toolRegistry = registry;
+  }
+
+  /** Supply a live view of dynamically-registered (MCP) tool names (#380).
+   *  A callback, not a snapshot: servers connect and die during a session. */
+  setExternalToolSource(source: () => Iterable<string>): void {
+    this.externalTools = source;
+  }
+
+  private knownTools(): Set<string> {
+    const names = new Set<string>(this.toolRegistry?.listNames() ?? []);
+    for (const n of this.externalTools()) names.add(n);
+    return names;
   }
 
   /**
@@ -45,9 +61,9 @@ export class SkillManager {
       }
     }
 
-    // Check required tool availability
+    // Check required tool availability (built-ins + connected MCP tools, #380)
     if (skill.metadata.requiresTools && this.toolRegistry) {
-      const availableTools = new Set(this.toolRegistry.listNames());
+      const availableTools = this.knownTools();
       for (const requiredTool of skill.metadata.requiresTools) {
         if (!availableTools.has(requiredTool)) {
           return {
@@ -61,8 +77,8 @@ export class SkillManager {
     // Validate tool bindings: don't silently swallow a skill that binds a tool
     // that doesn't exist — fail activation loudly (#228).
     if (skill.tools && this.toolRegistry) {
-      const reg = this.toolRegistry;
-      const missing = skill.tools.map((b) => b.toolName).filter((n) => n && !reg.get(n));
+      const known = this.knownTools();
+      const missing = skill.tools.map((b) => b.toolName).filter((n) => n && !known.has(n));
       if (missing.length > 0) {
         return { success: false, error: `Skill "${skill.metadata.name}" binds unknown tool(s): ${missing.join(", ")}` };
       }
