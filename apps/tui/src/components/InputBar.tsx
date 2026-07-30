@@ -273,13 +273,32 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
           <Text dimColor>↑↓ select  Tab complete  Esc dismiss</Text>
         </Box>
       )}
-      {value.includes("\n") && (
-        <Box flexDirection="column" paddingLeft={2}>
-          {value.split("\n").slice(0, -1).map((l, i) => (
-            <Text key={i} dimColor>{l || " "}</Text>
-          ))}
-        </Box>
-      )}
+      {value.includes("\n") && (() => {
+        // Cap the preview (#372): a 300-line paste rendered 300 screen rows,
+        // blowing past the terminal height and forcing Ink to clear and repaint
+        // the WHOLE screen on every keystroke. Show a head/tail window with a
+        // count of what's hidden — the full text is still sent on Enter.
+        const lines = value.split("\n").slice(0, -1);
+        const MAX = 8;
+        const shown =
+          lines.length <= MAX
+            ? lines.map((l, i) => ({ key: `l${i}`, text: l || " " }))
+            : [
+                ...lines.slice(0, MAX - 3).map((l, i) => ({ key: `h${i}`, text: l || " " })),
+                { key: "gap", text: `… ${lines.length - (MAX - 1)} more lines …` },
+                ...lines.slice(-2).map((l, i) => ({ key: `t${i}`, text: l || " " })),
+              ];
+        return (
+          <Box flexDirection="column" paddingLeft={2}>
+            {shown.map((l) => (
+              <Text key={l.key} dimColor wrap="truncate-end">{l.text}</Text>
+            ))}
+            {lines.length > MAX && (
+              <Text dimColor italic>({lines.length + 1} lines pasted — Enter sends all of it)</Text>
+            )}
+          </Box>
+        );
+      })()}
       <Box borderStyle="single" borderColor="gray" paddingX={1}>
         <Box marginRight={1}>
           {vimMode && !disabled ? (

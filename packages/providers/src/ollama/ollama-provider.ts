@@ -16,6 +16,9 @@ import { JsonRepair } from "../normalization/json-repair.js";
 interface OllamaMessage {
   role: string;
   content: string;
+  /** Base64 image payloads for vision models (#367). Ollama's /api/chat takes a
+   *  bare base64 array here — no data: prefix, no {type:"image"} wrapper. */
+  images?: string[];
   /** Reasoning trace emitted by reasoning models (e.g. gpt-oss); streams before
    *  the answer content. Surfaced as a "reasoning" event, not part of the answer. */
   thinking?: string;
@@ -58,6 +61,14 @@ interface OllamaChatRequest {
 
 /** How long Ollama keeps the model loaded after a request (avoids cold reloads). */
 const OLLAMA_KEEP_ALIVE = "10m";
+
+/** Map ollama's done_reason onto the neutral finish reason (#366). */
+function mapOllamaDoneReason(reason: string | undefined): "stop" | "length" | "tool_calls" | "content_filter" | "other" {
+  if (!reason) return "stop";
+  if (reason === "stop") return "stop";
+  if (reason === "length") return "length";
+  return "other";
+}
 
 interface OllamaChatResponse {
   message: OllamaMessage;
@@ -300,6 +311,9 @@ export class OllamaProvider implements ModelProvider {
               if (data.prompt_eval_count != null || data.eval_count != null) {
                 yield { type: "usage", usage: { inputTokens: data.prompt_eval_count, outputTokens: data.eval_count } };
               }
+              // Surface WHY generation stopped (#366): done_reason "length" means
+              // the answer was truncated at num_predict, not completed.
+              yield { type: "finish", reason: mapOllamaDoneReason(data.done_reason), detail: data.done_reason };
               yield { type: "done" };
               return;
             }
@@ -323,6 +337,9 @@ export class OllamaProvider implements ModelProvider {
           }
           if (data.prompt_eval_count != null || data.eval_count != null) {
             yield { type: "usage", usage: { inputTokens: data.prompt_eval_count, outputTokens: data.eval_count } };
+          }
+          if (data.done_reason) {
+            yield { type: "finish", reason: mapOllamaDoneReason(data.done_reason), detail: data.done_reason };
           }
           if (data.message?.thinking) {
             yield { type: "reasoning", text: data.message.thinking };
@@ -385,6 +402,24 @@ export class OllamaProvider implements ModelProvider {
   private convertMessages(messages: AgentMessage[]): OllamaMessage[] {
     return messages.map((msg) => {
       const out: OllamaMessage = { role: msg.role, content: msg.content };
+      // Vision attachments were silently dropped here, so /image never reached
+      // the wire on the default (ollama / ollama-cloud) tiers (#367). Ollama
+      // wants raw base64 strings; https URLs can't be forwarded, so they are
+      // called out in the text instead of vanishing without a trace.
+      if (msg.images?.length) {
+        const base64: string[] = [];
+        const unsupported: string[] = [];
+        for (const img of msg.images) {
+          const m = /^data:image\/[a-zA-Z0-9.+-]+;base64,(.*)$/.exec(img);
+          if (m) base64.push(m[1]);
+          else if (/^[A-Za-z0-9+/=\s]+$/.test(img) && img.length > 64) base64.push(img.replace(/\s+/g, ""));
+          else unsupported.push(img);
+        }
+        if (base64.length) out.images = base64;
+        if (unsupported.length) {
+          out.content = `${out.content}\n[note: ${unsupported.length} image(s) could not be attached — ollama needs base64 data, not a URL: ${unsupported.join(", ")}]`;
+        }
+      }
       if (msg.toolCalls?.length) {
         out.tool_calls = msg.toolCalls.map((tc) => ({
           id: tc.toolCallId,

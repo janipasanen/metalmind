@@ -92,6 +92,11 @@ export function runShellAsync(command: string, cwd: string, timeoutMs: number | 
   });
 }
 
+/** POSIX single-quote a value so the shell treats it as one literal argument (#358). */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function render(r: RunResult, trailer: string): string {
   const body = [r.stdout.trim(), r.stderr.trim()].filter(Boolean).join("\n");
   return `${body}\n--- ${trailer}, ${r.duration}ms`;
@@ -185,7 +190,11 @@ export const runFormatTool: AgentTool<z.input<typeof runFormatSchema>, string> =
   requiresConfirmation: false,
   async execute(input: z.output<typeof runFormatSchema>, ctx: ToolExecutionContext): Promise<string> {
     const base = input.command ?? "npx prettier --write";
-    const cmd = input.path ? `${base} ${JSON.stringify(input.path)}` : base;
+    // Single-quote, don't JSON.stringify (#358): the command runs under `sh -c`,
+    // and DOUBLE quotes still expand $(…), backticks and $VAR — so a path like
+    // `$(rm -rf ~)` executed. Single quotes suppress all of it; the embedded-
+    // quote dance ('\'') is the only escape sh recognizes inside them.
+    const cmd = input.path ? `${base} ${shellQuote(input.path)}` : base;
     const r = await runShellAsync(cmd, ctx.projectRoot, input.timeout, ctx.signal, ctx.onOutput);
     return render(r, r.exitCode === 0 ? "Format complete" : "Format failed");
   },

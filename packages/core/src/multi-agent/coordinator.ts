@@ -318,23 +318,45 @@ export class Coordinator {
    * lifecycle events per task. Results preserve input order; errors are
    * isolated per task.
    */
-  async runParallelTasks(tasks: LocalWorkerTask[], concurrency = 4): Promise<AgentResult[]> {
+  async runParallelTasks(tasks: LocalWorkerTask[], concurrency = 4, signal?: AbortSignal): Promise<AgentResult[]> {
     if (tasks.length === 0) return [];
     this.setPhase("local-delegation");
 
     // Bounded-concurrency pool over runCachedTask, so delegated subtasks run in
     // parallel (#180) AND hit the content-hash cache on repeats (#181).
+    // Cancellable (#365): a 16-task batch used to run to completion no matter
+    // what, so Esc left the TUI locked for minutes. On abort we stop dispatching
+    // and settle in-flight tasks immediately instead of awaiting the model.
     const results: AgentResult[] = new Array(tasks.length);
     let next = 0;
     const limit = Math.max(1, Math.min(concurrency, tasks.length));
+    const cancelled = (taskId: string): AgentResult => ({ taskId, success: false, error: "cancelled" });
+    const raceAbort = (p: Promise<AgentResult>, taskId: string): Promise<AgentResult> => {
+      if (!signal) return p;
+      return new Promise<AgentResult>((resolve) => {
+        const onAbort = () => resolve(cancelled(taskId));
+        signal.addEventListener("abort", onAbort, { once: true });
+        void p.then((r) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(r);
+        });
+      });
+    };
     const worker = async (): Promise<void> => {
       while (true) {
         const i = next++;
         if (i >= tasks.length) return;
-        results[i] = await this.runCachedTask(
-          tasks[i].taskType,
-          tasks[i].input as Record<string, unknown>,
-          "",
+        if (signal?.aborted) {
+          results[i] = cancelled(tasks[i].taskId);
+          continue;
+        }
+        results[i] = await raceAbort(
+          this.runCachedTask(
+            tasks[i].taskType,
+            tasks[i].input as Record<string, unknown>,
+            "",
+            tasks[i].taskId,
+          ),
           tasks[i].taskId,
         );
       }

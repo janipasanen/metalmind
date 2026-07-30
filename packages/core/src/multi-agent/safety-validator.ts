@@ -19,25 +19,31 @@ const DANGEROUS_COMMAND_PATTERNS = [
   /\binit\s+[06]/,
 ];
 
+// Case-insensitive (#359): macOS filesystems are case-insensitive by default,
+// so ".SSH/id_rsa" and ".Env" open the same files as their lowercase forms.
 const SECRET_FILE_PATTERNS = [
-  /\.env$/,
-  /\.env\./,
-  /\.pem$/,
-  /\.key$/,
-  /\.p12$/,
-  /\.pfx$/,
-  /id_rsa$/,
-  /id_ed25519$/,
-  /id_ecdsa$/,
-  /\.ssh\//,
-  /\.aws\//,
-  /\.kube\//,
-  /\.gnupg\//,
-  /\.git-credentials$/,
-  /\.npmrc$/,
-  /credentials\.json$/,
-  /service-account.*\.json$/,
+  /\.env$/i,
+  /\.env\./i,
+  /\.pem$/i,
+  /\.key$/i,
+  /\.p12$/i,
+  /\.pfx$/i,
+  /id_rsa$/i,
+  /id_ed25519$/i,
+  /id_ecdsa$/i,
+  /\.ssh\//i,
+  /\.aws\//i,
+  /\.kube\//i,
+  /\.gnupg\//i,
+  /\.git-credentials$/i,
+  /\.npmrc$/i,
+  /credentials\.json$/i,
+  /service-account.*\.json$/i,
 ];
+
+/** Shell substitution/metacharacters that have no business in a *file path*
+ *  argument that will be interpolated into a shell command line (#358). */
+const SHELL_SUBSTITUTION = /(\$\(|`|\$\{|\|\||&&|;|\n)/;
 
 export interface SafetyViolation {
   type: "forbidden_command" | "forbidden_file" | "local_worker_tool_call" | "path_traversal" | "secret_in_context";
@@ -93,6 +99,20 @@ export class SafetyValidator {
       if (recursive && force) return true;
     }
     return false;
+  }
+
+  /** A path argument destined for a shell command line must be a plain path:
+   *  reject command substitution and command chaining outright (#358). */
+  validateShellArgument(value: string): SafetyViolation | null {
+    if (SHELL_SUBSTITUTION.test(value)) {
+      return {
+        type: "forbidden_command",
+        message: `Shell metacharacters are not allowed in a path argument: "${value}"`,
+        severity: "error",
+        details: { value },
+      };
+    }
+    return null;
   }
 
   validateFilePath(path: string): SafetyViolation | null {

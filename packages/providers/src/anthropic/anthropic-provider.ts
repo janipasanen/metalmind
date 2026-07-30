@@ -137,6 +137,15 @@ function markHistoryCacheBreakpoint(messages: AnthropicMsg[]): void {
   }
 }
 
+/** Map Anthropic's stop_reason onto the neutral finish reason (#366). */
+function mapAnthropicStopReason(reason: string): "stop" | "length" | "tool_calls" | "content_filter" | "other" {
+  if (reason === "end_turn" || reason === "stop_sequence") return "stop";
+  if (reason === "max_tokens") return "length";
+  if (reason === "tool_use") return "tool_calls";
+  if (reason === "refusal") return "content_filter";
+  return "other";
+}
+
 /** Convert a data-URL or https image into an Anthropic image content block (#177). */
 function toAnthropicImageBlock(img: string): Record<string, unknown> {
   const dataMatch = img.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
@@ -340,6 +349,8 @@ export class AnthropicProvider implements ModelProvider {
     // several deltas — keep only the latest and emit one usage event at the end,
     // so a consumer that sums usage events doesn't multiply the count (#258).
     let outputTokens: number | undefined;
+    let finishReason: "stop" | "length" | "tool_calls" | "content_filter" | "other" | undefined;
+    let finishDetail: string | undefined;
 
     try {
       while (true) {
@@ -372,6 +383,13 @@ export class AnthropicProvider implements ModelProvider {
             }
             if (chunk.type === "message_delta" && chunk.usage?.output_tokens != null) {
               outputTokens = chunk.usage.output_tokens; // cumulative — keep latest
+            }
+            // stop_reason rides on message_delta; "max_tokens" means the answer
+            // was cut off at the 4096 cap, not finished (#366).
+            const stopReason = (chunk.delta as { stop_reason?: string } | undefined)?.stop_reason;
+            if (chunk.type === "message_delta" && stopReason) {
+              finishReason = mapAnthropicStopReason(stopReason);
+              finishDetail = stopReason;
             }
 
             // Anthropic emits {"type":"error","error":{...}} mid-stream (e.g.
@@ -434,6 +452,7 @@ export class AnthropicProvider implements ModelProvider {
 
     // Emit the final cumulative output-token count once (#258).
     if (outputTokens != null) yield { type: "usage", usage: { outputTokens } };
+    if (finishReason) yield { type: "finish", reason: finishReason, detail: finishDetail };
     yield { type: "done" };
   }
 }

@@ -20,12 +20,19 @@ export interface ProviderSelectionProps {
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4o",
-  ollama: "gemini-3-flash-preview:cloud",
+  "ollama-cloud": "gpt-oss:120b",
+  ollama: "ministral-3:3b",
   mlx: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
 };
 
+// The cloud entry must save the "ollama-cloud" provider id (#370). It used to
+// save "ollama" — the LOCAL provider — together with a cloud-only model, so
+// entering a valid API key produced a config pointing at 127.0.0.1:11434 with a
+// model that isn't installed there: every request failed with a confusing
+// "model not found" right after a successful-looking setup.
 const providers: Provider[] = [
-  { id: "ollama", name: "Ollama Cloud", description: "Ollama cloud-hosted models", needsApiKey: true, apiKeyOptional: true, apiKeyHint: "API key (Enter to skip → local Ollama)" },
+  { id: "ollama-cloud", name: "Ollama Cloud", description: "Ollama cloud-hosted models (api.ollama.com)", needsApiKey: true, apiKeyOptional: true, apiKeyHint: "API key (Enter to skip → local Ollama)" },
+  { id: "ollama", name: "Ollama (Local)", description: "Models running on this machine (localhost:11434)", needsApiKey: false },
   { id: "openai", name: "OpenAI", description: "GPT-4 and other models", needsApiKey: true, apiKeyHint: "API key" },
   { id: "anthropic", name: "Anthropic", description: "Claude models", needsApiKey: true, apiKeyHint: "API key" },
   { id: "mlx", name: "MLX (Local)", description: "Local Apple Silicon GPU models", needsApiKey: false },
@@ -42,7 +49,11 @@ export default function ProviderSelection({ onSelect, onCancel, accent = "cyan" 
 
   const commitSelection = (apiKey?: string) => {
     const currentConfig = loadXdgConfig();
-    const providerId = selectedProvider.id;
+    // "Ollama Cloud" without a key can't reach the cloud — fall back to the
+    // LOCAL provider (and a local default model) rather than saving a cloud
+    // provider that will 401 on the first message (#370).
+    const skippedCloudKey = selectedProvider.id === "ollama-cloud" && !apiKey && !currentConfig.apiKeys?.["ollama-cloud"] && !currentConfig.apiKeys?.["ollama"] && !process.env.OLLAMA_API_KEY;
+    const providerId = skippedCloudKey ? "ollama" : selectedProvider.id;
     saveXdgConfig({
       ...currentConfig,
       activeProvider: providerId,

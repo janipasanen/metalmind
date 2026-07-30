@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -9,6 +9,7 @@ import {
   runBuildTool,
   runLintTool,
   runShellAsync,
+  shellQuote,
 } from "./shell-tools.js";
 
 describe("runCommandTool", () => {
@@ -169,5 +170,22 @@ describe("exit-settle and group-kill regressions (#284/#350)", () => {
     expect(r.exitCode).toBe(130);
     expect(r.stderr).toContain("cancelled");
     expect(Date.now() - start).toBeLessThan(3_000);
+  });
+});
+
+describe("shell argument quoting (#358)", () => {
+  it("does not execute command substitution embedded in runFormat's path", async () => {
+    const marker = join(tmpdir(), `mm-injection-${Date.now()}.txt`);
+    // JSON.stringify used double quotes, under which sh still expands $(...).
+    await runFormatTool.execute(
+      { command: "echo formatted", path: `$(touch ${JSON.stringify(marker)})`, timeout: 10000 },
+      { projectRoot: process.cwd() },
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("shellQuote neutralizes substitution, chaining and embedded quotes", async () => {
+    const r = await runShellAsync(`echo ${shellQuote("$(echo pwned) `echo x` it's")}`, process.cwd(), 10_000);
+    expect(r.stdout.trim()).toBe("$(echo pwned) `echo x` it's");
   });
 });

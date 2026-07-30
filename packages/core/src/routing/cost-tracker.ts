@@ -23,6 +23,11 @@ const DEFAULT_COST_PER_1K_TOKENS: CostTable = {
   openai: { "gpt-4": 0.03, "gpt-4-turbo": 0.01, "gpt-4o": 0.005, default: 0.01 },
   anthropic: { "claude-sonnet-latest": 0.015, "claude-sonnet-4-6": 0.015, "claude-opus": 0.075, default: 0.015 },
   ollama: { default: 0 },
+  // Ollama Cloud is the shipped tier-3 provider and it is NOT free. Without an
+  // entry here every cloud call priced at $0.00, which made the whole budgetUsd
+  // cap (and /cost) inert — the exact tier the cap exists to bound (#360).
+  // Rough blended rate; override per model via the CostTable constructor arg.
+  "ollama-cloud": { default: 0.002 },
   mlx: { default: 0 },
 };
 

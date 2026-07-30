@@ -48,15 +48,19 @@ on install by node-gyp — requires Xcode CLT on macOS).
 
 ## Providers
 
-| Provider | Description | Default model |
-|---|---|---|
-| **Ollama Cloud** | Cloud-hosted Ollama models (API key required) | `gemini-3-flash-preview:cloud` |
-| **Ollama (local)** | Self-hosted Ollama, no key needed | `gemini-3-flash-preview:cloud` |
-| **Anthropic** | Claude models | `claude-sonnet-4-6` |
-| **OpenAI** | GPT-4 and others | `gpt-4o` |
-| **MLX** | Apple Silicon GPU (M1–M4), runs entirely on-device | `mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit` |
+| Provider | Config id | Description | Default model |
+|---|---|---|---|
+| **Ollama Cloud** | `ollama-cloud` | Cloud-hosted Ollama models at api.ollama.com (API key required) | `gpt-oss:120b` |
+| **Ollama (local)** | `ollama` | Self-hosted Ollama at localhost:11434, no key needed | `ministral-3:3b` |
+| **Anthropic** | `anthropic` | Claude models | `claude-sonnet-4-6` |
+| **OpenAI** | `openai` | GPT-4 and others | `gpt-4o` |
+| **MLX** | `mlx` | Apple Silicon GPU (M1–M4), runs entirely on-device | `mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit` |
 
-Provider priority on startup: **saved config** → **env var auto-detect** (Ollama key → Anthropic key → OpenAI key) → Ollama default.
+The **config id** is what goes in `activeProvider` — `ollama-cloud` and `ollama`
+are different providers pointing at different hosts. Pairing the local id with a
+cloud-only model is the most common misconfiguration; `/doctor` reports it.
+
+Provider priority on startup: **saved config** → **env var auto-detect** (`OLLAMA_API_KEY` → `ANTHROPIC_API_KEY` → `OPENAI_API_KEY`) → local Ollama.
 
 ## Three-tier routing
 
@@ -73,16 +77,27 @@ Settings persist to `~/.config/metalmind/config.json`. Use the in-app UI (Ctrl+P
 
 ```json
 {
-  "activeProvider": "ollama",
-  "activeModel": "gemini-3-flash-preview:cloud",
+  "activeProvider": "ollama-cloud",
+  "activeModel": "gpt-oss:120b",
   "apiKeys": {
-    "ollama": "your-ollama-cloud-key",
+    "ollama-cloud": "your-ollama-cloud-key",
     "anthropic": "sk-ant-..."
   },
   "uiTheme": "dracula",
+  "budgetUsd": 5,
   "mcpServers": {}
 }
 ```
+
+Optional companions to this file:
+
+| Path | Purpose |
+|---|---|
+| `~/.config/metalmind/instructions.md` | Standing instructions applied in every project |
+| `~/.config/metalmind/commands/<name>.md` | Custom `/<name>` slash commands (`$ARGUMENTS` is substituted) |
+| `~/.config/metalmind/hooks.json` | Lifecycle hooks: `preTool` (exit 2 blocks the call), `postTool`, `sessionStart`, `stop` |
+| `<project>/.metalmind/commands/`, `<project>/.metalmind/hooks.json` | Project-scoped equivalents (override the global ones) |
+| `<project>/metalmind.yaml` | Per-project `models`, `routing`, `permissions`, `tools`, `ui`, `mcp` |
 
 ### Environment variables
 
@@ -100,9 +115,14 @@ export OLLAMA_API_KEY=...                          # Ollama Cloud key
 ### CLI flags
 
 ```bash
-metalmind --provider=anthropic --model=claude-sonnet-4-6
-metalmind --provider=openai    --model=gpt-4o
-metalmind --provider=ollama    --model=gemma3:27b
+metalmind --provider=anthropic     --model=claude-sonnet-4-6
+metalmind --provider=openai        --model=gpt-4o
+metalmind --provider=ollama-cloud  --model=gpt-oss:120b
+metalmind --provider=ollama        --model=gemma3:27b
+
+metalmind --continue        # resume the most recent session (also: -c)
+metalmind --resume <id>     # resume a specific session
+metalmind --version         # print the version and exit
 ```
 
 CLI flags override env vars, which override saved config.
@@ -161,12 +181,69 @@ Provider selection will prompt for an API key. For Ollama, the key is optional �
 
 Type in the input bar:
 
+**Session**
+
 | Command | Description |
 |---|---|
-| `/help` | Show available commands |
-| `/model <name>` | Switch model (e.g. `/model gemma3:27b`) |
-| `/clear` | Clear conversation history |
+| `/help` | Show every command with its syntax |
+| `/clear` | Start a fresh session (history is kept in `/resume`) |
+| `/resume [id]` | List/resume sessions; `search <text>`, `rename <id> <title>`, `tag <id> <tags>` |
+| `/branch` | Fork this conversation into a new session |
+| `/compact` | Summarize older turns to reclaim context |
+| `/search <text>` | Find text in the current transcript |
+| `/export [md\|json]` | Write the transcript to `.metalmind/transcripts/` (secrets redacted) |
+| `/copy [last\|code\|all\|<n>]` | Copy to the clipboard |
+| `/retry`, `/edit <text>` | Re-run the last prompt (as-is / modified) |
 | `/quit` | Exit |
+
+**Models & routing**
+
+| Command | Description |
+|---|---|
+| `/model <name>` | Switch model |
+| `/models` | Local Ollama models: `list`, `pull <name>`, `delete <name>` |
+| `/tier 1\|2\|3\|auto [model]` | Force a tier (optionally with a model override) |
+| `/routes` | Routing decisions and per-tier hit counts |
+| `/brain [on\|off]` | Remote-brain mode (cloud coordinates, local executes) |
+| `/cost`, `/budget [set <usd>\|off]` | Token usage + spend, and the session spend cap |
+| `/apikey <key>` | Update the current provider's API key |
+| `/keychain` | `save`, `load`, `status` — macOS keychain key storage |
+
+**Working on code**
+
+| Command | Description |
+|---|---|
+| `/plan`, `/build` | Read-only planning mode vs executing mode |
+| `/commit [context]`, `/pr [context]` | AI-written Conventional Commit / GitHub PR (approval-gated) |
+| `/test`, `/check`, `/lint [cmd]` | Run tests / project check / lint; results feed back to the model |
+| `/undo`, `/redo` | Revert / re-apply the agent's last edit set |
+| `/checkpoints`, `/rollback [turn]` | Turn-level git checkpoints |
+| `/tree`, `/files` | Browse the project |
+| `/workspace <path>` | Grant access to another directory |
+| `/init` | Generate a starter project memory file |
+| `/allow` | Persist auto-approval: `tool`, `path`, `command`, `list`, `clear` |
+
+**Context & extensions**
+
+| Command | Description |
+|---|---|
+| `/rag` | Retrieval: `add <path>`, `search <q>`, `status`, `clear` |
+| `/remember <text>` | Save a durable fact to long-term memory |
+| `/skill` | `list`, `activate <name>`, `deactivate <name>` |
+| `/mcp` | `list`, `presets`, `add`, `remove`, `status`, `reconnect`, `resources`, `prompts`, `auth <srv>` |
+| `/prompt` | Prompt library: `save`, `list`, `delete`, `<name> k=v` |
+| `/image <path\|url>` | Attach an image for a vision model |
+| `/<custom>` | Your own commands from `.metalmind/commands/<name>.md` |
+
+**Diagnostics**
+
+| Command | Description |
+|---|---|
+| `/doctor` | Check ollama, cloud key, `gh`, `rg`, LSP and persistence, with fixes |
+| `/audit` | This session's tool-call log |
+| `/diagnostics` | Recent errors / crash log (persisted across sessions) |
+| `/notifications` | Recent notifications |
+| `/vim [on\|off\|help]` | Vim modal editing in the input bar |
 
 ## Themes
 

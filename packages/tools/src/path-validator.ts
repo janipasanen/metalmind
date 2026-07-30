@@ -1,5 +1,5 @@
 import { resolve, relative, sep, isAbsolute, join, normalize } from "node:path";
-import { statSync, existsSync } from "node:fs";
+import { statSync, existsSync, realpathSync } from "node:fs";
 
 export const BLOCKED_PATTERNS = [
   ".ssh",
@@ -16,15 +16,31 @@ export const BLOCKED_PATTERNS = [
 
 /** True if a single path segment is sensitive. Matches the exact name AND dotted
  *  variants (.env → .env.local/.env.production; id_rsa → id_rsa.pub) so secrets
- *  aren't reachable just by appending a suffix (#262). */
+ *  aren't reachable just by appending a suffix (#262).
+ *
+ *  Case-INSENSITIVE (#359): macOS APFS/HFS+ are case-insensitive by default, so
+ *  `.SSH/id_rsa` and `.Env` open exactly the same files as their lowercase
+ *  forms. A case-sensitive comparison let a model (or injected instruction)
+ *  read secrets straight past this gate just by changing capitalization. */
 export function isBlockedSegment(seg: string): boolean {
-  return BLOCKED_PATTERNS.some((b) => seg === b || seg.startsWith(b + "."));
+  const s = seg.toLowerCase();
+  return BLOCKED_PATTERNS.some((b) => s === b || s.startsWith(b + "."));
 }
 
 /** True if a path touches a sensitive (blocked) directory/file — for reads that
- *  aren't project-scoped (e.g. /image, @-mentions, /rag) (#239). */
+ *  aren't project-scoped (e.g. /image, @-mentions, /rag) (#239).
+ *
+ *  Symlinks are resolved first where possible (#359): `resolve()` is purely
+ *  lexical, so a link like ./keys → ~/.ssh would otherwise slip through. */
 export function isBlockedPath(p: string): boolean {
-  return normalize(p).split(sep).some(isBlockedSegment);
+  const candidates = [normalize(p)];
+  try {
+    const real = realpathSync(p);
+    if (real !== candidates[0]) candidates.push(real);
+  } catch {
+    // Path doesn't exist yet (a write target) — the lexical check still applies.
+  }
+  return candidates.some((c) => c.split(sep).some(isBlockedSegment));
 }
 
 export class PathValidator {
@@ -49,7 +65,17 @@ export class PathValidator {
       ? resolve(requestedPath)
       : resolve(join(this.projectRoot, requestedPath));
 
-    const blocked = absolute.split(sep).find(isBlockedSegment);
+    // Check the lexical path AND, when it exists, its symlink-resolved target:
+    // ./keys → ~/.ssh must not become a hole in the blocklist (#359).
+    let blocked = absolute.split(sep).find(isBlockedSegment);
+    if (!blocked) {
+      try {
+        const real = realpathSync(absolute);
+        if (real !== absolute) blocked = real.split(sep).find(isBlockedSegment);
+      } catch {
+        // Doesn't exist yet — the lexical check above is the whole gate.
+      }
+    }
     if (blocked) {
       throw new Error(
         `Access to blocked path denied: "${blocked}" detected in "${requestedPath}"`,

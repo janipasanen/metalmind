@@ -16,6 +16,7 @@ import { handleRagCommand } from "../rag/manager.js";
 import { handleAllowCommand } from "../approval-allowlist.js";
 import { diagnosticsReport } from "../error-log.js";
 import { handleCopyCommand } from "../copy-command.js";
+import { sanitizeForDisplay, sanitizeAndTruncate } from "../sanitize.js";
 import { VIM_HELP } from "../vim.js";
 import { loadUserCommands, expandUserCommand } from "../user-commands.js";
 import type { TuiConfig } from "../config.js";
@@ -186,11 +187,23 @@ export default function App({ config }: AppProps) {
           agent.dispose();
           return;
         }
+        // A turn may have STARTED while we were building (initMcp/initCoordinator
+        // take seconds); disposing the previous agent now would close its sqlite
+        // store and MCP clients mid-run (#369). Abandon this reload instead —
+        // the user is told to retry, exactly like the entry check.
+        if (isStreamingRef.current) {
+          agent.dispose();
+          notify("warning", "Model switch cancelled — a turn started while loading. Finish it, then retry.");
+          return;
+        }
+        // Carry the conversation and session-scoped settings over to the new
+        // agent, and keep writing to the SAME persisted session (#368).
+        const resumeId = previous ? agent.adoptStateFrom(previous) : undefined;
         agentRef.current = agent;
         // Dispose the replaced agent so its sqlite handle, MCP clients, and
         // background processes are released instead of leaking on each reload (#242).
         previous?.dispose();
-        await agent.initPersistence({}); // reconfigure → fresh persisted session
+        await agent.initPersistence(resumeId ? { resumeId } : {});
         syncMcpStatus(agent);
         setAgentError(null);
 
@@ -476,8 +489,13 @@ export default function App({ config }: AppProps) {
 
       if (input === "/cost") {
         const u = agentRef.current?.getSessionUsage();
+        // Spend is meaningful now that the cloud tier is actually priced (#360).
+        const b = agentRef.current?.getBudgetStatus();
+        const spendLine = b
+          ? `\n  spend:  $${b.spentUsd.toFixed(4)}${b.budgetUsd !== undefined ? ` of $${b.budgetUsd.toFixed(2)} cap${b.overBudget ? " — CAP REACHED, cloud routing downgraded to local" : ""}` : " (no cap set — /budget set <usd>)"}`
+          : "";
         const text = u
-          ? `Session token usage:\n  input:  ${u.inputTokens.toLocaleString()}\n  output: ${u.outputTokens.toLocaleString()}\n  total:  ${(u.inputTokens + u.outputTokens).toLocaleString()}`
+          ? `Session token usage:\n  input:  ${u.inputTokens.toLocaleString()}\n  output: ${u.outputTokens.toLocaleString()}\n  total:  ${(u.inputTokens + u.outputTokens).toLocaleString()}${spendLine}`
           : "Agent not initialised.";
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
@@ -1132,8 +1150,8 @@ export default function App({ config }: AppProps) {
       {isStreaming && liveTool && (
         <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
           <Text bold dimColor>▸ {liveTool.name} (live)</Text>
-          {liveTool.tail.split("\n").filter(Boolean).slice(-4).map((l, i) => (
-            <Text key={i} dimColor>{l.slice(0, 160)}</Text>
+          {sanitizeForDisplay(liveTool.tail).split("\n").filter(Boolean).slice(-4).map((l, i) => (
+            <Text key={i} dimColor wrap="truncate-end">{sanitizeAndTruncate(l, 160)}</Text>
           ))}
         </Box>
       )}

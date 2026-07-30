@@ -4,6 +4,7 @@ import type { ChatMessage } from "./App.js";
 import MarkdownText from "./MarkdownText.js";
 import DiffView from "./DiffView.js";
 import { pageWindow } from "../paging.js";
+import { sanitizeAndTruncate } from "../sanitize.js";
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -30,8 +31,10 @@ const roleLabel: Record<string, string> = {
 };
 
 function truncateJson(json: string, max = 60): string {
-  if (json.length <= max) return json;
-  return json.slice(0, max - 3) + "...";
+  // Tool arguments and results can carry ANSI escapes and control bytes (build
+  // logs, file content). Strip them BEFORE truncating so a cut can't land mid-
+  // escape and leak colour into the rest of the frame (#373).
+  return sanitizeAndTruncate(json, max);
 }
 
 /** One completed history message. Memoized (#339): streaming re-renders the view

@@ -23,6 +23,9 @@ export type ModelStreamEvent =
   | { type: "tool-call"; toolCall: { toolCallId: string; toolName: string; argumentsJson: string } }
   | { type: "error"; message: string }
   | { type: "usage"; usage: { inputTokens?: number; outputTokens?: number } }
+  // Why the model stopped (#366). "length" means the answer was CUT OFF at the
+  // output-token cap — indistinguishable from a finished answer without this.
+  | { type: "finish"; reason: "stop" | "length" | "tool_calls" | "content_filter" | "other"; detail?: string }
   | { type: "done" };
 
 export interface TokenCountRequest {

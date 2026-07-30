@@ -24,6 +24,15 @@ const openaiCapabilities: ModelCapabilities = {
 /** Map the neutral tool defs ({name, description, inputSchema}) into OpenAI's
  *  Chat Completions tool schema ({type:"function", function:{...parameters}}).
  *  Without this wrapper OpenAI rejects every request with a 400 (#250). */
+/** Map OpenAI's finish_reason onto the neutral finish reason (#366). */
+function mapOpenAiFinishReason(reason: string): "stop" | "length" | "tool_calls" | "content_filter" | "other" {
+  if (reason === "stop") return "stop";
+  if (reason === "length") return "length";
+  if (reason === "tool_calls" || reason === "function_call") return "tool_calls";
+  if (reason === "content_filter") return "content_filter";
+  return "other";
+}
+
 function toOpenAITools(tools: unknown[]): unknown[] {
   return (tools as Array<{ name: string; description?: string; inputSchema?: unknown }>).map((t) => ({
     type: "function",
@@ -166,6 +175,8 @@ export class OpenAIProvider implements ModelProvider {
     let buffer = "";
 
     // Accumulate streamed tool-call fragments, keyed by their index.
+    let finishReason: "stop" | "length" | "tool_calls" | "content_filter" | "other" | undefined;
+    let finishDetail: string | undefined;
     const toolAccumulator = new Map<
       number,
       { id?: string; name?: string; args: string }
@@ -203,6 +214,7 @@ export class OpenAIProvider implements ModelProvider {
           const jsonStr = trimmed.slice(6);
           if (jsonStr === "[DONE]") {
             for (const event of flushToolCalls()) yield event;
+            if (finishReason) yield { type: "finish", reason: finishReason, detail: finishDetail };
             yield { type: "done" };
             return;
           }
@@ -212,6 +224,7 @@ export class OpenAIProvider implements ModelProvider {
               error?: { message?: string } | string;
               usage?: { prompt_tokens?: number; completion_tokens?: number };
               choices?: Array<{
+                finish_reason?: string | null;
                 delta?: {
                   content?: string;
                   tool_calls?: Array<{
@@ -241,6 +254,13 @@ export class OpenAIProvider implements ModelProvider {
               };
             }
 
+            // "length" means the answer was truncated at max_tokens (#366).
+            const fr = chunk.choices?.[0]?.finish_reason;
+            if (fr) {
+              finishReason = mapOpenAiFinishReason(fr);
+              finishDetail = fr;
+            }
+
             const delta = chunk.choices?.[0]?.delta;
             if (delta?.content) {
               yield { type: "text", text: delta.content };
@@ -263,6 +283,7 @@ export class OpenAIProvider implements ModelProvider {
     }
 
     for (const event of flushToolCalls()) yield event;
+    if (finishReason) yield { type: "finish", reason: finishReason, detail: finishDetail };
     yield { type: "done" };
   }
 

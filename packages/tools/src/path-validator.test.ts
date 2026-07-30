@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { PathValidator } from "./path-validator.js";
+import { PathValidator, isBlockedPath } from "./path-validator.js";
 
 describe("PathValidator", () => {
   const testDir = join(tmpdir(), `metalmind-path-${Date.now()}`);
@@ -163,8 +163,6 @@ describe("PathValidator", () => {
   });
 });
 
-import { isBlockedPath } from "./path-validator.js";
-
 describe("isBlockedPath dotted variants (#262)", () => {
   it("blocks .env.* and id_rsa.* anywhere in the path", () => {
     expect(isBlockedPath("/home/u/.env.local")).toBe(true);
@@ -174,5 +172,38 @@ describe("isBlockedPath dotted variants (#262)", () => {
   it("does not block lookalikes", () => {
     expect(isBlockedPath("src/environment.ts")).toBe(false);
     expect(isBlockedPath("docs/env.md")).toBe(false);
+  });
+});
+
+describe("case-insensitive blocking + symlink resolution (#359)", () => {
+  it("blocks capitalized variants of sensitive segments (macOS is case-insensitive)", () => {
+    for (const p of ["~/.SSH/id_rsa", "/Users/x/.Env", "/Users/x/.AWS/credentials", "/Users/x/ID_RSA", "/x/.NpmRc"]) {
+      expect(isBlockedPath(p)).toBe(true);
+    }
+  });
+
+  it("still allows ordinary paths that merely resemble a blocked name", () => {
+    expect(isBlockedPath("/Users/x/project/environment.ts")).toBe(false);
+    expect(isBlockedPath("/Users/x/project/sshconfig.md")).toBe(false);
+  });
+
+  it("resolveSafePath rejects a capitalized blocked segment", () => {
+    const v = new PathValidator("/tmp/project");
+    expect(() => v.resolveSafePath("/Users/x/.SSH/config")).toThrow(/blocked path/i);
+  });
+
+  it("follows symlinks so a link to a blocked dir is still blocked", () => {
+    const root = mkdtempSync(join(tmpdir(), "mm-symlink-"));
+    const secretDir = join(root, ".ssh");
+    mkdirSync(secretDir, { recursive: true });
+    writeFileSync(join(secretDir, "id_rsa"), "PRIVATE KEY");
+    const link = join(root, "keys");
+    symlinkSync(secretDir, link);
+
+    // Lexically "keys/id_rsa" looks innocent; the real path is .ssh/id_rsa.
+    expect(isBlockedPath(join(link, "id_rsa"))).toBe(true);
+    const v = new PathValidator(root);
+    expect(() => v.resolveSafePath(join(link, "id_rsa"))).toThrow(/blocked path/i);
+    rmSync(root, { recursive: true, force: true });
   });
 });

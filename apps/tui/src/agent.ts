@@ -101,6 +101,16 @@ function yamlPreapproved(perms: MetalmindConfig["permissions"], toolName: string
   return YAML_PERM_CATEGORIES.some((c) => perms[c.key] === true && c.tools.has(toolName));
 }
 
+/** Identity of the slice a readFile call returned, for stale-read superseding (#362).
+ *  A read with neither offset nor limit covers the whole file ("full") and so
+ *  supersedes every earlier window; a windowed read only supersedes itself. */
+function readWindowKey(input: Record<string, unknown>): string {
+  const hasOffset = typeof input.offset === "number";
+  const hasLimit = typeof input.limit === "number";
+  if (!hasOffset && !hasLimit) return "full";
+  return `${hasOffset ? input.offset : 0}:${hasLimit ? input.limit : "default"}`;
+}
+
 /** Exponential backoff for transient retries: 0.5s, 1s, 2s, … capped at 8s. */
 function backoffMs(attempt: number): number {
   return Math.min(8000, 500 * 2 ** attempt);
@@ -1912,6 +1922,7 @@ export class AgentLoop {
         // Time each model request from here so latency is per-request, not cumulative (#209).
         this.attemptStartMs = Date.now();
         let sawError = false;
+        let truncated = false;
         // Redact across chunk boundaries: a secret split over multiple stream
         // chunks would slip past a per-chunk redact() (#168 stream fix).
         const streamRedactor = new StreamRedactor(this.redactor);
@@ -1933,6 +1944,10 @@ export class AgentLoop {
             };
           } else if (event.type === "usage") {
             this.recordUsage(event.usage);
+          } else if (event.type === "finish") {
+            // A "length" finish means the model was CUT OFF at its output cap —
+            // previously indistinguishable from a complete answer (#366).
+            truncated = event.reason === "length";
           } else if (event.type === "error") {
             yield { type: "error", message: event.message };
             sawError = true;
@@ -1943,6 +1958,12 @@ export class AgentLoop {
         // Flush any tail held back as a possible secret prefix (#168).
         const flushed = streamRedactor.flush();
         if (flushed) yield { type: "text", text: flushed };
+        if (truncated) {
+          yield {
+            type: "text",
+            text: "\n\n[⚠ output truncated at the model's max output tokens — ask it to continue for the rest]\n",
+          };
+        }
         if (sawError) { yield { type: "done" }; return; }
         // User cancelled mid-stream: persist partial output and end cleanly.
         if (signal?.aborted) {
@@ -2129,7 +2150,7 @@ export class AgentLoop {
           const preStatus = SHELL_COMMAND_TOOLS.has(call.toolName) || mcpEntry ? this.gitStatusSnapshot() : null;
           if (call.toolName === "delegateToLocal") {
             // Cloud brain offloads bounded subtasks to the local model (#187).
-            output = await this.handleDelegateToLocal(inputObj);
+            output = await this.handleDelegateToLocal(inputObj, signal);
           } else if (call.toolName === "task") {
             // Spawn a focused sub-agent with its own bounded loop (#210).
             output = await this.handleTaskDelegation(inputObj, signal);
@@ -2198,19 +2219,30 @@ export class AgentLoop {
         // shrinks the earlier result to a stub (the message object stays in place
         // so tool_call/tool_result pairing remains valid) instead of keeping two
         // whole-file copies in history (#290).
+        // Keyed on path AND window (#362): reading page 2 of a large file used to
+        // blank page 1, because only the path was compared — paging through a
+        // file destroyed everything already read. Only a read of the SAME window
+        // (or a whole-file read, which subsumes every window) supersedes.
         const readPath = call.toolName === "readFile" && typeof inputObj.path === "string" ? inputObj.path : undefined;
+        const readWindow = readPath ? readWindowKey(inputObj) : undefined;
         if (readPath) {
           for (const m of this.history) {
-            if (m.role === "tool" && m.metadata?.filePath === readPath && !String(m.content).startsWith("[stale read")) {
-              m.content = `[stale read of ${readPath} superseded by a later read]`;
-            }
+            if (m.role !== "tool" || m.metadata?.filePath !== readPath) continue;
+            if (String(m.content).startsWith("[stale read")) continue;
+            const prevWindow = typeof m.metadata?.readWindow === "string" ? m.metadata.readWindow : "full";
+            // "full" supersedes anything; a windowed read supersedes only itself.
+            if (readWindow !== "full" && prevWindow !== readWindow) continue;
+            m.content = `[stale read of ${readPath} superseded by a later read]`;
           }
         }
 
         this.history.push({
           role: "tool",
           content: output,
-          metadata: { toolCallId: call.toolCallId, ...(readPath ? { filePath: readPath } : {}) },
+          metadata: {
+            toolCallId: call.toolCallId,
+            ...(readPath ? { filePath: readPath, readWindow } : {}),
+          },
         });
       }
     }
@@ -2268,11 +2300,22 @@ export class AgentLoop {
   private preflightSafety(toolName: string, input: Record<string, unknown>): SafetyViolation | null {
     // All command-running tools route their (model-overridable) command through the
     // dangerous-command validator, not just runCommand/runBackground (#252).
-    if (SHELL_COMMAND_TOOLS.has(toolName) && typeof input.command === "string") {
-      return (
-        this.safetyValidator.validateShellCommand(input.command) ??
-        this.safetyValidator.validateFilePath(input.command)
-      );
+    // EVERY string that ends up on the shell line is validated, not just
+    // `command` (#358): runFormat interpolates `path` into the command, so a
+    // path of `$(rm -rf ~)` used to reach sh without ever passing this gate —
+    // the one check that approval cannot override.
+    if (SHELL_COMMAND_TOOLS.has(toolName)) {
+      for (const key of ["command", "path", "cwd"]) {
+        const value = input[key];
+        if (typeof value !== "string" || !value) continue;
+        const violation =
+          this.safetyValidator.validateShellCommand(value) ??
+          this.safetyValidator.validateFilePath(value) ??
+          // path/cwd are plain paths — no substitution or chaining allowed.
+          (key === "command" ? null : this.safetyValidator.validateShellArgument(value));
+        if (violation) return violation;
+      }
+      return null;
     }
     // multiEdit carries a batch of {path} edits rather than a single path.
     if (toolName === "multiEdit" && Array.isArray(input.edits)) {
@@ -2684,7 +2727,7 @@ export class AgentLoop {
    * model in parallel, hitting the content-hash cache on repeats (#187). Invoked
    * when the cloud model calls the delegateToLocal tool in remote-brain mode.
    */
-  private async handleDelegateToLocal(input: Record<string, unknown>): Promise<string> {
+  private async handleDelegateToLocal(input: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
     if (!this.coordinator) return "Delegation unavailable: no local worker is configured.";
     const taskType = typeof input.taskType === "string" ? input.taskType : "";
     const inputs = Array.isArray(input.inputs) ? input.inputs : [];
@@ -2696,11 +2739,16 @@ export class AgentLoop {
       taskType,
       input: (inp && typeof inp === "object" ? inp : { value: inp }) as Record<string, unknown>,
     }));
-    const results = await this.coordinator.runParallelTasks(tasks as never, 4);
+    // Esc must cancel a long local batch (#365).
+    const results = await this.coordinator.runParallelTasks(tasks as never, 4, signal);
     const lines = results.map(
       (r, i) => `[${i}] ${r?.success ? JSON.stringify(r.output) : `FAILED: ${r?.error ?? "unknown error"}`}`,
     );
-    return `Delegated ${tasks.length} "${taskType}" task(s) to the local model:\n${lines.join("\n")}`.slice(0, 8000);
+    const cancelledCount = results.filter((r) => r?.error === "cancelled").length;
+    const header = cancelledCount
+      ? `Delegation CANCELLED — ${tasks.length - cancelledCount} of ${tasks.length} "${taskType}" task(s) completed:`
+      : `Delegated ${tasks.length} "${taskType}" task(s) to the local model:`;
+    return `${header}\n${lines.join("\n")}`.slice(0, 8000);
   }
 
   /**
@@ -2714,11 +2762,54 @@ export class AgentLoop {
     if (!objective) return "task requires an { objective } string.";
     if (this.subagentDepth >= 1) return "Sub-agents cannot spawn further sub-agents.";
     try {
-      const provider = this.getProvider(this.config.provider, this.config.model);
-      const text = await this.runSubagent(objective, provider, signal);
+      // Route the sub-agent like any other model call (#361). It used to hard-code
+      // this.config.provider/model, so /tier, per-tier model overrides and the
+      // budget downgrade silently didn't apply to delegated work, and its spend
+      // was attributed to whatever tier the parent happened to be on.
+      const decision = this.subagentRoute(objective);
+      const provider = decision
+        ? this.getProvider(decision.provider, decision.modelId)
+        : this.getProvider(this.config.provider, this.config.model);
+      if (decision) this.beginAttempt(decision.tier);
+      const { text, errors } = await this.runSubagent(objective, provider, signal);
+      // A failed sub-agent must NOT look like a successful one (#364): surface
+      // the error to the parent model instead of returning empty/partial text.
+      if (errors.length > 0) {
+        const detail = errors.join("; ").slice(0, 1000);
+        return text
+          ? `Sub-agent FAILED (${detail}). Partial output before the failure:\n${text}`.slice(0, 8000)
+          : `Sub-agent FAILED: ${detail}`;
+      }
       return text ? `Sub-agent result:\n${text}`.slice(0, 8000) : "(sub-agent produced no output)";
     } catch (err) {
       return `Sub-agent failed: ${errText(err)}`;
+    }
+  }
+
+  /** Tier decision for delegated sub-agent work: honors a forced tier and its
+   *  model override, otherwise asks the router (which applies the budget) (#361). */
+  private subagentRoute(objective: string): RouteDecision | null {
+    if (!this.router) return null;
+    if (this._forcedTier !== null) {
+      const tierKey =
+        this._forcedTier === 1 ? "tier1-local"
+        : this._forcedTier === 2 ? "tier2-medium"
+        : "tier3-cloud";
+      const override = this.tierOverrides.get(this._forcedTier);
+      if (override) {
+        return {
+          tier: tierKey as import("@metalmind/core").TaskTier,
+          modelId: override.model,
+          provider: override.provider,
+          reason: `forced tier ${this._forcedTier} (sub-agent, model override)`,
+        };
+      }
+      return this.router.decisionForTier(tierKey, `forced tier ${this._forcedTier} (sub-agent)`, false);
+    }
+    try {
+      return this.router.route(objective, 0, { conversationDepth: 0, historyTokens: 0 });
+    } catch {
+      return null; // never block delegation on a routing hiccup
     }
   }
 
@@ -2727,8 +2818,12 @@ export class AgentLoop {
    * and a short tool loop, returning its final text. Used by the `task` tool (#210)
    * and by auto-executed local-worker plan steps (#208).
    */
-  private async runSubagent(objective: string, provider: ModelProvider, signal?: AbortSignal): Promise<string> {
-    if (this.subagentDepth >= 1) return "";
+  private async runSubagent(
+    objective: string,
+    provider: ModelProvider,
+    signal?: AbortSignal,
+  ): Promise<{ text: string; errors: string[] }> {
+    if (this.subagentDepth >= 1) return { text: "", errors: ["nested sub-agents are not allowed"] };
     const savedHistory = this.history;
     const savedTurn = this.turnCount;
     // Don't leak the parent turn's @-mention/RAG context into the sub-agent — it
@@ -2751,10 +2846,14 @@ export class AgentLoop {
     if (ragContext) this.history.splice(1, 0, { role: "system", content: ragContext });
     try {
       let finalText = "";
+      // The loop reports failures as `error` events rather than throwing; dropping
+      // them made a dead sub-agent indistinguishable from a silent one (#364).
+      const errors: string[] = [];
       for await (const ev of this.agenticLoop([provider], this.toolDefs(), { signal, maxIterations: 6 })) {
         if (ev.type === "text") finalText += ev.text;
+        else if (ev.type === "error") errors.push(ev.message);
       }
-      return finalText.trim();
+      return { text: finalText.trim(), errors };
     } finally {
       this.history = savedHistory;
       this.turnCount = savedTurn;
@@ -2777,7 +2876,11 @@ export class AgentLoop {
       (step) => step.type === "local-worker",
       async (step) => {
         this.beginAttempt("tier2-medium"); // local-worker steps run on the local tier (#209)
-        const out = await this.runSubagent(step.description, localProvider, signal).catch(() => "");
+        const res = await this.runSubagent(step.description, localProvider, signal).catch((err) => ({
+          text: "",
+          errors: [errText(err)],
+        }));
+        const out = res.errors.length === 0 ? res.text : "";
         if (out) notes.push(`- ${step.description}: ${out}`);
         return { success: out.length > 0 };
       },
@@ -2858,7 +2961,31 @@ export class AgentLoop {
       (m.toolCalls?.length ? estimateTokens(JSON.stringify(m.toolCalls)) : 0) +
       (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
 
-    let total = this.history.reduce((s, m) => s + tokensOf(m), 0);
+    // Per-turn @-mention/RAG blocks are appended to EVERY request by
+    // requestMessages(), so they consume the window exactly like history does.
+    // They used to be invisible here: uncounted, never trimmed, and missing from
+    // the context meter — a few @-mentioned files could push a turn past the
+    // limit while the gauge still read "fine" (#363).
+    let turnContextTokens = this.turnContext.reduce((s, b) => s + estimateTokens(b), 0);
+    const TURN_CONTEXT_CAP = Math.max(1024, Math.floor(budget * 0.35));
+    if (turnContextTokens > TURN_CONTEXT_CAP) {
+      // Trim the largest blocks first so one huge @-mention can't crowd out the
+      // conversation; each keeps a head slice plus an explicit truncation note.
+      const order = this.turnContext
+        .map((b, i) => ({ i, t: estimateTokens(b) }))
+        .sort((a, b) => b.t - a.t);
+      for (const { i } of order) {
+        if (turnContextTokens <= TURN_CONTEXT_CAP) break;
+        const block = this.turnContext[i];
+        const excessTokens = turnContextTokens - TURN_CONTEXT_CAP;
+        const keepChars = Math.max(400, block.length - excessTokens * 4);
+        if (keepChars >= block.length) continue;
+        this.turnContext[i] = `${block.slice(0, keepChars)}\n…(turn context truncated to fit the context window)`;
+        turnContextTokens -= estimateTokens(block) - estimateTokens(this.turnContext[i]);
+      }
+    }
+
+    let total = this.history.reduce((s, m) => s + tokensOf(m), 0) + turnContextTokens;
     if (total > budget) {
       const sys = this.history[0]?.role === "system" ? [this.history[0]] : [];
       let rest = this.history.slice(sys.length);
@@ -3301,7 +3428,12 @@ export class AgentLoop {
           this.sessionId = this.sessionStore.createSession();
         } else {
           this.sessionId = opts.resumeId;
-          this.history = this.sessionStore.loadMessages(opts.resumeId);
+          // Don't clobber an already-adopted in-memory history (#368): after a
+          // model switch the handed-over history is at least as fresh as the
+          // store's copy, and reloading here would drop an unsaved tail.
+          if (this.history.length === 0) {
+            this.history = this.sessionStore.loadMessages(opts.resumeId);
+          }
         }
       } else if (opts.continue) {
         const recent = this.sessionStore.listSessions()[0];
@@ -3341,6 +3473,38 @@ export class AgentLoop {
   /** Public view of the conversation for the UI after edit/retry/branch (#204). */
   conversation(): AgentMessage[] {
     return this.displayMessages();
+  }
+
+  /**
+   * Carry session state across an agent REPLACEMENT (#368). A model/provider
+   * switch builds a brand-new AgentLoop; without this the conversation, plan
+   * mode, forced tier, staged images and task list were silently discarded while
+   * the UI kept rendering them — the next message started from nothing.
+   *
+   * Returns the session id to resume, so the caller can pass it to
+   * initPersistence and keep writing to the SAME persisted session.
+   */
+  adoptStateFrom(previous: AgentLoop): string | undefined {
+    this.history = previous.history.map((m) => ({ ...m }));
+    this.turnCount = previous.turnCount;
+    this.mode = previous.mode;
+    this._forcedTier = previous._forcedTier;
+    this.tierOverrides = new Map(previous.tierOverrides);
+    this.remoteBrain = previous.remoteBrain;
+    this.pendingImages = [...previous.pendingImages];
+    this.todos = previous.todos.map((t) => ({ ...t }));
+    this.sessionUsage = { ...previous.sessionUsage };
+    this.editStack = [...previous.editStack];
+    this.redoStack = [...previous.redoStack];
+    this.turnCheckpoints = [...previous.turnCheckpoints];
+    // The prompt was built by the previous instance (possibly for a different
+    // model/tier); rebuild it, and re-publish the task list to the new UI hook.
+    if (this.history[0]?.role === "system") {
+      this.history[0] = { role: "system", content: this.buildSystemPrompt() };
+    }
+    this.systemPromptDirty = true;
+    if (this.todos.length) this.onTodos?.(this.todos);
+    return previous.sessionId ?? undefined;
   }
 
   /**
