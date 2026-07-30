@@ -22,7 +22,7 @@ const OUTPUT_CAP = 10 * 1024 * 1024;
  *  whole turn. After exit we give stdio a short grace to flush, then settle.
  *  Kill/abort also force-settle on their own, and the process GROUP is killed
  *  (detached + kill(-pid)) so grandchildren don't survive the timeout. */
-function runShellAsync(command: string, cwd: string, timeoutMs: number | undefined, signal?: AbortSignal): Promise<RunResult> {
+function runShellAsync(command: string, cwd: string, timeoutMs: number | undefined, signal?: AbortSignal, onOutput?: (chunk: string) => void): Promise<RunResult> {
   // Direct execute() calls (tests, registry bypass) may skip zod defaults.
   const effectiveTimeout = timeoutMs && timeoutMs >= 1000 ? timeoutMs : 120_000;
   return new Promise((resolvePromise) => {
@@ -31,10 +31,14 @@ function runShellAsync(command: string, cwd: string, timeoutMs: number | undefin
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => {
-      if (stdout.length < OUTPUT_CAP) stdout += d.toString();
+      const t = d.toString();
+      if (stdout.length < OUTPUT_CAP) stdout += t;
+      onOutput?.(t);
     });
     child.stderr?.on("data", (d: Buffer) => {
-      if (stderr.length < OUTPUT_CAP) stderr += d.toString();
+      const t = d.toString();
+      if (stderr.length < OUTPUT_CAP) stderr += t;
+      onOutput?.(t);
     });
 
     let settled = false;
@@ -108,7 +112,7 @@ export const runCommandTool: AgentTool<z.input<typeof runCommandSchema>, string>
       }
     }
 
-    const r = await runShellAsync(input.command, input.cwd ?? ctx.projectRoot, input.timeout, ctx.signal);
+    const r = await runShellAsync(input.command, input.cwd ?? ctx.projectRoot, input.timeout, ctx.signal, ctx.onOutput);
     return render(r, `Exit: ${r.exitCode}`);
   },
 });
@@ -124,7 +128,7 @@ export const runTestsTool: AgentTool<z.input<typeof runTestsSchema>, string> = c
   inputSchema: runTestsSchema,
   requiresConfirmation: false,
   async execute(input: z.output<typeof runTestsSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const r = await runShellAsync(input.command ?? "npm test", ctx.projectRoot, input.timeout, ctx.signal);
+    const r = await runShellAsync(input.command ?? "npm test", ctx.projectRoot, input.timeout, ctx.signal, ctx.onOutput);
     return render(r, r.exitCode === 0 ? "Tests passed" : "Tests FAILED");
   },
 });
@@ -140,7 +144,7 @@ export const runBuildTool: AgentTool<z.input<typeof runBuildSchema>, string> = c
   inputSchema: runBuildSchema,
   requiresConfirmation: false,
   async execute(input: z.output<typeof runBuildSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const r = await runShellAsync(input.command ?? "npm run build", ctx.projectRoot, input.timeout, ctx.signal);
+    const r = await runShellAsync(input.command ?? "npm run build", ctx.projectRoot, input.timeout, ctx.signal, ctx.onOutput);
     return render(r, r.exitCode === 0 ? "Build succeeded" : "Build FAILED");
   },
 });
@@ -156,7 +160,7 @@ export const runLintTool: AgentTool<z.input<typeof runLintSchema>, string> = cre
   inputSchema: runLintSchema,
   requiresConfirmation: false,
   async execute(input: z.output<typeof runLintSchema>, ctx: ToolExecutionContext): Promise<string> {
-    const r = await runShellAsync(input.command ?? "npm run lint", ctx.projectRoot, input.timeout, ctx.signal);
+    const r = await runShellAsync(input.command ?? "npm run lint", ctx.projectRoot, input.timeout, ctx.signal, ctx.onOutput);
     return render(r, r.exitCode === 0 ? "Lint passed" : "Lint failed");
   },
 });
@@ -176,7 +180,7 @@ export const runFormatTool: AgentTool<z.input<typeof runFormatSchema>, string> =
   async execute(input: z.output<typeof runFormatSchema>, ctx: ToolExecutionContext): Promise<string> {
     const base = input.command ?? "npx prettier --write";
     const cmd = input.path ? `${base} ${JSON.stringify(input.path)}` : base;
-    const r = await runShellAsync(cmd, ctx.projectRoot, input.timeout, ctx.signal);
+    const r = await runShellAsync(cmd, ctx.projectRoot, input.timeout, ctx.signal, ctx.onOutput);
     return render(r, r.exitCode === 0 ? "Format complete" : "Format failed");
   },
 });

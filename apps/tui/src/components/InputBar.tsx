@@ -4,6 +4,7 @@ import TextInput from "ink-text-input";
 import { parseBracketedPaste, endsWithContinuation, applyContinuation } from "../multiline.js";
 import { vimKey, initialVimState } from "../vim.js";
 import { readdirSync } from "node:fs";
+import { loadUserCommands, type UserCommand } from "../user-commands.js";
 import { join } from "node:path";
 
 const PATH_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "out", "coverage", ".turbo", "target", ".venv", "__pycache__", ".metalmind"]);
@@ -42,6 +43,7 @@ const SLASH_COMMANDS = [
   { syntax: "/lint ",       description: "Run the linter; result feeds the model" },
   { syntax: "/tree",        description: "Browse project files" },
   { syntax: "/notifications", description: "Show recent notifications" },
+  { syntax: "/doctor",      description: "Diagnose environment (ollama, keys, CLIs)" },
   { syntax: "/tier ",       description: "Force a tier: 1|2|3|auto [model]" },
   { syntax: "/cost",        description: "Show this session's token usage" },
   { syntax: "/budget ",     description: "View or set the session spend cap" },
@@ -116,8 +118,22 @@ export default function InputBar({ onSubmit, disabled = false, accent = "cyan", 
   const [dismissed, setDismissed] = useState(false);
   const wasAtMatch = useRef(false);
 
-  const slashMatches = value.startsWith("/")
-    ? SLASH_COMMANDS.filter((c) => c.syntax.startsWith(value))
+  // User-defined commands join the autocomplete; reloaded when the "/" popup
+  // (re)opens so newly created files appear without a restart.
+  const userCmdsRef = useRef<UserCommand[] | null>(null);
+  const wasSlash = useRef(false);
+  const isSlash = value.startsWith("/");
+  if (isSlash && (!wasSlash.current || userCmdsRef.current === null)) {
+    userCmdsRef.current = projectRoot ? loadUserCommands(projectRoot) : [];
+  }
+  wasSlash.current = isSlash;
+  const slashMatches = isSlash
+    ? [
+        ...SLASH_COMMANDS.filter((c) => c.syntax.startsWith(value)),
+        ...(userCmdsRef.current ?? [])
+          .filter((c) => `/${c.name}`.startsWith(value.split(" ")[0]))
+          .map((c) => ({ syntax: `/${c.name} `, description: `(custom) ${c.description}` })),
+      ]
     : [];
   // @-path completion (#277): complete the trailing @token against the project tree.
   const atMatch = !value.startsWith("/") && projectRoot ? /@([A-Za-z0-9_./-]*)$/.exec(value) : null;

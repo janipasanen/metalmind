@@ -17,6 +17,7 @@ import { handleAllowCommand } from "../approval-allowlist.js";
 import { diagnosticsReport } from "../error-log.js";
 import { handleCopyCommand } from "../copy-command.js";
 import { VIM_HELP } from "../vim.js";
+import { loadUserCommands, expandUserCommand } from "../user-commands.js";
 import type { TuiConfig } from "../config.js";
 import { Coordinator, SafetyValidator } from "@metalmind/core";
 import type { CoordinatorPhase, PlanStep } from "@metalmind/core";
@@ -110,6 +111,8 @@ export default function App({ config }: AppProps) {
   const [agentMode, setAgentMode] = useState<"build" | "plan">("build");
   const [todos, setTodos] = useState<Array<{ text: string; status: "pending" | "in_progress" | "completed" }>>([]);
   const [pendingInsert, setPendingInsert] = useState<{ text: string; nonce: number } | null>(null);
+  /** Live tail of the currently-running tool's output (already redacted). */
+  const [liveTool, setLiveTool] = useState<{ name: string; tail: string } | null>(null);
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
@@ -169,6 +172,8 @@ export default function App({ config }: AppProps) {
             new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
           onUsage: (u) => setUsage(u),
           onTodos: (t) => setTodos(t),
+          onToolProgress: (name, chunk) =>
+            setLiveTool((prev) => ({ name, tail: ((prev?.name === name ? prev.tail : "") + chunk).slice(-600) })),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -226,6 +231,8 @@ export default function App({ config }: AppProps) {
             new Promise<ApprovalDecision>((resolve) => setPendingApproval({ req, resolve })),
           onUsage: (u) => setUsage(u),
           onTodos: (t) => setTodos(t),
+          onToolProgress: (name, chunk) =>
+            setLiveTool((prev) => ({ name, tail: ((prev?.name === name ? prev.tail : "") + chunk).slice(-600) })),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -305,6 +312,8 @@ export default function App({ config }: AppProps) {
           "  /test|/check|/lint [cmd] - Run tests / project check / lint; results feed the model",
           "  /checkpoints | /rollback [turn] - List / restore turn-level git worktree checkpoints",
           "  /notifications    - Show recent notifications (errors, warnings, MCP status)",
+          "  /doctor           - Check ollama/cloud key/gh/rg/LSP/persistence with fixes",
+          "  /<custom>         - Your own commands: .metalmind/commands/<name>.md ($ARGUMENTS)",
           "  /keychain         - save | load | status — macOS keychain key storage",
           "  /retry            - Re-run the last prompt (drops the prior answer)",
           "  /edit <text>      - Replace + re-run the last prompt",
@@ -596,6 +605,17 @@ export default function App({ config }: AppProps) {
         else {
           yield { type: "text", text: "Preparing pull request…" } as const;
           yield { type: "text", text: `\n${await agent.prFlow(input.slice(3).trim(), signal)}` } as const;
+        }
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/doctor") {
+        const agent = agentRef.current;
+        if (!agent) { yield { type: "text", text: "Agent not initialised." } as const; }
+        else {
+          yield { type: "text", text: "Running checks…" } as const;
+          yield { type: "text", text: `\n${await agent.doctorReport()}` } as const;
         }
         yield { type: "done" } as const;
         return;
@@ -936,6 +956,27 @@ export default function App({ config }: AppProps) {
         return;
       }
 
+      // User-defined slash commands (.metalmind/commands/<name>.md): run the
+      // template as the prompt. Unknown /commands get a hint instead of being
+      // sent to the LLM as literal chat.
+      if (input.startsWith("/")) {
+        const m = /^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(input);
+        if (m) {
+          const uc = loadUserCommands(agentRef.current.projectRootPath ?? process.cwd()).find((c) => c.name === m[1]);
+          if (uc) {
+            yield { type: "text", text: `⚡ /${uc.name}\n` } as const;
+            yield* agentRef.current.run(expandUserCommand(uc, m[2]?.trim() ?? ""), signal);
+            return;
+          }
+          yield {
+            type: "text",
+            text: `Unknown command /${m[1]}. /help lists built-ins; define your own as .metalmind/commands/${m[1]}.md (the file's content becomes the prompt, $ARGUMENTS = your args).`,
+          } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+      }
+
       yield* agentRef.current.run(input, signal);
     },
   });
@@ -945,8 +986,14 @@ export default function App({ config }: AppProps) {
 
   const handleSend = useCallback((text: string) => {
     setScrollOffset(0); // jump back to the live tail on a new turn (#159)
+    setLiveTool(null);
     sendMessage(text);
   }, [sendMessage]);
+
+  // Drop the live tool tail once the turn finishes.
+  useEffect(() => {
+    if (!isStreaming) setLiveTool(null);
+  }, [isStreaming]);
 
   // Any modal overlay is open: each overlay owns its own input, so the global
   // key handler and the chat InputBar must stand down to avoid double-handling (#254).
@@ -1021,6 +1068,14 @@ export default function App({ config }: AppProps) {
       {streamingReasoning && !streamingContent && (
         <Box>
           <Text color="gray" dimColor>{"💭 "}reasoning… {streamingReasoning.split("\n").pop()?.slice(-160)}</Text>
+        </Box>
+      )}
+      {isStreaming && liveTool && (
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+          <Text bold dimColor>▸ {liveTool.name} (live)</Text>
+          {liveTool.tail.split("\n").filter(Boolean).slice(-4).map((l, i) => (
+            <Text key={i} dimColor>{l.slice(0, 160)}</Text>
+          ))}
         </Box>
       )}
       <MultiAgentStatus

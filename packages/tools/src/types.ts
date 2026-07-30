@@ -7,6 +7,9 @@ export interface ToolExecutionContext {
   auditLog?: (entry: ToolAuditEntry) => void;
   /** Turn-level abort signal — long-running tools should honour it (#284). */
   signal?: AbortSignal;
+  /** Live output callback: long-running tools (shell) push chunks here as they
+   *  arrive so the UI can show progress instead of a silent spinner. */
+  onOutput?: (chunk: string) => void;
 }
 
 export interface ToolAuditEntry {

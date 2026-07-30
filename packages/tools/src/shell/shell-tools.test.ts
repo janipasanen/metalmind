@@ -120,3 +120,19 @@ describe("runFormatTool (#162)", () => {
     expect(result).toContain("Format failed");
   });
 });
+
+describe("live output streaming (gap-5)", () => {
+  it("forwards stdout chunks to ctx.onOutput as they arrive", async () => {
+    const chunks: string[] = [];
+    const result = await runCommandTool.execute(
+      { command: "echo first; sleep 0.2; echo second" },
+      { projectRoot: process.cwd(), onOutput: (c) => chunks.push(c) },
+    );
+    expect(result).toContain("first");
+    expect(result).toContain("second");
+    // Streaming delivered at least two separate chunks (not one final blob).
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    expect(chunks.join("")).toContain("first");
+    expect(chunks.join("")).toContain("second");
+  });
+});

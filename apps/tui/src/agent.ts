@@ -479,6 +479,8 @@ export interface AgentLoopOptions {
   onCoordinatorPlan?: (steps: PlanStep[]) => void;
   /** Model-managed task list updates (setTodos tool) (#276). */
   onTodos?: (todos: TodoItem[]) => void;
+  /** Live output chunks from long-running tools (shell), already redacted. */
+  onToolProgress?: (toolName: string, chunk: string) => void;
   /** Called before each turn with the history token usage vs the active model's limit. */
   onContextUsage?: (used: number, limit: number) => void;
   /** Called when real token usage is reported by a provider (#157). */
@@ -497,6 +499,7 @@ export class AgentLoop {
   private onCoordinatorRouting?: (decision: ModelRoutingDecision) => void;
   private onCoordinatorPlan?: (steps: PlanStep[]) => void;
   private onTodos?: (todos: TodoItem[]) => void;
+  private onToolProgress?: (toolName: string, chunk: string) => void;
   private todos: TodoItem[] = [];
   private onContextUsage?: (used: number, limit: number) => void;
   private onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
@@ -570,6 +573,7 @@ export class AgentLoop {
     this.onCoordinatorRouting = options.onCoordinatorRouting;
     this.onCoordinatorPlan = options.onCoordinatorPlan;
     this.onTodos = options.onTodos;
+    this.onToolProgress = options.onToolProgress;
     this.onContextUsage = options.onContextUsage;
     this.onUsage = options.onUsage;
     this.onApprovalRequest = options.onApprovalRequest;
@@ -824,7 +828,17 @@ export class AgentLoop {
    *  gate and record the result in history so the model sees it next turn.
    *  `signal` makes Esc actually cancel the run (the shell tools honour it). */
   async verifyFlow(kind: "test" | "check" | "lint", cmdOverride?: string, signal?: AbortSignal): Promise<string> {
-    const ctx = { projectRoot: this.projectRoot, workspaceRoots: this.workspaceRoots, auditLog: this.auditLogRedacted, signal };
+    const progressRedactor = new StreamRedactor(this.redactor);
+    const ctx = {
+      projectRoot: this.projectRoot,
+      workspaceRoots: this.workspaceRoots,
+      auditLog: this.auditLogRedacted,
+      signal,
+      onOutput: (chunk: string) => {
+        const safe = progressRedactor.push(chunk);
+        if (safe) this.onToolProgress?.(`/${kind}`, safe);
+      },
+    };
     let toolName: string;
     let input: Record<string, unknown>;
     if (kind === "check") {
@@ -894,7 +908,7 @@ export class AgentLoop {
     let generationFailed = false;
     try {
       const provider = this.getProvider(this.config.provider, this.config.model);
-      const res = await provider.completeChat({
+      const res = await this.completeChatWithRetry(provider, {
         messages: [
           {
             role: "system",
@@ -950,7 +964,7 @@ export class AgentLoop {
     let body = "";
     try {
       const provider = this.getProvider(this.config.provider, this.config.model);
-      const res = await provider.completeChat({
+      const res = await this.completeChatWithRetry(provider, {
         messages: [
           {
             role: "system",
@@ -1250,6 +1264,99 @@ export class AgentLoop {
     return [...builtIn, ...mcp, ...delegate, ...task, ...remember, ...todos];
   }
 
+  /** /doctor: actionable environment diagnosis for onboarding and debugging.
+   *  Each check is independent and never throws — ✓/✗ per line with the fix. */
+  async doctorReport(): Promise<string> {
+    const lines: string[] = ["MetalMind doctor:"];
+    const check = (ok: boolean, label: string, detail: string) => lines.push(`  ${ok ? "✓" : "✗"} ${label} — ${detail}`);
+
+    lines.push(`  · node ${process.version} on ${process.platform}`);
+
+    // Local Ollama daemon
+    try {
+      const res = await fetch("http://127.0.0.1:11434/api/tags", { signal: AbortSignal.timeout(3000) });
+      const models = res.ok ? (((await res.json()) as { models?: unknown[] }).models?.length ?? 0) : 0;
+      check(res.ok, "local ollama", res.ok ? `running, ${models} model(s) installed` : `responded ${res.status}`);
+    } catch {
+      check(false, "local ollama", "not reachable at 127.0.0.1:11434 — install/start Ollama for local tiers");
+    }
+
+    // Ollama Cloud key
+    const cloudKey = process.env.OLLAMA_API_KEY || loadXdgConfig().apiKeys?.["ollama"] || loadXdgConfig().apiKeys?.["ollama-cloud"];
+    if (!cloudKey) {
+      check(false, "ollama cloud", "no API key — set OLLAMA_API_KEY (or /apikey) to enable the cloud tier");
+    } else {
+      try {
+        const res = await fetch("https://api.ollama.com/api/tags", {
+          headers: { Authorization: `Bearer ${cloudKey}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        const models = res.ok ? (((await res.json()) as { models?: unknown[] }).models?.length ?? 0) : 0;
+        check(res.ok, "ollama cloud", res.ok ? `key valid, ${models} model(s) available` : `key rejected (${res.status}) — check OLLAMA_API_KEY`);
+      } catch {
+        check(false, "ollama cloud", "api.ollama.com not reachable (network?)");
+      }
+    }
+
+    // Active provider/model
+    try {
+      const h = await this.checkHealth();
+      check(h.ok, `active model (${this.config.provider}/${this.config.model})`, h.ok ? "healthy" : h.message);
+    } catch (err) {
+      check(false, `active model (${this.config.provider}/${this.config.model})`, errText(err));
+    }
+
+    // CLI dependencies
+    const cli = (cmd: string, args: string[], label: string, why: string) => {
+      try {
+        const out = execFileSync(cmd, args, { encoding: "utf-8", timeout: 5000 }).split("\n")[0].trim();
+        check(true, label, out);
+      } catch {
+        check(false, label, why);
+      }
+    };
+    cli("rg", ["--version"], "ripgrep", "not found — brew install ripgrep (search falls back to a slower walk)");
+    cli("gh", ["--version"], "gh CLI", "not found — brew install gh (needed for /pr)");
+    cli("git", ["--version"], "git", "not found — required for /commit, checkpoints, and git tools");
+    try {
+      execFileSync("which", ["typescript-language-server"], { encoding: "utf-8", timeout: 5000 });
+      check(true, "typescript-language-server", "installed (live diagnostics enabled)");
+    } catch {
+      check(false, "typescript-language-server", "not found — npm i -g typescript-language-server for live diagnostics");
+    }
+
+    // Project check command
+    const cc = this.checkCommand();
+    check(cc !== null, "project check", cc ? `"${cc}" runs after edited turns (/check)` : "none — set editor.checkCommand or add a tsconfig.json");
+
+    // Persistence
+    check(this.sessionStore !== null, "session persistence", this.sessionStore ? "sqlite store open" : "disabled (better-sqlite3 failed to load — npm rebuild better-sqlite3)");
+
+    return lines.join("\n");
+  }
+
+  /** completeChat with bounded retries on TRANSIENT provider errors (429/5xx/
+   *  network). streamResilient already retries streams; the non-streaming flows
+   *  (/commit message, /pr body, triage, compaction) previously failed on the
+   *  first blip. Honours Retry-After and never retries a user abort. */
+  private async completeChatWithRetry(
+    provider: ModelProvider,
+    req: Parameters<ModelProvider["completeChat"]>[0],
+  ): Promise<Awaited<ReturnType<ModelProvider["completeChat"]>>> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try {
+        return await provider.completeChat(req);
+      } catch (err) {
+        lastErr = err;
+        if (req.signal?.aborted || isAbortError(err) || !isRetryableError(err) || attempt === 2) throw err;
+        const wait = err instanceof ProviderError && err.retryAfterMs ? err.retryAfterMs : 500 * (attempt + 1);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+    throw lastErr;
+  }
+
   /** Provider for the cheap triage classification — prefer a local model so an
    *  ambiguous task isn't classified by the (possibly metered cloud) active
    *  provider (#248). Local providers need no key, and buildTriage already
@@ -1291,7 +1398,7 @@ export class AgentLoop {
 
       try {
         const local = this.triageProvider();
-        const res = await local.completeChat({
+        const res = await this.completeChatWithRetry(local, {
           messages: [
             {
               role: "system",
@@ -1958,11 +2065,18 @@ export class AgentLoop {
               output = await this.callMcpAudited(mcpEntry.client, mcpEntry.def.name, inputObj);
             }
           } else {
+            // Stream long-running tool output live (redacted across chunk
+            // boundaries) so e.g. a test run shows progress, not a silent spinner.
+            const progressRedactor = new StreamRedactor(this.redactor);
             const result = await this.registry.execute(call.toolName, inputObj, {
               projectRoot: this.projectRoot,
               workspaceRoots: this.workspaceRoots,
               auditLog: this.auditLogRedacted, // record every built-in tool call (#147)
               signal, // Esc cancels long-running tools mid-flight (#284)
+              onOutput: (chunk) => {
+                const safe = progressRedactor.push(chunk);
+                if (safe) this.onToolProgress?.(call.toolName, safe);
+              },
             });
             output = typeof result === "string" ? result : JSON.stringify(result);
             // Post-edit feedback loop: re-index, optional format, append diagnostics.
@@ -3247,7 +3361,7 @@ export class AgentLoop {
 
     try {
       const provider = this.getProvider(this.config.provider, this.config.model);
-      const res = await provider.completeChat({
+      const res = await this.completeChatWithRetry(provider, {
         messages: [
           {
             role: "system",
