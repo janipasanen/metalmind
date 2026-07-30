@@ -39,39 +39,35 @@ async function collect(gen: AsyncGenerator<ChatStreamEvent>): Promise<ChatStream
 }
 
 // We test the agent loop logic directly by mocking the provider factory
-vi.mock("@metalmind/providers", () => ({
-  createProvider: vi.fn(),
-  OllamaWorkerProvider: class {
-    providerName = "ollama-worker";
-    private modelId: string;
-    private baseUrl: string;
-    constructor(modelId: string, baseUrl = "http://127.0.0.1:11434") {
-      this.modelId = modelId;
-      this.baseUrl = baseUrl;
-    }
-    async isAvailable() {
-      try {
-        const res = await fetch(`${this.baseUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
-        return res.ok;
-      } catch {
-        return false;
+// Mock ONLY the provider FACTORY (#414). Error classification — ProviderError,
+// isRetryableError, isProviderScopedError, isAbortError — comes from the real
+// module via importOriginal, so streamResilient's retry/fallback decisions are
+// exercised against production semantics. The previous hand-written stubs had
+// drifted (they omitted isProviderScopedError entirely, added in #384), which
+// is exactly how an untested engine stays untested.
+vi.mock("@metalmind/providers", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@metalmind/providers")>();
+  return {
+    ...actual,
+    createProvider: vi.fn(),
+    OllamaWorkerProvider: class {
+      providerName = "ollama-worker";
+      private baseUrl: string;
+      constructor(_modelId: string, baseUrl = "http://127.0.0.1:11434") {
+        this.baseUrl = baseUrl;
       }
-    }
-    async sendTask() { return "{}"; }
-  },
-  ProviderError: class extends Error {
-    status?: number;
-    retryAfterMs?: number;
-    constructor(message: string, opts: { status?: number; retryAfterMs?: number } = {}) {
-      super(message);
-      this.status = opts.status;
-      this.retryAfterMs = opts.retryAfterMs;
-    }
-    get retryable() { return this.status === undefined || this.status === 429 || this.status >= 500; }
-  },
-  isAbortError: (err: unknown) => err instanceof Error && (err.name === "AbortError" || /aborted/i.test(err.message)),
-  isRetryableError: (err: unknown) => !(err instanceof Error && /\b4\d\d\b/.test(err.message)),
-}));
+      async isAvailable() {
+        try {
+          const res = await fetch(`${this.baseUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
+          return res.ok;
+        } catch {
+          return false;
+        }
+      }
+      async sendTask() { return "{}"; }
+    },
+  };
+});
 
 vi.mock("@metalmind/tools", async () => {
   const fs = await import("node:fs");
@@ -485,6 +481,10 @@ describe("AgentLoop quality gate + escalation", () => {
   function text(events: { type: string; text?: string }[]): string {
     return events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
   }
+  /** Agent status banners — a separate channel from model output since #404. */
+  function notices(events: { type: string; text?: string }[]): string {
+    return events.filter((e) => e.type === "notice").map((e) => (e as { text: string }).text).join("");
+  }
 
   it("escalates to cloud when the local model returns an empty response", async () => {
     mockCreateProvider.mockImplementation((provider: string, model: string) => {
@@ -501,7 +501,10 @@ describe("AgentLoop quality gate + escalation", () => {
     const events = await collect(loop.run("explain recursion conceptually"));
 
     expect(text(events)).toContain("cloud answer");
-    expect(text(events)).toContain("escalating");
+    // The escalation banner is a NOTICE now, deliberately kept out of the
+    // model's text so it is never persisted as the assistant's words (#404).
+    expect(notices(events)).toContain("escalating");
+    expect(text(events)).not.toContain("escalating");
     expect(routes.at(-1)?.provider).toBe("anthropic");
     expect(routes.at(-1)?.tier).toBe("tier3-cloud");
   });
@@ -2487,5 +2490,108 @@ describe("undo/checkpoint safety net (gap7 #374/#382)", () => {
     expect(report).toMatch(/skipped/i);
     expect(readFileSync(file, "utf8")).toBe("USER EDIT AFTER THE AGENT"); // preserved
     rmSync(file, { force: true });
+  });
+});
+
+describe("control-plane notices are not model output (gap9 #404)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("a retry banner is shown but never persisted as the assistant's words", async () => {
+    let calls = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        calls++;
+        // A transient NETWORK error (no 4xx code) is retryable; a raw "429 …"
+        // message is classified as fatal, so it would never reach the banner.
+        if (calls === 1) throw new Error("ECONNRESET socket hang up");
+        yield { type: "text", text: "The real answer." };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("hi"));
+
+    // The user still sees the retry banner…
+    const notices = events.filter((e) => e.type === "notice").map((e) => (e as { text: string }).text).join("");
+    expect(notices).toMatch(/retrying in/);
+    // …but it is NOT part of the model's text stream…
+    const text = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+    expect(text).toBe("The real answer.");
+    // …and it is NOT in the persisted history.
+    const assistant = loop.conversation().filter((m) => m.role === "assistant");
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].content).toBe("The real answer.");
+    expect(assistant[0].content).not.toMatch(/busy|retrying/);
+  });
+});
+
+describe("streamResilient retry + fallback engine (gap9 #414)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  /** Provider whose stream behaves per-attempt: throw, or emit text. */
+  function scriptedProvider(name: string, script: Array<Error | string>) {
+    let call = 0;
+    return {
+      providerName: name,
+      supportedCapabilities: { maximumContextTokens: 128_000 } as never,
+      async *streamChatCompletion() {
+        const step = script[Math.min(call++, script.length - 1)];
+        if (step instanceof Error) throw step;
+        yield { type: "text", text: step };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never;
+  }
+
+  it("retries a transient failure on the SAME provider and completes", async () => {
+    mockCreateProvider.mockReturnValue(
+      scriptedProvider("stub", [new Error("ECONNRESET"), "recovered answer"]),
+    );
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("go"));
+    const text = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+    expect(text).toBe("recovered answer");
+    expect(events.some((e) => e.type === "error")).toBe(false);
+  });
+
+  it("does NOT retry a fatal 4xx and surfaces the error", async () => {
+    const fatal = new Error("400 Bad Request");
+    mockCreateProvider.mockReturnValue(scriptedProvider("stub", [fatal, "should never be reached"]));
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("go"));
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    const text = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+    expect(text).not.toContain("should never be reached");
+  });
+
+  it("stops retrying once the attempt budget is exhausted", async () => {
+    let attempts = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        attempts++;
+        throw new Error("ETIMEDOUT");
+        yield { type: "done" }; // unreachable, keeps the generator typed
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("go"));
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    // Bounded: a handful of attempts, not an unbounded spin.
+    expect(attempts).toBeGreaterThan(1);
+    expect(attempts).toBeLessThanOrEqual(4);
   });
 });

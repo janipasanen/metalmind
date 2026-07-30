@@ -146,7 +146,7 @@ function globMatch(name: string, pattern: string): boolean {
   }
 }
 
-const WALK_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "out", "coverage", ".turbo", "target"]);
+const WALK_IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "dist-tsc", "build", ".next", "out", "coverage", ".turbo", "target", ".venv", "__pycache__", ".DS_Store"]);
 
 function walkDir(dir: string): string[] {
   const results: string[] = [];
@@ -154,8 +154,10 @@ function walkDir(dir: string): string[] {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
         // Fallback-walk ignores: skip vendored/build/VCS dirs so we don't walk
-        // (and then truncate) node_modules on large repos.
-        if (WALK_IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        // (and then truncate) node_modules on large repos. Dot-directories are
+        // NOT skipped wholesale (#406) — .github/.claude/.vscode are ordinary
+        // project content; only the genuinely uninteresting ones are listed.
+        if (WALK_IGNORE_DIRS.has(entry.name)) continue;
         results.push(...walkDir(join(dir, entry.name)));
       } else {
         results.push(join(dir, entry.name));
@@ -201,7 +203,10 @@ export const findFilesTool: AgentTool<z.input<typeof findFilesSchema>, string> =
     // match relative paths; output is relative to searchDir.
     const rg = spawnSync(
       "rg",
-      ["--files", "--glob", glob, "--glob", "!**/node_modules/**", "--glob", "!**/.git/**"],
+      // --hidden so dot-directories (.github, .claude, .vscode) are findable —
+      // rg hides them by default, so `findFiles("*.yml")` silently missed every
+      // workflow file (#406). .git stays excluded.
+      ["--files", "--hidden", "--glob", glob, "--glob", "!**/node_modules/**", "--glob", "!**/.git/**"],
       { cwd: searchDir, encoding: "utf-8", timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
     );
 
@@ -242,7 +247,12 @@ export const findFilesTool: AgentTool<z.input<typeof findFilesSchema>, string> =
   },
 });
 
-export const searchInFilesSchema = z.object({
+export /** Per-file match cap handed to ripgrep. Surfaced in the output when hit (#407):
+ *  silently stopping at 100 matches in a file let the model conclude it had seen
+ *  every occurrence of a symbol it was about to rename. */
+const PER_FILE_MATCH_CAP = 500;
+
+const searchInFilesSchema = z.object({
   pattern: z.string().min(1),
   path: z.string().default("."),
   include: z.string().optional(),
@@ -292,7 +302,17 @@ export const searchInFilesTool: AgentTool<z.input<typeof searchInFilesSchema>, s
     const validator = new PathValidator(context.projectRoot, context.workspaceRoots);
     const safePath = validator.resolveSafePath(input.path);
 
-    const args: string[] = ["--color=never", "--max-count=100"];
+    // --hidden makes dot-directories searchable (#406): .github, .claude,
+    // .vscode, .metalmind are ordinary project content, and rg skips them by
+    // default — a search for a workflow or a rule file returned NOTHING with no
+    // indication why. .git stays excluded explicitly (it is not source).
+    // --max-count is applied per file, so it is raised and reported (#407).
+    const args: string[] = [
+      "--color=never",
+      "--hidden",
+      "--glob", "!**/.git/**",
+      "--max-count", String(PER_FILE_MATCH_CAP),
+    ];
     if (input.filesOnly) args.push("-l");
     else args.push("--heading", "--line-number");
     if (input.ignoreCase) args.push("-i");
@@ -336,7 +356,20 @@ export const searchInFilesTool: AgentTool<z.input<typeof searchInFilesSchema>, s
       })
       .join("\n");
 
-    return capSearchOutput(out, input.headLimit);
+    // Warn when any single file hit the per-file cap (#407): rg stops counting
+    // there, so the model must not treat the result as exhaustive.
+    const perFileHits = new Map<string, number>();
+    let currentFile = "";
+    for (const l of out.split("\n")) {
+      if (l && !/^\d+[-:]/.test(l) && !l.startsWith("--")) currentFile = l;
+      else if (/^\d+:/.test(l)) perFileHits.set(currentFile, (perFileHits.get(currentFile) ?? 0) + 1);
+    }
+    const saturated = [...perFileHits.entries()].filter(([, n]) => n >= PER_FILE_MATCH_CAP).map(([f]) => f);
+    const capNote = saturated.length
+      ? `\n…(per-file cap of ${PER_FILE_MATCH_CAP} matches reached in ${saturated.length} file(s) — results are NOT exhaustive there: ${saturated.slice(0, 5).join(", ")})`
+      : "";
+
+    return capSearchOutput(out, input.headLimit) + capNote;
   },
 });
 

@@ -26,7 +26,11 @@ function appendCapped(existing: string, chunk: string): string {
 /** Spawn a detached-from-the-loop background process and return its handle id. */
 export function startBackgroundProcess(command: string, cwd: string): string {
   const id = `bg-${++counter}`;
-  const child = spawn(command, { shell: true, cwd });
+  // detached: the shell becomes a process-GROUP leader, so stop/killAll can
+  // signal the whole group. Without it only the wrapper `sh -c` was signalled
+  // and the actual server (its grandchild) survived while status said
+  // "stopped" — a dev server kept holding its port for the rest of the day (#408).
+  const child = spawn(command, { shell: true, cwd, detached: true });
   const proc: BackgroundProcess = {
     id,
     command,
@@ -75,6 +79,21 @@ export function pollBackgroundProcess(id: string): string {
     .join("\n");
 }
 
+/** Signal a process and everything it spawned (#408). Falls back to signalling
+ *  just the child when the group is unavailable (already reaped, no pid). */
+function signalGroup(proc: BackgroundProcess, signal: NodeJS.Signals): void {
+  try {
+    if (proc.child.pid) process.kill(-proc.child.pid, signal);
+    else proc.child.kill(signal);
+  } catch {
+    try {
+      proc.child.kill(signal);
+    } catch {
+      // already gone
+    }
+  }
+}
+
 /** Kill a background process by id. */
 export function stopBackgroundProcess(id: string): string {
   const proc = registry.get(id);
@@ -82,8 +101,14 @@ export function stopBackgroundProcess(id: string): string {
   if (proc.exitCode !== null || proc.signal !== null) {
     return `[${id}] already ${statusOf(proc)}.`;
   }
-  proc.child.kill("SIGTERM");
-  return `[${id}] sent SIGTERM to "${proc.command}".`;
+  signalGroup(proc, "SIGTERM");
+  // Escalate: a server that ignores SIGTERM (or a shell that exits while its
+  // child lingers) must not survive a stop that reported success (#408).
+  const timer = setTimeout(() => {
+    if (proc.exitCode === null && proc.signal === null) signalGroup(proc, "SIGKILL");
+  }, 3000);
+  timer.unref?.();
+  return `[${id}] sent SIGTERM to "${proc.command}" (and its child processes; SIGKILL in 3s if it ignores it).`;
 }
 
 /** List all tracked background processes. */
@@ -96,11 +121,10 @@ export function listBackgroundProcesses(): string {
 export function killAllBackgroundProcesses(): void {
   for (const proc of registry.values()) {
     if (proc.exitCode === null && proc.signal === null) {
-      try {
-        proc.child.kill("SIGTERM");
-      } catch {
-        // already gone
-      }
+      // Whole group (#408) — on exit there is no time to wait for a graceful
+      // shutdown, so SIGKILL immediately after SIGTERM.
+      signalGroup(proc, "SIGTERM");
+      signalGroup(proc, "SIGKILL");
     }
   }
 }

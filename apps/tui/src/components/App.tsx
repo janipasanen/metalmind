@@ -364,7 +364,10 @@ export default function App({ config }: AppProps) {
       }
 
       if (input === "/quit") {
-        agentRef.current?.dispose();
+        // A real shutdown: take the background processes with us (#409). The
+        // reload paths below deliberately do NOT, so a superseded model switch
+        // can't kill the live agent's dev server.
+        agentRef.current?.dispose({ killBackgroundProcesses: true });
         yield { type: "done" } as const;
         process.exit(0);
       }
@@ -1055,6 +1058,23 @@ export default function App({ config }: AppProps) {
     sendMessage(text);
   }, [sendMessage]);
 
+  // Re-run the startup health probe when a turn finishes (#417). The warning
+  // was set once at launch and never revisited, so a user who followed its own
+  // advice — start ollama, pull the model, set a key — kept staring at a stale
+  // alarm for the rest of the session with no way to clear it.
+  useEffect(() => {
+    if (isStreaming) return;
+    const agent = agentRef.current;
+    if (!agent) return;
+    let cancelled = false;
+    void agent.checkHealth().then((h) => {
+      if (!cancelled) setHealthWarning(h.ok ? null : h.message);
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isStreaming]);
+
   // Track how long the model has been reasoning (#344).
   useEffect(() => {
     if (streamingReasoning && reasoningStartRef.current === null) {
@@ -1179,7 +1199,7 @@ export default function App({ config }: AppProps) {
       />
       {healthWarning && (
         <Box>
-          <Text color="yellow">⚠ {healthWarning}</Text>
+          <Text color="yellow">⚠ {healthWarning} <Text dimColor>(re-checked after each turn; /doctor for detail)</Text></Text>
         </Box>
       )}
       <Notifications items={notifications} />

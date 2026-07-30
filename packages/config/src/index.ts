@@ -5,7 +5,12 @@ import { parse as parseYaml } from "yaml";
 import { MetalmindConfigSchema, type MetalmindConfig } from "@metalmind/schemas";
 
 export const CONFIG_FILE = "metalmind.yaml";
-export const XDG_CONFIG_DIR = join(homedir(), ".config", "metalmind");
+/** Config root. Overridable via METALMIND_CONFIG_DIR (#415) so tests — and
+ *  container/multi-profile setups — never read or write the developer's real
+ *  ~/.config/metalmind, which holds apiKeys and mcpServers. Resolved once at
+ *  module load, so the variable must be set before the module is imported. */
+export const XDG_CONFIG_DIR =
+  process.env.METALMIND_CONFIG_DIR?.trim() || join(homedir(), ".config", "metalmind");
 export const XDG_CONFIG_FILE = join(XDG_CONFIG_DIR, "config.json");
 
 export const defaultConfig: MetalmindConfig = {
@@ -171,10 +176,15 @@ export interface McpServerConfig {
 }
 
 const DEFAULT_XDG_CONFIG: UserConfig = {
-  activeProvider: "ollama",
-  activeModel: "gpt-oss:120b",
+  // Empty on a FRESH install (#416): writing a concrete provider/model into the
+  // brand-new config made resolveConfig take the "saved preference" branch and
+  // skip env auto-detection entirely — so an exported OLLAMA_API_KEY was ignored
+  // and the user was pinned to the LOCAL provider with a cloud-only 120B model
+  // that isn't installed there. Empty means "not chosen yet": auto-detect runs.
+  activeProvider: "",
+  activeModel: "",
   defaultProvider: "ollama",
-  defaultModel: "gpt-oss:120b",
+  defaultModel: "",
   apiKeys: {},
   models: {
     openai: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],

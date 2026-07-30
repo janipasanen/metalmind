@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { runShellAsync } from "@metalmind/tools";
+import { XDG_CONFIG_DIR } from "@metalmind/config";
 
 /**
  * User-configurable lifecycle hooks (#346): shell commands run at fixed points
@@ -42,7 +43,7 @@ const MAX_HOOKS_PER_EVENT = 10;
 
 export function hookFiles(projectRoot: string): string[] {
   return [
-    join(homedir(), ".config", "metalmind", "hooks.json"),
+    join(XDG_CONFIG_DIR, "hooks.json"),
     join(projectRoot, ".metalmind", "hooks.json"),
   ];
 }

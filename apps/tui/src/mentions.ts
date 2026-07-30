@@ -41,18 +41,33 @@ export interface ExpandedMentions {
   missing: string[];
 }
 
-/** Read the files referenced by @-mentions, relative to projectRoot. */
-export function expandMentions(text: string, projectRoot: string): ExpandedMentions {
+/** Read the files referenced by @-mentions, relative to projectRoot.
+ *  `workspaceRoots` are the additional directories granted via /workspace: a
+ *  mention resolving into one of them is legitimate (#411). Without them, every
+ *  @-mention of a file in an added root silently resolved to nothing. */
+export function expandMentions(text: string, projectRoot: string, workspaceRoots: string[] = []): ExpandedMentions {
   const files: Array<{ path: string; content: string }> = [];
   const missing: string[] = [];
+  const roots = [projectRoot, ...workspaceRoots];
+  const insideARoot = (abs: string): boolean =>
+    roots.some((root) => {
+      const r = relative(root, abs);
+      return r !== "" && !r.startsWith("..") && !isAbsolute(r);
+    });
+
   for (const rel of parseMentions(text)) {
-    const abs = isAbsolute(rel) ? rel : join(projectRoot, rel);
+    // Resolve against the project first, then any workspace root, so a bare
+    // "notes.md" living in an added root is found too.
+    let abs = isAbsolute(rel) ? rel : join(projectRoot, rel);
+    if (!isAbsolute(rel) && !existsSync(abs)) {
+      const alt = workspaceRoots.map((root) => join(root, rel)).find((p) => existsSync(p));
+      if (alt) abs = alt;
+    }
     // Stay away from sensitive paths (#239). An ABSOLUTE path inside the project
     // (or inside an allowed workspace root) is fine — rejecting every absolute
     // path meant a pasted full path silently resolved to nothing (#386); what
-    // actually matters is that the resolved target stays within the project.
-    const rel2 = relative(projectRoot, abs);
-    if (isBlockedPath(abs) || rel2.startsWith("..") || rel2 === "") {
+    // actually matters is that the resolved target stays within a granted root.
+    if (isBlockedPath(abs) || !insideARoot(abs)) {
       missing.push(rel);
       continue;
     }
@@ -72,8 +87,8 @@ export function expandMentions(text: string, projectRoot: string): ExpandedMenti
 }
 
 /** Build a context block for the mentioned files, or null if none resolved. */
-export function mentionsContextBlock(text: string, projectRoot: string): string | null {
-  const { files } = expandMentions(text, projectRoot);
+export function mentionsContextBlock(text: string, projectRoot: string, workspaceRoots: string[] = []): string | null {
+  const { files } = expandMentions(text, projectRoot, workspaceRoots);
   if (files.length === 0) return null;
   const blocks = files.map((f) => `--- ${f.path} ---\n${f.content}`);
   return `Files referenced with @ in the message:\n\n${blocks.join("\n\n")}`;

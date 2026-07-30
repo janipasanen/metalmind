@@ -2,6 +2,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Point every project at a throwaway config dir before any module loads,
+    // so no test can touch the developer's real ~/.config/metalmind (#415).
+    setupFiles: [new URL("./vitest.setup.ts", import.meta.url).pathname],
     workspace: [
       "packages/*",
       {
@@ -15,6 +18,7 @@ export default defineConfig({
           name: "metalmind",
           root: "./apps/tui",
           include: ["src/**/*.{test,spec}.{ts,tsx}"],
+          setupFiles: [new URL("./vitest.setup.ts", import.meta.url).pathname],
         },
       },
     ],

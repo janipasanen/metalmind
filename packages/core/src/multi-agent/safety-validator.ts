@@ -1,3 +1,4 @@
+import { isAbsolute, resolve, relative } from "node:path";
 import type { AgentTool, ToolExecutionContext } from "@metalmind/tools";
 
 const DANGEROUS_COMMAND_PATTERNS = [
@@ -127,14 +128,25 @@ export class SafetyValidator {
       }
     }
 
-    const normalized = path.replace(/\.\./g, "").replace(/\/\//g, "/");
-    if (normalized !== path && path.includes("..")) {
-      return {
-        type: "path_traversal",
-        message: `Path traversal detected: "${path}"`,
-        severity: "error",
-        details: { path },
-      };
+    // A ".." path is only a traversal if it lands OUTSIDE every allowed root
+    // (#410). The search/find tools legitimately return "../other-repo/src/x.ts"
+    // for files in an added workspace root, and a blanket ".."-ban made every
+    // such path unreadable — /workspace appeared to work but nothing in the
+    // added root could actually be opened.
+    if (path.includes("..")) {
+      const abs = isAbsolute(path) ? resolve(path) : resolve(this.projectRoot, path);
+      const inside = this.allowedPaths.some((root) => {
+        const rel = relative(resolve(root), abs);
+        return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+      });
+      if (!inside) {
+        return {
+          type: "path_traversal",
+          message: `Path traversal detected: "${path}" resolves outside the project and any added workspace root`,
+          severity: "error",
+          details: { path, resolved: abs },
+        };
+      }
     }
 
     return null;

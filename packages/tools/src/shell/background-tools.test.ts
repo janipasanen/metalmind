@@ -4,6 +4,10 @@ import {
   pollBackgroundTool,
   stopBackgroundTool,
   listBackgroundProcesses,
+  startBackgroundProcess,
+  pollBackgroundProcess,
+  stopBackgroundProcess,
+  killAllBackgroundProcesses,
   _resetBackgroundRegistry,
 } from "./background-tools.js";
 
@@ -53,5 +57,34 @@ describe("background shell tools (#153)", () => {
     await runBackgroundTool.execute({ command: `node -e "setTimeout(()=>{},300)"` }, ctx);
     expect(listBackgroundProcesses()).toMatch(/\[bg-\d+\]/);
     expect(await pollBackgroundTool.execute({ id: "bg-does-not-exist" }, ctx)).toMatch(/No background process/);
+  });
+});
+
+describe("group termination (#408)", () => {
+  it("stopBackground kills the grandchild, not just the wrapper shell", async () => {
+    const id = startBackgroundProcess("sleep 30 & echo PID:$!; wait", process.cwd());
+    // Let the shell start its child and print the pid.
+    await new Promise((r) => setTimeout(r, 400));
+    const out = pollBackgroundProcess(id, 50);
+    const pid = Number(/PID:(\d+)/.exec(out)?.[1]);
+    expect(pid).toBeGreaterThan(0);
+    expect(() => process.kill(pid, 0)).not.toThrow(); // alive before the stop
+
+    stopBackgroundProcess(id);
+    await new Promise((r) => setTimeout(r, 500));
+    // The grandchild must be gone too — previously it survived while the
+    // registry reported the process as stopped.
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("killAllBackgroundProcesses takes the whole group down", async () => {
+    const id = startBackgroundProcess("sleep 30 & echo PID:$!; wait", process.cwd());
+    await new Promise((r) => setTimeout(r, 400));
+    const pid = Number(/PID:(\d+)/.exec(pollBackgroundProcess(id, 50))?.[1]);
+    expect(pid).toBeGreaterThan(0);
+
+    killAllBackgroundProcesses();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 });

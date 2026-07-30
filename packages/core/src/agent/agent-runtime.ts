@@ -26,6 +26,10 @@ export type ModelStreamEvent =
   // Why the model stopped (#366). "length" means the answer was CUT OFF at the
   // output-token cap — indistinguishable from a finished answer without this.
   | { type: "finish"; reason: "stop" | "length" | "tool_calls" | "content_filter" | "other"; detail?: string }
+  // Control-plane message from the AGENT, not the model (#404): retry/fallback
+  // notices and similar. Shown to the user, never accumulated into the
+  // assistant's answer or persisted as the model's own words.
+  | { type: "notice"; text: string }
   | { type: "done" };
 
 export interface TokenCountRequest {

@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { XDG_CONFIG_DIR } from "@metalmind/config";
 import { homedir } from "node:os";
 
 /**
@@ -20,7 +21,7 @@ export interface UserCommand {
 }
 
 export function userCommandDirs(projectRoot: string): string[] {
-  return [join(homedir(), ".config", "metalmind", "commands"), join(projectRoot, ".metalmind", "commands")];
+  return [join(XDG_CONFIG_DIR, "commands"), join(projectRoot, ".metalmind", "commands")];
 }
 
 export function loadUserCommands(projectRoot: string): UserCommand[] {

@@ -10,6 +10,9 @@ export type ChatStreamEvent =
   | { type: "reasoning"; text: string } // live reasoning trace; shown dimmed, not saved as the answer
   | { type: "tool-call"; toolCall: { toolCallId?: string; toolName: string; argumentsJson: string } }
   | { type: "tool-result"; toolCallId?: string; output: string; diff?: string; filePath?: string }
+  // Agent control-plane message (retry/fallback/truncation notices) — displayed
+  // live but never committed to the transcript as the model's answer (#404).
+  | { type: "notice"; text: string }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -65,6 +68,13 @@ export function useChat(options: UseChatOptions) {
               assistantContent += event.text;
               setStreamingContent(assistantContent);
               setStreamingReasoning(""); // answer started → drop the live reasoning
+              break;
+
+            case "notice":
+              // Agent status (retry/fallback/truncation). Show it live, but keep
+              // it OUT of assistantContent so it is never persisted, replayed to
+              // the model, or exported as the assistant's own words (#404).
+              setStreamingContent(assistantContent + event.text);
               break;
 
             case "reasoning":

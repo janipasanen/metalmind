@@ -573,6 +573,13 @@ export class AgentLoop {
   private onTodos?: (todos: TodoItem[]) => void;
   private onToolProgress?: (toolName: string, chunk: string) => void;
   private onPersistenceIssue?: (message: string) => void;
+  /** Surface a persistence/history-loss event: toast AND crash log (#412).
+   *  A 6-second toast was the only trace, so /diagnostics could never explain
+   *  why a conversation went missing. */
+  private reportPersistenceIssue(message: string): void {
+    logError("persistence", message);
+    this.onPersistenceIssue?.(message);
+  }
   private lastPersistError = "";
   private todos: TodoItem[] = [];
   private onContextUsage?: (used: number, limit: number) => void;
@@ -676,8 +683,11 @@ export class AgentLoop {
     this.yamlPermissions = yamlCfg.permissions;
     this.yamlTools = yamlCfg.tools;
     this.registry = buildRegistry(this.projectRoot, yamlCfg.tools);
-    this.safetyValidator = new SafetyValidator(this.projectRoot);
     this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
+    // The validator must KNOW the added roots (#410), otherwise every
+    // "../other-repo/src/x.ts" path the search tools legitimately return is
+    // rejected as traversal and /workspace is decorative.
+    this.safetyValidator = new SafetyValidator(this.projectRoot, this.workspaceRoots);
     // Warm the symbol/reference index in the background so findSymbol/findReferences
     // return results without blocking startup (#149).
     this.indexProjectInBackground();
@@ -1124,6 +1134,9 @@ export class AgentLoop {
   addWorkspaceRoot(path: string): void {
     if (!this.workspaceRoots.includes(path)) {
       this.workspaceRoots = [...this.workspaceRoots, path];
+      // Rebuild the validator so the new root is immediately usable (#410).
+      this.safetyValidator = new SafetyValidator(this.projectRoot, this.workspaceRoots);
+      this.systemPromptDirty = true; // the prompt lists the roots
       const cfg = loadXdgConfig();
       const existing = cfg.workspacePaths ?? [];
       if (!existing.includes(path)) {
@@ -1224,7 +1237,7 @@ export class AgentLoop {
               toolCount: 0,
               error: `server exited (code ${String(code)}) — ${dropped} tool(s) withdrawn; /mcp reconnect to retry`,
             });
-            this.onPersistenceIssue?.(`MCP server "${id}" exited — ${dropped} tool(s) withdrawn. Run /mcp reconnect to bring it back.`);
+            this.reportPersistenceIssue(`MCP server "${id}" exited — ${dropped} tool(s) withdrawn. Run /mcp reconnect to bring it back.`);
           });
         }
         // else: neither url nor command configured — nothing to connect.
@@ -1618,7 +1631,7 @@ export class AgentLoop {
           // Transient per-request context (turn @-mention/RAG blocks via
           // requestMessages, plus the iteration-cap notice) — never persisted
           // to history (#248, #260, #289).
-          const messages = this.requestMessages();
+          const messages = this.fitMessagesTo(provider, this.requestMessages());
           if (this.iterationCapNotice) messages.push({ role: "system", content: this.iterationCapNotice });
           for await (const ev of provider.streamChatCompletion({
             messages,
@@ -1636,6 +1649,7 @@ export class AgentLoop {
           if (isAbortError(err) || signal?.aborted) return; // user cancelled
           // Already streamed content this attempt → cannot safely retry.
           if (emitted) {
+            logError(`provider:${provider.providerName}`, err); // mid-stream failure (#413)
             yield { type: "error", message: errText(err) };
             return;
           }
@@ -1649,7 +1663,11 @@ export class AgentLoop {
               15_000,
             );
             yield {
-              type: "text",
+              // A NOTICE, not model output (#404): emitting these as `text` made
+              // agenticLoop accumulate them into assistantText, so a transient
+              // 429 permanently prefixed the stored assistant turn with the
+              // retry banner — replayed to the model on every later request.
+              type: "notice",
               text: `\n[${provider.providerName} busy (${errText(err).slice(0, 80)}) — retrying in ${Math.ceil(waitMs / 1000)}s, attempt ${attempt + 2}/${maxRetries + 1}]\n`,
             };
             await sleep(waitMs, signal);
@@ -1660,12 +1678,16 @@ export class AgentLoop {
           // work — a bad cloud key used to end the turn with local models idle (#384).
           if (moreProviders && (retryable || isProviderScopedError(err))) {
             yield {
-              type: "text",
+              type: "notice", // agent status, not the model's words (#404)
               text: `\n[${provider.providerName} unavailable (${errText(err).slice(0, 120)}); falling back to ${providers[p + 1].providerName}]\n`,
             };
             break; // advance to next provider in the chain
           }
-          // Fatal, or all retries/providers exhausted.
+          // Fatal, or all retries/providers exhausted. Log HERE (#413): the
+          // tail-of-function logError was unreachable because every failure
+          // path returns, so provider outages never reached errors.log and
+          // /diagnostics showed nothing after a failed turn.
+          logError(`provider:${provider.providerName}`, err);
           yield { type: "error", message: errText(err) };
           return;
         }
@@ -1723,7 +1745,7 @@ export class AgentLoop {
     // of pushing them into this.history, where they'd persist and accumulate a new
     // copy every turn — bloating context and the saved session (#260).
     const turnContext: string[] = [];
-    const mentionBlock = mentionsContextBlock(userInput, this.projectRoot);
+    const mentionBlock = mentionsContextBlock(userInput, this.projectRoot, this.workspaceRoots);
     if (mentionBlock) turnContext.push(mentionBlock);
     // RAG: if documents have been indexed, retrieve the most relevant chunks for
     // this turn (#200). No-ops cheaply when no index exists.
@@ -1800,7 +1822,7 @@ export class AgentLoop {
       decision = next;
       this.recordRoute(decision);
       yield {
-        type: "text",
+        type: "notice", // agent status, not model output (#404)
         text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n`,
       };
       provider = this.getProvider(decision.provider, decision.modelId);
@@ -1948,7 +1970,7 @@ export class AgentLoop {
       this.router.recordFailure(decision.tier);
       decision = this.router.decisionForTier(nextTier, `escalated (${verdict.reason})`);
       this.recordRoute(decision);
-      yield { type: "text", text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n` };
+      yield { type: "notice", text: `\n[escalating to ${decision.provider}/${decision.modelId} — ${verdict.reason}]\n` };
       provider = this.getProvider(decision.provider, decision.modelId);
       attempt = await this.collectAttempt(provider, toolDefs, signal);
       if (signal?.aborted) {
@@ -2055,6 +2077,11 @@ export class AgentLoop {
         // chunks would slip past a per-chunk redact() (#168 stream fix).
         const streamRedactor = new StreamRedactor(this.redactor);
         for await (const event of this.streamResilient(providers, toolDefs, signal)) {
+          if (event.type === "notice") {
+            // Agent status — surface it, never accumulate it into the answer (#404).
+            yield { type: "notice", text: event.text };
+            continue;
+          }
           if (event.type === "text") {
             assistantText += event.text;
             const safe = streamRedactor.push(event.text);
@@ -2088,7 +2115,7 @@ export class AgentLoop {
         if (flushed) yield { type: "text", text: flushed };
         if (truncated) {
           yield {
-            type: "text",
+            type: "notice", // agent status, not model output (#404)
             text: "\n\n[⚠ output truncated at the model's max output tokens — ask it to continue for the rest]\n",
           };
         }
@@ -2110,7 +2137,7 @@ export class AgentLoop {
         // so running the check inside runSubagent consumed the parent's retries
         // and injected failure notes into the sub-agent's throwaway history.
         if (this.subagentDepth === 0 && this.editedThisTurn && this.verifyRetriesLeft > 0 && this.mode !== "plan") {
-          yield { type: "text", text: "\n[running project check…]\n" };
+          yield { type: "notice", text: "\n[running project check…]\n" };
           const failure = await this.runProjectCheck(signal);
           if (failure) {
             this.verifyRetriesLeft--;
@@ -2118,7 +2145,7 @@ export class AgentLoop {
               role: "system",
               content: `The project check failed after your edits. Fix these errors, then summarize:\n${failure}`,
             });
-            yield { type: "text", text: `\n[project check failed — asking the model to fix]\n` };
+            yield { type: "notice", text: `\n[project check failed — asking the model to fix]\n` };
             continue;
           }
         }
@@ -2802,7 +2829,7 @@ export class AgentLoop {
       error = `MCP server for "${toolName}" is not running (it exited earlier). Removed ${dropped} tool(s) from this session; run "/mcp reconnect" to bring it back.`;
       output = `Error: ${error}`;
       this.auditLogRedacted({ timestamp, toolName, input, output, success: false, error });
-      this.onPersistenceIssue?.(error);
+      this.reportPersistenceIssue(error);
       return output;
     }
     try {
@@ -3070,6 +3097,8 @@ export class AgentLoop {
       // them made a dead sub-agent indistinguishable from a silent one (#364).
       const errors: string[] = [];
       for await (const ev of this.agenticLoop([provider], this.toolDefs(), { signal, maxIterations: 6 })) {
+        // Notices are agent status; folding them in made the parent model read
+        // "[mlx unavailable; falling back…]" as the sub-agent's findings (#404).
         if (ev.type === "text") finalText += ev.text;
         else if (ev.type === "error") errors.push(ev.message);
       }
@@ -3168,6 +3197,42 @@ export class AgentLoop {
   }
 
   /** Window history to fit the active model's context limit, reporting usage (#141). */
+  /** Trim a per-request COPY of the messages to fit `provider`'s window (#405).
+   *
+   *  enforceContextBudget only ever ran against providers[0], so when the chain
+   *  descended (e.g. openai 256k -> MLX 32k) the fallback was handed a payload
+   *  sized for the first provider and rejected it — failing exactly when the
+   *  fallback mattered. This trims per attempt and does NOT mutate this.history,
+   *  so borrowing a small local tier for one attempt can't permanently shrink
+   *  the conversation. */
+  private fitMessagesTo(provider: ModelProvider, messages: AgentMessage[]): AgentMessage[] {
+    const limit = provider.supportedCapabilities?.maximumContextTokens ?? 32_768;
+    const budget = limit - Math.max(2048, Math.floor(limit * 0.2));
+    const IMAGE_TOKEN_ESTIMATE = 1_100;
+    const tokensOf = (m: AgentMessage): number =>
+      estimateTokens(m.content) +
+      (m.toolCalls?.length ? estimateTokens(JSON.stringify(m.toolCalls)) : 0) +
+      (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
+
+    let total = messages.reduce((sum, m) => sum + tokensOf(m), 0);
+    if (total <= budget) return messages;
+
+    const sys = messages[0]?.role === "system" ? [messages[0]] : [];
+    let rest = messages.slice(sys.length);
+    total = sys.reduce((sum, m) => sum + tokensOf(m), 0) + rest.reduce((sum, m) => sum + tokensOf(m), 0);
+    while (total > budget && rest.length > 1) {
+      total -= tokensOf(rest[0]);
+      rest = rest.slice(1);
+    }
+    // Never lead with an orphaned tool result — providers reject a tool message
+    // without its preceding assistant tool_calls.
+    while (rest.length && rest[0].role === "tool") {
+      total -= tokensOf(rest[0]);
+      rest = rest.slice(1);
+    }
+    return [...sys, ...rest];
+  }
+
   private enforceContextBudget(provider: ModelProvider): void {
     const limit = provider.supportedCapabilities?.maximumContextTokens ?? 32_768;
     const reserve = Math.max(2048, Math.floor(limit * 0.2));
@@ -3671,11 +3736,11 @@ export class AgentLoop {
       const store = new SqliteSessionStore(join(this.projectRoot, ".metalmind", "sessions.db"));
       this.sessionStore = store;
       if (store.recoveredFromCorruption) {
-        this.onPersistenceIssue?.(`sessions.db was corrupt — quarantined to ${store.recoveredFromCorruption}; starting a fresh store.`);
+        this.reportPersistenceIssue(`sessions.db was corrupt — quarantined to ${store.recoveredFromCorruption}; starting a fresh store.`);
       }
     } catch (err) {
       this.sessionStore = null;
-      this.onPersistenceIssue?.(`Session persistence DISABLED: ${errText(err)} (try: npm rebuild better-sqlite3). Conversations will NOT survive restart.`);
+      this.reportPersistenceIssue(`Session persistence DISABLED: ${errText(err)} (try: npm rebuild better-sqlite3). Conversations will NOT survive restart.`);
       return [];
     }
     try {
@@ -3684,7 +3749,7 @@ export class AgentLoop {
         // subsequent save (FK constraint) while looking like a fresh session (#332).
         const known = this.sessionStore.getSession?.(opts.resumeId) ?? this.sessionStore.listSessions().find((s) => s.id === opts.resumeId);
         if (!known) {
-          this.onPersistenceIssue?.(`--resume ${opts.resumeId}: no such session — started a new one instead.`);
+          this.reportPersistenceIssue(`--resume ${opts.resumeId}: no such session — started a new one instead.`);
           this.sessionId = this.sessionStore.createSession();
         } else if (this.sessionStore.activeOwner?.(opts.resumeId)) {
           // A live instance owns it — adopting would make both processes
@@ -3693,7 +3758,7 @@ export class AgentLoop {
           const forked = this.sessionStore.createSession(`fork of ${opts.resumeId}`);
           this.history = this.sessionStore.loadMessages(opts.resumeId);
           this.sessionId = forked;
-          this.onPersistenceIssue?.(
+          this.reportPersistenceIssue(
             `Session ${opts.resumeId} is open in another MetalMind instance (pid ${owner}) — continuing here as a copy (${forked}) so neither history is overwritten.`,
           );
         } else {
@@ -3839,7 +3904,7 @@ export class AgentLoop {
           this.sessionStore.claimSession?.(fresh);
           this.sessionId = fresh;
           this.sessionStore.saveMessages(fresh, this.history);
-          this.onPersistenceIssue?.(
+          this.reportPersistenceIssue(
             `Another MetalMind instance is writing the previous session; this conversation moved to a new session (${fresh}) so neither history is lost.`,
           );
           return;
@@ -3852,7 +3917,7 @@ export class AgentLoop {
       const msg = errText(err);
       if (msg !== this.lastPersistError) {
         this.lastPersistError = msg;
-        this.onPersistenceIssue?.(`Session save failing: ${msg}`);
+        this.reportPersistenceIssue(`Session save failing: ${msg}`);
       }
     }
   }
@@ -3910,7 +3975,7 @@ export class AgentLoop {
         const forked = this.sessionStore.createSession(`fork of ${id}`);
         this.sessionStore.claimSession?.(forked);
         this.sessionId = forked;
-        this.onPersistenceIssue?.(
+        this.reportPersistenceIssue(
           `Session ${id} is open in another MetalMind instance (pid ${owner}) — resumed here as a copy (${forked}).`,
         );
       } else {
@@ -4074,8 +4139,14 @@ export class AgentLoop {
   }
 
   /** Release resources: background processes (#153) and stdio MCP clients (#155). */
-  dispose(): void {
-    killAllBackgroundProcesses();
+  /** Release this agent's resources.
+   *
+   *  `killAll` defaults to FALSE (#409): the background-process registry is
+   *  process-global, so a superseded or cancelled model-switch reload used to
+   *  kill the *live* agent's dev server. Only a real shutdown (process exit)
+   *  should take those down — index.tsx's exit/signal handlers do that. */
+  dispose(opts: { killBackgroundProcesses?: boolean } = {}): void {
+    if (opts.killBackgroundProcesses) killAllBackgroundProcesses();
     for (const client of this.mcpStdioClients) {
       void client.disconnect().catch(() => {});
     }

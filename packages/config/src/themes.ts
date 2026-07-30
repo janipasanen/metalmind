@@ -2,8 +2,10 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 
-export const THEME_DIR = join(homedir(), ".config", "metalmind", "themes");
-export const THEME_FILE = join(homedir(), ".config", "metalmind", "theme.json");
+/** Same override as XDG_CONFIG_DIR (#415) — keep themes beside the config. */
+const CONFIG_ROOT = process.env.METALMIND_CONFIG_DIR?.trim() || join(homedir(), ".config", "metalmind");
+export const THEME_DIR = join(CONFIG_ROOT, "themes");
+export const THEME_FILE = join(CONFIG_ROOT, "theme.json");
 
 export interface Theme {
   id: string;
