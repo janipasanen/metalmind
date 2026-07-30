@@ -34,7 +34,7 @@ export {
 } from "./documents/index.js";
 export { allWebTools, webFetchTool, webSearchTool } from "./web/web-tools.js";
 export { allGitTools, gitStatusTool, gitDiffTool, gitDiffFileTool, gitAddTool, gitCommitTool } from "./git/git-tools.js";
-export { runShellTools, runCommandTool, runTestsTool, runBuildTool, runLintTool, runFormatTool } from "./shell/shell-tools.js";
+export { runShellTools, runCommandTool, runTestsTool, runBuildTool, runLintTool, runFormatTool, runShellAsync } from "./shell/shell-tools.js";
 export {
   backgroundShellTools,
   runBackgroundTool,

@@ -22,7 +22,7 @@ const OUTPUT_CAP = 10 * 1024 * 1024;
  *  whole turn. After exit we give stdio a short grace to flush, then settle.
  *  Kill/abort also force-settle on their own, and the process GROUP is killed
  *  (detached + kill(-pid)) so grandchildren don't survive the timeout. */
-function runShellAsync(command: string, cwd: string, timeoutMs: number | undefined, signal?: AbortSignal, onOutput?: (chunk: string) => void): Promise<RunResult> {
+export function runShellAsync(command: string, cwd: string, timeoutMs: number | undefined, signal?: AbortSignal, onOutput?: (chunk: string) => void): Promise<RunResult> {
   // Direct execute() calls (tests, registry bypass) may skip zod defaults.
   const effectiveTimeout = timeoutMs && timeoutMs >= 1000 ? timeoutMs : 120_000;
   return new Promise((resolvePromise) => {
@@ -57,14 +57,20 @@ function runShellAsync(command: string, cwd: string, timeoutMs: number | undefin
         child.kill("SIGKILL");
       }
     };
+    // When WE killed the process (timeout/abort), the child's own exit event
+    // races the force-settle and would report a meaningless code — the forced
+    // code (124 timeout / 130 cancelled) must win whichever event settles (#350).
+    let forcedCode: number | null = null;
     const timer = setTimeout(() => {
       stderr += `\n(timed out after ${effectiveTimeout}ms — killed)`;
+      forcedCode = 124;
       killGroup();
       // Force-settle: don't depend on any event arriving after a SIGKILL.
       setTimeout(() => settle(124), 250);
     }, effectiveTimeout);
     const onAbort = () => {
       stderr += "\n(cancelled)";
+      forcedCode = 130;
       killGroup();
       setTimeout(() => settle(130), 250);
     };
@@ -79,10 +85,10 @@ function runShellAsync(command: string, cwd: string, timeoutMs: number | undefin
     // 'exit' fires when the process dies even if grandchildren hold the pipes;
     // give stdio 200ms to flush whatever is buffered, then settle.
     child.on("exit", (code) => {
-      setTimeout(() => settle(code ?? 1), 200);
+      setTimeout(() => settle(forcedCode ?? code ?? 1), 200);
     });
     // Fast path: pipes closed too — settle immediately without the grace wait.
-    child.on("close", (code) => settle(code ?? 1));
+    child.on("close", (code) => settle(forcedCode ?? code ?? 1));
   });
 }
 

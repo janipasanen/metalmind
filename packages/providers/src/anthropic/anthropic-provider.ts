@@ -121,6 +121,22 @@ function buildAnthropicPayload(messages: AgentMessage[]): {
   return { system, messages: merged };
 }
 
+/** Extend prompt caching to the conversation itself (#334): stamp a
+ *  cache_control breakpoint on the final content block of the LAST message.
+ *  History is append-only, so the next request's prefix re-hits this cache —
+ *  without it, only system+tools are cached and the (much larger) history is
+ *  re-billed at the full input rate on every agentic iteration. */
+function markHistoryCacheBreakpoint(messages: AnthropicMsg[]): void {
+  const last = messages[messages.length - 1];
+  if (!last) return;
+  if (typeof last.content === "string") {
+    if (!last.content) return; // empty text blocks are rejected by the API
+    last.content = [{ type: "text", text: last.content, cache_control: { type: "ephemeral" } }];
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    (last.content[last.content.length - 1] as Record<string, unknown>).cache_control = { type: "ephemeral" };
+  }
+}
+
 /** Convert a data-URL or https image into an Anthropic image content block (#177). */
 function toAnthropicImageBlock(img: string): Record<string, unknown> {
   const dataMatch = img.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
@@ -161,6 +177,7 @@ export class AnthropicProvider implements ModelProvider {
     request: ChatCompletionRequest,
   ): Promise<ChatCompletionResponse> {
     const { system, messages } = buildAnthropicPayload(request.messages);
+    markHistoryCacheBreakpoint(messages); // cache the conversation too (#334)
 
     const body: Record<string, unknown> = {
       model: this.modelName,
@@ -279,6 +296,7 @@ export class AnthropicProvider implements ModelProvider {
     request: ChatCompletionRequest,
   ): AsyncGenerator<ModelStreamEvent, void, undefined> {
     const { system, messages } = buildAnthropicPayload(request.messages);
+    markHistoryCacheBreakpoint(messages); // cache the conversation too (#334)
 
     const body: Record<string, unknown> = {
       model: this.modelName,

@@ -98,43 +98,61 @@ export class DiffGenerator {
     if (original === modified) {
       return [...header, "@@ (no changes) @@"].join("\n");
     }
-    if ((a.length + 1) * (b.length + 1) > MAX_CELLS) {
-      return [...header, `@@ file too large for an inline diff (${a.length} → ${b.length} lines) @@`].join("\n");
+
+    // Trim common prefix/suffix before LCS (#342): a small edit in a large file
+    // costs O(changed²) instead of O(file²), and files that previously overflowed
+    // MAX_CELLS get a real diff over just the changed region.
+    let pre = 0;
+    while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+    let suf = 0;
+    while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+    const aMid = a.slice(pre, a.length - suf);
+    const bMid = b.slice(pre, b.length - suf);
+
+    if ((aMid.length + 1) * (bMid.length + 1) > MAX_CELLS) {
+      return [...header, `@@ change too large for an inline diff (${a.length} → ${b.length} lines, ${aMid.length}/${bMid.length} changed) @@`].join("\n");
     }
 
-    // LCS DP table (row-major (n+1)×(m+1)), then a standard backtrack into ops.
-    const n = a.length;
-    const m = b.length;
+    // LCS DP table (row-major (n+1)×(m+1)) over the changed region only, then a
+    // standard backtrack into ops.
+    const n = aMid.length;
+    const m = bMid.length;
     const dp = new Uint32Array((n + 1) * (m + 1));
     const at = (i: number, j: number) => i * (m + 1) + j;
     for (let i = n - 1; i >= 0; i--) {
       for (let j = m - 1; j >= 0; j--) {
-        dp[at(i, j)] = a[i] === b[j] ? dp[at(i + 1, j + 1)] + 1 : Math.max(dp[at(i + 1, j)], dp[at(i, j + 1)]);
+        dp[at(i, j)] = aMid[i] === bMid[j] ? dp[at(i + 1, j + 1)] + 1 : Math.max(dp[at(i + 1, j)], dp[at(i, j + 1)]);
       }
     }
+    // Re-attach up to CONTEXT trimmed lines on each side as context ops so hunk
+    // rendering stays unchanged; line numbering starts at the kept prefix.
+    const keepPre = Math.min(CONTEXT, pre);
+    const keepSuf = Math.min(CONTEXT, suf);
     const ops: Op[] = [];
+    for (let k = pre - keepPre; k < pre; k++) ops.push({ t: " ", s: a[k] });
     let i = 0;
     let j = 0;
     while (i < n && j < m) {
-      if (a[i] === b[j]) {
-        ops.push({ t: " ", s: a[i] });
+      if (aMid[i] === bMid[j]) {
+        ops.push({ t: " ", s: aMid[i] });
         i++; j++;
       } else if (dp[at(i + 1, j)] >= dp[at(i, j + 1)]) {
-        ops.push({ t: "-", s: a[i] });
+        ops.push({ t: "-", s: aMid[i] });
         i++;
       } else {
-        ops.push({ t: "+", s: b[j] });
+        ops.push({ t: "+", s: bMid[j] });
         j++;
       }
     }
-    while (i < n) ops.push({ t: "-", s: a[i++] });
-    while (j < m) ops.push({ t: "+", s: b[j++] });
+    while (i < n) ops.push({ t: "-", s: aMid[i++] });
+    while (j < m) ops.push({ t: "+", s: bMid[j++] });
+    for (let k = 0; k < keepSuf; k++) ops.push({ t: " ", s: a[a.length - suf + k] });
 
     // Per-op source line numbers for the @@ headers.
     const aAt: number[] = [];
     const bAt: number[] = [];
-    let aLine = 1;
-    let bLine = 1;
+    let aLine = pre - keepPre + 1;
+    let bLine = pre - keepPre + 1;
     for (const o of ops) {
       aAt.push(aLine);
       bAt.push(bLine);

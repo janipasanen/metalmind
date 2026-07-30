@@ -5,6 +5,16 @@ import App from "./components/App.js";
 import { resolveConfig } from "./config.js";
 import { logError } from "./error-log.js";
 
+// --version smoke path (#351): prints and exits before any TTY setup. CI runs
+// the BUILT bundle with this flag after tsup, so a bundle-only runtime failure
+// (bad external, ESM/CJS interop, missing asset) fails the pipeline instead of
+// publishing silently. Keep in sync with apps/tui/package.json.
+const VERSION = "0.1.0";
+if (process.argv.includes("--version") || process.argv.includes("-v")) {
+  console.log(`metalmind ${VERSION}`);
+  process.exit(0);
+}
+
 // Crash telemetry: persist uncaught failures so they survive the session (#217).
 process.on("uncaughtException", (err) => logError("uncaughtException", err));
 process.on("unhandledRejection", (reason) => logError("unhandledRejection", reason));
@@ -29,6 +39,19 @@ process.once("SIGINT", () => {
   restoreTerminal();
   killAllBackgroundProcesses();
   process.exit(0);
+});
+// SIGTERM (kill, service managers) and SIGHUP (terminal window closed) would
+// otherwise terminate without running the 'exit' backstop's cleanup path
+// reliably — same teardown, conventional 128+signum exit codes (#338).
+process.once("SIGTERM", () => {
+  restoreTerminal();
+  killAllBackgroundProcesses();
+  process.exit(143);
+});
+process.once("SIGHUP", () => {
+  restoreTerminal();
+  killAllBackgroundProcesses();
+  process.exit(129);
 });
 
 const config = resolveConfig();

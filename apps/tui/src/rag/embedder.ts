@@ -9,6 +9,8 @@ export interface Embedder {
   readonly id: string;
   readonly dim: number;
   embed(text: string): Promise<number[]>;
+  /** Embed many texts in one round-trip where the backend supports it (#349). */
+  embedBatch?(texts: string[]): Promise<number[][]>;
 }
 
 const STOP = new Set(["the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "for", "on", "with", "as", "at", "by"]);
@@ -55,6 +57,9 @@ export class HashingEmbedder implements Embedder {
     }
     return l2normalize(v);
   }
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    return Promise.all(texts.map((t) => this.embed(t)));
+  }
 }
 
 /** Real embeddings via a local Ollama embedding model (e.g. nomic-embed-text). */
@@ -76,17 +81,54 @@ export class OllamaEmbedder implements Embedder {
     }
     this.id = `ollama:${model}@${host}`;
   }
+  /** Keep the embedding model loaded between calls: without this, ollama
+   *  unloads it after its default idle window and a large indexing run pays the
+   *  model reload over and over (#349). */
+  private keepAlive = "10m";
+  /** Newer ollama exposes a true batch endpoint (/api/embed with input[]);
+   *  flip to the legacy per-text endpoint the first time it's missing. */
+  private batchOk = true;
+
   async embed(text: string): Promise<number[]> {
-    const res = await fetch(`${this.baseUrl}/api/embeddings`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: this.model, prompt: text }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!res.ok) throw new Error(`embeddings failed (${res.status})`);
-    const data = (await res.json()) as { embedding?: number[] };
-    if (!Array.isArray(data.embedding)) throw new Error("no embedding in response");
-    return l2normalize(data.embedding);
+    const [v] = await this.embedBatch([text]);
+    return v;
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    if (this.batchOk) {
+      const res = await fetch(`${this.baseUrl}/api/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: this.model, input: texts, keep_alive: this.keepAlive }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { embeddings?: number[][] };
+        if (Array.isArray(data.embeddings) && data.embeddings.length === texts.length) {
+          return data.embeddings.map(l2normalize);
+        }
+        this.batchOk = false; // unexpected shape — use the legacy endpoint from now on
+      } else if (res.status === 404 || res.status === 405) {
+        this.batchOk = false; // older ollama without /api/embed
+      } else {
+        throw new Error(`embeddings failed (${res.status})`);
+      }
+    }
+    const out: number[][] = [];
+    for (const text of texts) {
+      const res = await fetch(`${this.baseUrl}/api/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: this.model, prompt: text, keep_alive: this.keepAlive }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) throw new Error(`embeddings failed (${res.status})`);
+      const data = (await res.json()) as { embedding?: number[] };
+      if (!Array.isArray(data.embedding)) throw new Error("no embedding in response");
+      out.push(l2normalize(data.embedding));
+    }
+    return out;
   }
 }
 

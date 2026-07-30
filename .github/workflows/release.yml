@@ -32,6 +32,10 @@ jobs:
           npm run build
           npm test
 
+      - name: Smoke-run built bundle
+        # The artifact about to be published must load and execute (#351).
+        run: node apps/tui/dist/index.js --version | grep -q "^metalmind "
+
       - name: Generate changelog
         id: changelog
         run: |

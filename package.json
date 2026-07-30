@@ -10,6 +10,7 @@
     "clean": "tsc -b --clean",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:live": "tsx --tsconfig tsconfig.json scripts/live-harness.mts",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

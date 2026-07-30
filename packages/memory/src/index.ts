@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { join, dirname } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, renameSync, existsSync } from "node:fs";
 import type { AgentMessage } from "@metalmind/schemas";
 
 export interface SessionRecord {
@@ -13,16 +13,41 @@ export interface SessionRecord {
 
 export class SqliteSessionStore {
   private db: Database.Database;
+  /** Set when a corrupt db file was quarantined and a fresh one created (#332).
+   *  The caller should surface this to the user (the old file is preserved). */
+  readonly recoveredFromCorruption: string | null = null;
 
   constructor(dbPath?: string) {
     const path = dbPath ?? join(process.cwd(), ".metalmind", "sessions.db");
     const dir = dirname(path);
     mkdirSync(dir, { recursive: true });
 
-    this.db = new Database(path);
-    this.db.pragma("journal_mode = WAL");
-    this.initSchema();
-    this.migrate();
+    try {
+      this.db = new Database(path);
+      this.db.pragma("journal_mode = WAL");
+      this.initSchema();
+      this.migrate();
+    } catch (err) {
+      // A corrupt/truncated db (SQLITE_NOTADB/SQLITE_CORRUPT) must not silently
+      // kill persistence for the whole session. Quarantine the file (plus WAL
+      // siblings) with a timestamp and start fresh — old data stays on disk (#332).
+      const code = (err as { code?: string }).code ?? "";
+      if (!/NOTADB|CORRUPT/.test(code)) throw err;
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const f = path + suffix;
+        try {
+          if (existsSync(f)) renameSync(f, `${f}.corrupt-${stamp}`);
+        } catch {
+          /* best-effort */
+        }
+      }
+      this.db = new Database(path);
+      this.db.pragma("journal_mode = WAL");
+      this.initSchema();
+      this.migrate();
+      (this as { recoveredFromCorruption: string | null }).recoveredFromCorruption = `${path}.corrupt-${stamp}`;
+    }
   }
 
   /** Add columns introduced after the initial schema, idempotently (#202/#236). */

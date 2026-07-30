@@ -36,6 +36,12 @@ jobs:
       - name: Build (tsc -b typecheck + bundle)
         run: npm run build
 
+      - name: Smoke-run built bundle
+        # Execute the tsup output (#351): a bundle-only runtime failure (bad
+        # external, ESM/CJS interop, missing asset) fails CI here instead of
+        # shipping silently. Tests run against source; this runs the artifact.
+        run: node apps/tui/dist/index.js --version | grep -q "^metalmind "
+
       - name: Test
         run: npm test
 

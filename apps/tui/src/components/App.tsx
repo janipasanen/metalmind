@@ -111,6 +111,9 @@ export default function App({ config }: AppProps) {
   const [agentMode, setAgentMode] = useState<"build" | "plan">("build");
   const [todos, setTodos] = useState<Array<{ text: string; status: "pending" | "in_progress" | "completed" }>>([]);
   const [pendingInsert, setPendingInsert] = useState<{ text: string; nonce: number } | null>(null);
+  /** Seconds spent in the current reasoning burst (#344). */
+  const reasoningStartRef = useRef<number | null>(null);
+  const [reasoningSecs, setReasoningSecs] = useState(0);
   /** Live tail of the currently-running tool's output (already redacted). */
   const [liveTool, setLiveTool] = useState<{ name: string; tail: string } | null>(null);
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
@@ -174,6 +177,7 @@ export default function App({ config }: AppProps) {
           onTodos: (t) => setTodos(t),
           onToolProgress: (name, chunk) =>
             setLiveTool((prev) => ({ name, tail: ((prev?.name === name ? prev.tail : "") + chunk).slice(-600) })),
+          onPersistenceIssue: (msg) => notify("warning", msg),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -233,6 +237,7 @@ export default function App({ config }: AppProps) {
           onTodos: (t) => setTodos(t),
           onToolProgress: (name, chunk) =>
             setLiveTool((prev) => ({ name, tail: ((prev?.name === name ? prev.tail : "") + chunk).slice(-600) })),
+          onPersistenceIssue: (msg) => notify("warning", msg),
         });
         await agent.initMcp();
         await agent.initCoordinator();
@@ -318,7 +323,8 @@ export default function App({ config }: AppProps) {
           "  /retry            - Re-run the last prompt (drops the prior answer)",
           "  /edit <text>      - Replace + re-run the last prompt",
           "  /branch           - Fork this conversation into a new session",
-          "  /copy [last|code] - Copy the last message (or its code block) to the clipboard",
+          "  /copy [last|code|all|<n>] - Copy the last message, its code block, the whole chat, or the nth-last reply",
+          "  /search <text>    - Find text in this conversation's transcript",
           "  /vim [on|off|help]- Toggle vim modal editing in the input bar",
           "  /undo             - Revert the agent's last edit set (repeatable)",
           "  /redo             - Re-apply the most recently undone edit set",
@@ -772,6 +778,34 @@ export default function App({ config }: AppProps) {
         return;
       }
 
+      if (input === "/search" || input.startsWith("/search ")) {
+        // In-conversation transcript search (#353). Past sessions are covered by
+        // `/resume search <text>`; this finds text in the CURRENT scrollback.
+        const q = input.slice(8).trim();
+        if (!q) {
+          yield { type: "text", text: "Usage: /search <text> — find matches in this conversation. (Past sessions: /resume search <text>)" } as const;
+          yield { type: "done" } as const;
+          return;
+        }
+        const needle = q.toLowerCase();
+        const hits: string[] = [];
+        messages.forEach((m, i) => {
+          const idx = m.content.toLowerCase().indexOf(needle);
+          if (idx === -1) return;
+          const start = Math.max(0, idx - 40);
+          const end = Math.min(m.content.length, idx + q.length + 40);
+          const snippet = `${start > 0 ? "…" : ""}${m.content.slice(start, end).replace(/\s+/g, " ").trim()}${end < m.content.length ? "…" : ""}`;
+          const who = m.role === "user" ? "You" : m.role === "assistant" ? "AI" : "Sys";
+          hits.push(`  msg ${i + 1}/${messages.length} ${who}: ${snippet}`);
+        });
+        const text = hits.length
+          ? `${hits.length} match${hits.length === 1 ? "" : "es"} for "${q}":\n${hits.slice(0, 12).join("\n")}${hits.length > 12 ? `\n  …(+${hits.length - 12} more)` : ""}\n(PgUp/PgDn scrolls the transcript to a message)`
+          : `No matches for "${q}" in this conversation. Past sessions: /resume search <text>.`;
+        yield { type: "text", text } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
       if (input === "/branch") {
         const id = agentRef.current?.branchSession();
         yield { type: "text", text: id ? `Branched into a new session (${id}). Continuing here; the original is in /resume.` : "Branching unavailable (no session store)." } as const;
@@ -788,7 +822,9 @@ export default function App({ config }: AppProps) {
 
       if (input === "/rag" || input.startsWith("/rag ")) {
         const root = agentRef.current?.projectRootPath ?? process.cwd();
-        const text = await handleRagCommand(input.slice(4), root);
+        // Reuse the live-tool panel for per-file indexing progress (#343); it
+        // clears automatically when the turn ends.
+        const text = await handleRagCommand(input.slice(4), root, (msg) => setLiveTool({ name: "rag indexing", tail: msg }));
         yield { type: "text", text } as const;
         yield { type: "done" } as const;
         return;
@@ -990,10 +1026,33 @@ export default function App({ config }: AppProps) {
     sendMessage(text);
   }, [sendMessage]);
 
+  // Track how long the model has been reasoning (#344).
+  useEffect(() => {
+    if (streamingReasoning && reasoningStartRef.current === null) {
+      reasoningStartRef.current = Date.now();
+    }
+    if (!streamingReasoning) {
+      reasoningStartRef.current = null;
+      setReasoningSecs(0);
+      return;
+    }
+    const t = setInterval(() => {
+      if (reasoningStartRef.current !== null) setReasoningSecs(Math.floor((Date.now() - reasoningStartRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [streamingReasoning !== ""]);
+
   // Drop the live tool tail once the turn finishes.
   useEffect(() => {
     if (!isStreaming) setLiveTool(null);
   }, [isStreaming]);
+  // …and as soon as the running tool's RESULT lands, so a finished command's
+  // last output doesn't sit under a stale "(live)" label for the rest of the
+  // turn (#357).
+  useEffect(() => {
+    const last = activeToolCalls[activeToolCalls.length - 1];
+    if (last?.output !== undefined) setLiveTool(null);
+  }, [activeToolCalls]);
 
   // Any modal overlay is open: each overlay owns its own input, so the global
   // key handler and the chat InputBar must stand down to avoid double-handling (#254).
@@ -1067,7 +1126,7 @@ export default function App({ config }: AppProps) {
       <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} scrollOffset={scrollOffset} pageSize={CHAT_PAGE_SIZE} />
       {streamingReasoning && !streamingContent && (
         <Box>
-          <Text color="gray" dimColor>{"💭 "}reasoning… {streamingReasoning.split("\n").pop()?.slice(-160)}</Text>
+          <Text color="gray" dimColor>{"💭 "}reasoning ({Math.round(streamingReasoning.length / 4)} tokens{reasoningSecs > 0 ? `, ${reasoningSecs}s` : ""})… {streamingReasoning.replace(/\s+/g, " ").slice(-160)}</Text>
         </Box>
       )}
       {isStreaming && liveTool && (

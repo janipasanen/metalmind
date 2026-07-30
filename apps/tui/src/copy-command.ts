@@ -44,21 +44,46 @@ export function copyToClipboard(text: string): boolean {
   }
 }
 
-/** Decide what to copy from `/copy [last|code]` and do it; returns a status message. */
+/** Decide what to copy from `/copy [last|code|all|<n>]` and do it; returns a
+ *  status message. `<n>` selects the nth assistant message counting back from
+ *  the latest; `all` copies the whole conversation (#356). */
 export function handleCopyCommand(arg: string, messages: CopyMessage[]): string {
   const what = arg.trim().toLowerCase() || "last";
-  const lastMsg = lastAssistantMessage(messages);
-  if (!lastMsg) return "Nothing to copy yet.";
 
   let payload: string | null;
-  if (what === "code") {
+  let label: string;
+  if (what === "all") {
+    payload = messages
+      .filter((m) => m.content.trim())
+      .map((m) => `${m.role === "user" ? "You" : m.role === "assistant" ? "AI" : "System"}: ${m.content}`)
+      .join("\n\n");
+    if (!payload) return "Nothing to copy yet.";
+    label = "the whole conversation";
+  } else if (/^\d+$/.test(what)) {
+    const n = parseInt(what, 10);
+    const assistants = messages.filter((m) => m.role === "assistant" && m.content.trim());
+    if (n < 1 || n > assistants.length) {
+      return assistants.length === 0
+        ? "Nothing to copy yet."
+        : `No assistant message #${n} — only ${assistants.length} so far (1 = most recent).`;
+    }
+    payload = assistants[assistants.length - n].content;
+    label = n === 1 ? "the last message" : `assistant message #${n} from the end`;
+  } else if (what === "code") {
+    const lastMsg = lastAssistantMessage(messages);
+    if (!lastMsg) return "Nothing to copy yet.";
     payload = extractLastCodeBlock(lastMsg);
     if (!payload) return "No code block found in the last message.";
+    label = "the last code block";
+  } else if (what === "last") {
+    payload = lastAssistantMessage(messages);
+    if (!payload) return "Nothing to copy yet.";
+    label = "the last message";
   } else {
-    payload = lastMsg;
+    return "Usage: /copy [last|code|all|<n>] — <n> is the nth assistant message counting back from the latest.";
   }
 
   if (!copyToClipboard(payload)) return "Couldn't access the clipboard (pbcopy).";
   const lines = payload.split("\n").length;
-  return `Copied ${what === "code" ? "the last code block" : "the last message"} to the clipboard (${lines} line${lines === 1 ? "" : "s"}).`;
+  return `Copied ${label} to the clipboard (${lines} line${lines === 1 ? "" : "s"}).`;
 }

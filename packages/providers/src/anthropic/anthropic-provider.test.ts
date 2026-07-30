@@ -417,6 +417,36 @@ describe("AnthropicProvider vision serialization (#177)", () => {
     const userMsg = body.messages.find((m: { role: string }) => m.role === "user");
     expect(userMsg.content).toContainEqual({ type: "text", text: "describe" });
     expect(userMsg.content).toContainEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } });
-    expect(userMsg.content).toContainEqual({ type: "image", source: { type: "url", url: "https://x/y.jpg" } });
+    // The FINAL block carries the conversation cache breakpoint (#334).
+    expect(userMsg.content).toContainEqual({
+      type: "image",
+      source: { type: "url", url: "https://x/y.jpg" },
+      cache_control: { type: "ephemeral" },
+    });
+  });
+
+  it("stamps a cache_control breakpoint on the last message block (#334)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ content: [{ type: "text", text: "hi" }] }),
+      text: async () => "{}",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new AnthropicProvider("claude-sonnet-4-6", "sk-ant-test");
+    await p.completeChat({ messages: [
+      { role: "user", content: "first turn" },
+      { role: "assistant", content: "reply" },
+      { role: "user", content: "second turn" },
+    ] });
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    const last = body.messages[body.messages.length - 1];
+    const blocks = Array.isArray(last.content) ? last.content : [];
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks[blocks.length - 1].cache_control).toEqual({ type: "ephemeral" });
+    // Earlier messages must NOT carry breakpoints (max-4 budget: system, tools, history tail).
+    for (const m of body.messages.slice(0, -1)) {
+      const bs = Array.isArray(m.content) ? m.content : [];
+      for (const b of bs) expect(b.cache_control).toBeUndefined();
+    }
   });
 });

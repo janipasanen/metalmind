@@ -1,6 +1,6 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
-import { loadConfigFromFile, loadXdgConfig, saveXdgConfig } from "@metalmind/config";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, runShellAsync, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
+import { loadConfigFromFile, loadMergedConfig, loadXdgConfig, saveXdgConfig, XDG_CONFIG_DIR } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
 import { SkillLoader, SkillManager } from "@metalmind/skills";
@@ -49,6 +49,7 @@ import type { ModelRoutingDecision } from "@metalmind/schemas";
 import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
 import { Redactor, StreamRedactor, collectSecrets } from "./redact.js";
+import { loadHooks, runHooks, type HookDef, type HookEvent } from "./lifecycle-hooks.js";
 import { retrieveContext } from "./rag/manager.js";
 import { mentionsContextBlock } from "./mentions.js";
 import { isAllowlisted } from "./approval-allowlist.js";
@@ -62,22 +63,42 @@ interface BufferedAttempt {
   errorMessage?: string;
 }
 
-function buildRegistry(projectRoot: string): ToolRegistry {
+function buildRegistry(projectRoot: string, tools?: MetalmindConfig["tools"]): ToolRegistry {
   const registry = new ToolRegistry();
   for (const tool of allReadOnlyTools) registry.register(tool);
-  for (const tool of allWriteTools) registry.register(tool);
-  for (const tool of allGitTools) registry.register(tool);
-  for (const tool of runShellTools) registry.register(tool);
+  // metalmind.yaml `tools` section (#347): a group explicitly set to false is
+  // never registered, so the model doesn't see those tools at all.
+  if (tools?.filesystem !== false) {
+    for (const tool of allWriteTools) registry.register(tool);
+    // Document tools: write Office/ODF/HTML/LaTeX/Markdown via writeDocument + format-specific tools.
+    for (const tool of allDocumentTools) registry.register(tool);
+  }
+  if (tools?.git !== false) for (const tool of allGitTools) registry.register(tool);
+  if (tools?.shell !== false) {
+    for (const tool of runShellTools) registry.register(tool);
+    // Background process tools: run/poll/stop long-running commands.
+    for (const tool of backgroundShellTools) registry.register(tool);
+  }
   // Code-intelligence tools: symbol/reference/call-graph navigation + LSP diagnostics.
   for (const tool of allSymbolTools) registry.register(tool);
   registry.register(createDiagnosticsTool(projectRoot));
   // Web tools: fetch a URL / search the web.
   for (const tool of allWebTools) registry.register(tool);
-  // Document tools: write Office/ODF/HTML/LaTeX/Markdown via writeDocument + format-specific tools.
-  for (const tool of allDocumentTools) registry.register(tool);
-  // Background process tools: run/poll/stop long-running commands.
-  for (const tool of backgroundShellTools) registry.register(tool);
   return registry;
+}
+
+/** metalmind.yaml `permissions` (#347): a category explicitly set to `true`
+ *  pre-approves that category's tools for this project ("ask"/false keep the
+ *  normal approval gate). */
+const YAML_PERM_CATEGORIES: Array<{ key: "allowWriteFiles" | "allowDeleteFiles" | "allowShellCommands" | "allowGitCommit"; tools: Set<string> }> = [
+  { key: "allowWriteFiles", tools: new Set(["writeFile", "createFile", "editFile", "moveFile", "multiEdit", "replaceInProject", "createDirectory", "writeDocument"]) },
+  { key: "allowDeleteFiles", tools: new Set(["deleteFile", "deleteDirectory"]) },
+  { key: "allowShellCommands", tools: new Set(["runCommand", "runBackground"]) },
+  { key: "allowGitCommit", tools: new Set(["gitAdd", "gitCommit", "gitPush"]) },
+];
+function yamlPreapproved(perms: MetalmindConfig["permissions"], toolName: string): boolean {
+  if (!perms) return false;
+  return YAML_PERM_CATEGORIES.some((c) => perms[c.key] === true && c.tools.has(toolName));
 }
 
 /** Exponential backoff for transient retries: 0.5s, 1s, 2s, … capped at 8s. */
@@ -481,6 +502,8 @@ export interface AgentLoopOptions {
   onTodos?: (todos: TodoItem[]) => void;
   /** Live output chunks from long-running tools (shell), already redacted. */
   onToolProgress?: (toolName: string, chunk: string) => void;
+  /** Persistence problems the user MUST see (corrupt db, disabled store, failed saves) (#332). */
+  onPersistenceIssue?: (message: string) => void;
   /** Called before each turn with the history token usage vs the active model's limit. */
   onContextUsage?: (used: number, limit: number) => void;
   /** Called when real token usage is reported by a provider (#157). */
@@ -500,6 +523,8 @@ export class AgentLoop {
   private onCoordinatorPlan?: (steps: PlanStep[]) => void;
   private onTodos?: (todos: TodoItem[]) => void;
   private onToolProgress?: (toolName: string, chunk: string) => void;
+  private onPersistenceIssue?: (message: string) => void;
+  private lastPersistError = "";
   private todos: TodoItem[] = [];
   private onContextUsage?: (used: number, limit: number) => void;
   private onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
@@ -535,8 +560,15 @@ export class AgentLoop {
   private editedThisTurn = false;
   /** Remaining fix-it retries for a failing end-of-turn check (#282). */
   private verifyRetriesLeft = 2;
-  /** Memoized repo-map string (repo walks are expensive); invalidated via systemPromptDirty. */
+  /** Memoized repo-map string (repo walks are expensive); refreshed in the
+   *  background after edits rather than on the next turn's critical path (#340). */
   private repoMapCache: string | null | undefined;
+  private repoMapRebuildQueued = false;
+  /** User lifecycle hooks: pre/post-tool, sessionStart, stop (#346). */
+  private lifecycleHooks: Partial<Record<HookEvent, HookDef[]>> = {};
+  /** metalmind.yaml permissions/tools sections, honored since #347. */
+  private yamlPermissions: MetalmindConfig["permissions"];
+  private yamlTools: MetalmindConfig["tools"];
   /** Build vs Plan agent mode. In "plan" mode the agent investigates and proposes
    *  a plan but cannot mutate files/repo (mutating tools are hidden + refused) (#11). */
   private mode: "build" | "plan" = "build";
@@ -574,6 +606,7 @@ export class AgentLoop {
     this.onCoordinatorPlan = options.onCoordinatorPlan;
     this.onTodos = options.onTodos;
     this.onToolProgress = options.onToolProgress;
+    this.onPersistenceIssue = options.onPersistenceIssue;
     this.onContextUsage = options.onContextUsage;
     this.onUsage = options.onUsage;
     this.onApprovalRequest = options.onApprovalRequest;
@@ -589,7 +622,11 @@ export class AgentLoop {
     }
     this.rebuildRedactor();
     this.projectRoot = options.projectRoot ?? process.cwd();
-    this.registry = buildRegistry(this.projectRoot);
+    // metalmind.yaml permissions/tools now shape the registry + approval gate (#347).
+    const yamlCfg = loadConfigFromFile(this.projectRoot);
+    this.yamlPermissions = yamlCfg.permissions;
+    this.yamlTools = yamlCfg.tools;
+    this.registry = buildRegistry(this.projectRoot, yamlCfg.tools);
     this.safetyValidator = new SafetyValidator(this.projectRoot);
     this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
     // Warm the symbol/reference index in the background so findSymbol/findReferences
@@ -607,6 +644,10 @@ export class AgentLoop {
     } catch {
       // skill discovery failure must never block startup
     }
+    // User lifecycle hooks (#346): load definitions and fire sessionStart in the
+    // background — hook failures must never block or crash the session.
+    this.lifecycleHooks = loadHooks(this.projectRoot);
+    void runHooks(this.lifecycleHooks, "sessionStart", this.projectRoot).catch(() => {});
   }
 
   /** List discovered skills with their active state, for `/skill list` (#156). */
@@ -732,6 +773,7 @@ export class AgentLoop {
       .slice(0, 20);
     if (changed.length === 0) return output;
     this.systemPromptDirty = true;
+    this.scheduleRepoMapRebuild();
     this.editedThisTurn = true;
     for (const p of changed) {
       try { indexFile(this.resolveProjectPath(p)); } catch { /* unparseable */ }
@@ -787,6 +829,7 @@ export class AgentLoop {
       execFileSync("git", ["read-tree", ckpt.sha], { cwd: this.projectRoot, env, timeout: 30_000 });
       execFileSync("git", ["checkout-index", "-af"], { cwd: this.projectRoot, env, timeout: 60_000 });
       this.systemPromptDirty = true;
+      this.scheduleRepoMapRebuild();
       // The file-level /undo//redo snapshots describe a timeline that no longer
       // exists — /undo after a rollback would silently RE-APPLY the rolled-back
       // edits. Invalidate both stacks so the two restore systems can't fight.
@@ -809,19 +852,20 @@ export class AgentLoop {
     return existsSync(join(this.projectRoot, "tsconfig.json")) ? "npx tsc --noEmit" : null;
   }
 
-  /** Run the project check synchronously; null on pass or no command, else the
-   *  (bounded) failure output (#282). */
-  private runProjectCheck(): string | null {
+  /** Run the project check ASYNCHRONOUSLY — the UI keeps rendering, Esc cancels
+   *  (process-group kill), and output streams to the live panel. Returns null on
+   *  pass/no-command/abort, else the bounded failure TAIL (#282, async per #333). */
+  private async runProjectCheck(signal?: AbortSignal): Promise<string | null> {
     const cmd = this.checkCommand();
     if (!cmd) return null;
-    try {
-      execSync(cmd, { cwd: this.projectRoot, timeout: 60_000, stdio: "pipe", encoding: "utf-8", maxBuffer: 4 * 1024 * 1024 });
-      return null;
-    } catch (err) {
-      const e = err as { stdout?: string; stderr?: string };
-      const out = `${e.stdout ?? ""}\n${e.stderr ?? ""}`.trim();
-      return (out || "check command failed").slice(0, 4_000);
-    }
+    const red = new StreamRedactor(this.redactor);
+    const r = await runShellAsync(cmd, this.projectRoot, 60_000, signal, (c) => {
+      const safe = red.push(c);
+      if (safe) this.onToolProgress?.("project check", safe);
+    });
+    if (r.exitCode === 0 || signal?.aborted) return null;
+    const out = `${r.stdout}\n${r.stderr}`.trim();
+    return (out || "check command failed").slice(-4_000);
   }
 
   /** /test, /check, /lint (#295): run the verification tool through the approval
@@ -1070,7 +1114,11 @@ export class AgentLoop {
   }
 
   async initMcp(): Promise<void> {
-    const userConfig = loadXdgConfig();
+    // metalmind.yaml `tools.mcp: false` disables MCP for this project (#347).
+    if (this.yamlTools?.mcp === false) return;
+    // Merged view: project metalmind.yaml `mcp` servers appear alongside the
+    // globally configured ones (#347).
+    const userConfig = loadMergedConfig(this.projectRoot);
     for (const [id, srv] of Object.entries(userConfig.mcpServers || {})) {
       if (!srv.enabled) continue;
       try {
@@ -1508,10 +1556,17 @@ export class AgentLoop {
           }
           const retryable = isRetryableError(err);
           if (retryable && attempt < maxRetries) {
-            const waitMs =
-              err instanceof ProviderError && err.retryAfterMs
-                ? err.retryAfterMs
-                : backoffMs(attempt);
+            // Cap Retry-After: a hostile/buggy 429 header must not park the turn
+            // for minutes; and TELL the user — an invisible retry looks like a
+            // hang (#336).
+            const waitMs = Math.min(
+              err instanceof ProviderError && err.retryAfterMs ? err.retryAfterMs : backoffMs(attempt),
+              15_000,
+            );
+            yield {
+              type: "text",
+              text: `\n[${provider.providerName} busy (${errText(err).slice(0, 80)}) — retrying in ${Math.ceil(waitMs / 1000)}s, attempt ${attempt + 2}/${maxRetries + 1}]\n`,
+            };
             await sleep(waitMs, signal);
             continue; // retry same provider
           }
@@ -1542,6 +1597,11 @@ export class AgentLoop {
       this.coordinator?.markAllSteps("completed");
       // Persist after every turn, including on cancel/abort (#140).
       this.saveSession();
+      // User stop hooks (#346): the turn is over — fire-and-forget (e.g. a
+      // notification sound); never delays or fails the turn itself.
+      if (this.lifecycleHooks.stop?.length) {
+        void runHooks(this.lifecycleHooks, "stop", this.projectRoot).catch(() => {});
+      }
     }
   }
 
@@ -1558,8 +1618,10 @@ export class AgentLoop {
       this.history.push({ role: "system", content: this.buildSystemPrompt() });
     } else if (this.systemPromptDirty && this.history[0]?.role === "system") {
       // The project changed since the prompt was built (edits/restore) — refresh
-      // it (and the repo map) so the model isn't navigating a stale tree (#302).
-      this.repoMapCache = undefined;
+      // it so the model isn't navigating a stale tree (#302). The repo map itself
+      // is rebuilt in the background after edits (#340); if that rebuild hasn't
+      // landed yet this turn reuses the previous map (one turn stale) instead of
+      // paying a repo walk before the first token.
       this.history[0] = { role: "system", content: this.buildSystemPrompt() };
       this.systemPromptDirty = false;
     }
@@ -1899,7 +1961,8 @@ export class AgentLoop {
         // so running the check inside runSubagent consumed the parent's retries
         // and injected failure notes into the sub-agent's throwaway history.
         if (this.subagentDepth === 0 && this.editedThisTurn && this.verifyRetriesLeft > 0 && this.mode !== "plan") {
-          const failure = this.runProjectCheck();
+          yield { type: "text", text: "\n[running project check…]\n" };
+          const failure = await this.runProjectCheck(signal);
           if (failure) {
             this.verifyRetriesLeft--;
             this.history.push({
@@ -2036,6 +2099,28 @@ export class AgentLoop {
           }
         }
 
+        // User preTool hooks (#346): a hook exiting with code 2 blocks the call.
+        if (this.lifecycleHooks.preTool?.length) {
+          const pre = await runHooks(this.lifecycleHooks, "preTool", this.projectRoot, {
+            MM_TOOL_NAME: call.toolName,
+            MM_TOOL_INPUT: call.argumentsJson.slice(0, 4000),
+          }).catch(() => ({ blocked: undefined, notes: [] as string[] }));
+          if (pre.blocked) {
+            const output = `Blocked by preTool hook: ${this.redactor.redact(pre.blocked)}`;
+            this.auditLogRedacted({
+              timestamp: new Date().toISOString(),
+              toolName: call.toolName,
+              input: inputObj,
+              output,
+              success: false,
+              error: "blocked by preTool hook",
+            });
+            this.history.push({ role: "tool", content: output, metadata: { toolCallId: call.toolCallId } });
+            yield { type: "tool-result", toolCallId: call.toolCallId, output };
+            continue;
+          }
+        }
+
         let output: string;
         try {
           const mcpEntry = this.mcpTools.get(call.toolName);
@@ -2092,6 +2177,15 @@ export class AgentLoop {
 
         // Scrub any secret values before the output reaches the model or UI (#168).
         output = this.redactor.redact(output);
+
+        // User postTool hooks (#346) — observational, fire-and-forget.
+        if (this.lifecycleHooks.postTool?.length) {
+          void runHooks(this.lifecycleHooks, "postTool", this.projectRoot, {
+            MM_TOOL_NAME: call.toolName,
+            MM_TOOL_INPUT: call.argumentsJson.slice(0, 4000),
+            MM_TOOL_OUTPUT: output.slice(0, 4000),
+          }).catch(() => {});
+        }
 
         yield {
           type: "tool-result",
@@ -2210,6 +2304,8 @@ export class AgentLoop {
     if (!(this.safetyValidator.requiresApproval(toolName) || this.mcpTools.has(toolName))) return false;
     // A persisted allowlist can pre-approve specific tools/paths/commands (#220).
     if (isAllowlisted(loadXdgConfig().approvalAllowlist, toolName, input)) return false;
+    // metalmind.yaml permissions: category explicitly `true` → pre-approved (#347).
+    if (yamlPreapproved(this.yamlPermissions, toolName)) return false;
     // An active skill that binds this tool with allowAutoExecute pre-approves it (#228).
     if (this.skillManager.getAutoExecuteTools().has(toolName)) return false;
     return true;
@@ -2791,6 +2887,22 @@ export class AgentLoop {
     return this.repoMapCache;
   }
 
+  /** Rebuild the repo map OFF the turn's critical path (#340). Edits mark the
+   *  prompt dirty; rebuilding (repo walk + symbol extraction) at the start of
+   *  the next turn added visible first-token latency. Rebuild shortly after the
+   *  mutation instead, then re-mark the prompt dirty so the freshly cached map
+   *  is picked up by the next prompt rebuild at memo-hit cost. */
+  private scheduleRepoMapRebuild(): void {
+    if (this.repoMapRebuildQueued) return;
+    this.repoMapRebuildQueued = true;
+    const t = setTimeout(() => {
+      this.repoMapRebuildQueued = false;
+      this.repoMapCache = this.buildRepoMap();
+      this.systemPromptDirty = true;
+    }, 50);
+    t.unref?.();
+  }
+
   private buildRepoMap(): string | null {
     try {
       const map = new RepoMapV2(this.projectRoot, {
@@ -2810,23 +2922,32 @@ export class AgentLoop {
     }
   }
 
-  /** Bounded startup crawl that populates the shared symbol/reference index (#149). */
+  /** Bounded startup crawl that populates the shared symbol/reference index (#149).
+   *  Chunked (#341): parsing hundreds of files in one microtask blocked the event
+   *  loop — frozen first paint and dropped keystrokes for seconds on big repos.
+   *  Parse a small batch per macrotask so the TUI stays responsive while the
+   *  index warms up; timers are unref'd so indexing never holds the process open. */
   private indexProjectInBackground(): void {
-    void Promise.resolve().then(() => {
-      try {
-        const files: string[] = [];
-        this.collectSourceFiles(this.projectRoot, files);
-        for (const f of files) {
-          try {
-            indexFile(f);
-          } catch {
-            // skip unparseable file
-          }
+    const files: string[] = [];
+    try {
+      this.collectSourceFiles(this.projectRoot, files);
+    } catch {
+      return; // never let indexing crash the agent
+    }
+    const BATCH = 20;
+    let i = 0;
+    const step = () => {
+      const end = Math.min(i + BATCH, files.length);
+      for (; i < end; i++) {
+        try {
+          indexFile(files[i]);
+        } catch {
+          // skip unparseable file
         }
-      } catch {
-        // never let indexing crash the agent
       }
-    });
+      if (i < files.length) setTimeout(step, 10).unref?.();
+    };
+    setTimeout(step, 0).unref?.();
   }
 
   private collectSourceFiles(dir: string, acc: string[]): void {
@@ -2876,6 +2997,7 @@ export class AgentLoop {
     // The tree/symbols changed — rebuild the system prompt (repo map) next turn (#302),
     // and verify the project before this turn ends (#282).
     this.systemPromptDirty = true;
+    this.scheduleRepoMapRebuild();
     this.editedThisTurn = true;
 
     const editorCfg = loadXdgConfig().editor;
@@ -2883,12 +3005,11 @@ export class AgentLoop {
       const abs = this.resolveProjectPath(p);
       // Format-on-write (#162), opt-in via config.
       if (editorCfg?.formatOnWrite) {
-        try {
-          const cmd = `${editorCfg.formatCommand || "npx prettier --write"} ${JSON.stringify(abs)}`;
-          execSync(cmd, { cwd: this.projectRoot, timeout: 20_000, stdio: "ignore" });
-        } catch {
-          // formatter missing/failed — leave the file as written
-        }
+        // Async: execSync froze the whole TUI for up to 20s per file (#333).
+        const cmd = `${editorCfg.formatCommand || "npx prettier --write"} ${JSON.stringify(abs)}`;
+        await runShellAsync(cmd, this.projectRoot, 20_000).catch(() => {
+          /* formatter missing/failed — leave the file as written */
+        });
       }
       // Re-index the (possibly formatted) file so lookups reflect the change (#149).
       try {
@@ -2920,6 +3041,22 @@ export class AgentLoop {
     } catch {
       return null;
     }
+  }
+
+  /** Global user instructions at ~/.config/metalmind/instructions.md (#348):
+   *  per-user standing guidance that follows the user across projects. */
+  private loadGlobalInstructions(): string | null {
+    const abs = join(XDG_CONFIG_DIR, "instructions.md");
+    try {
+      if (existsSync(abs)) {
+        let c = readFileSync(abs, "utf8");
+        if (c.length > 8000) c = c.slice(0, 8000) + "\n…(truncated)";
+        return c.trim() || null;
+      }
+    } catch {
+      // unreadable — skip silently
+    }
+    return null;
   }
 
   /** Load the project memory/rules file (AGENTS.md/CLAUDE.md/…) if present (#146). */
@@ -3063,6 +3200,18 @@ export class AgentLoop {
       "When asked about MetalMind configuration, read ~/.config/metalmind/config.json with your file tools.",
     ];
 
+    // Global per-user standing instructions (#348) — apply in every project;
+    // injected before the project block so project instructions win on conflict.
+    const globalInstr = this.loadGlobalInstructions();
+    if (globalInstr) {
+      lines.push(
+        "",
+        "--- User instructions (from ~/.config/metalmind/instructions.md) — apply across all projects; project instructions take precedence on conflict ---",
+        globalInstr,
+        "--- end user instructions ---",
+      );
+    }
+
     // Inject project-specific standing instructions (AGENTS.md/CLAUDE.md/…) if present (#146).
     const memory = this.loadProjectMemory();
     if (memory) {
@@ -3129,17 +3278,31 @@ export class AgentLoop {
   async initPersistence(opts: { continue?: boolean; resumeId?: string } = {}): Promise<AgentMessage[]> {
     try {
       // Lazy import: if the native better-sqlite3 addon is unavailable, this
-      // throws here and persistence is silently disabled — the TUI still runs.
+      // throws here and persistence is disabled — the TUI still runs, but the
+      // user is TOLD (silent loss of a day's history is the worst failure) (#332).
       const { SqliteSessionStore } = await import("@metalmind/memory");
-      this.sessionStore = new SqliteSessionStore(join(this.projectRoot, ".metalmind", "sessions.db"));
-    } catch {
+      const store = new SqliteSessionStore(join(this.projectRoot, ".metalmind", "sessions.db"));
+      this.sessionStore = store;
+      if (store.recoveredFromCorruption) {
+        this.onPersistenceIssue?.(`sessions.db was corrupt — quarantined to ${store.recoveredFromCorruption}; starting a fresh store.`);
+      }
+    } catch (err) {
       this.sessionStore = null;
+      this.onPersistenceIssue?.(`Session persistence DISABLED: ${errText(err)} (try: npm rebuild better-sqlite3). Conversations will NOT survive restart.`);
       return [];
     }
     try {
       if (opts.resumeId) {
-        this.sessionId = opts.resumeId;
-        this.history = this.sessionStore.loadMessages(opts.resumeId);
+        // Validate before adopting: a phantom id would silently break every
+        // subsequent save (FK constraint) while looking like a fresh session (#332).
+        const known = this.sessionStore.getSession?.(opts.resumeId) ?? this.sessionStore.listSessions().find((s) => s.id === opts.resumeId);
+        if (!known) {
+          this.onPersistenceIssue?.(`--resume ${opts.resumeId}: no such session — started a new one instead.`);
+          this.sessionId = this.sessionStore.createSession();
+        } else {
+          this.sessionId = opts.resumeId;
+          this.history = this.sessionStore.loadMessages(opts.resumeId);
+        }
       } else if (opts.continue) {
         const recent = this.sessionStore.listSessions()[0];
         if (recent) {
@@ -3163,6 +3326,7 @@ export class AgentLoop {
       // A resumed session's system prompt (and repo map) may predate on-disk
       // changes — rebuild it on the first turn (#302).
       this.systemPromptDirty = true;
+      this.scheduleRepoMapRebuild();
     }
     return this.displayMessages();
   }
@@ -3220,8 +3384,14 @@ export class AgentLoop {
         const firstUser = this.history.find((m) => m.role === "user")?.content?.trim();
         if (firstUser) this.sessionStore.renameSession(this.sessionId, firstUser.replace(/\s+/g, " ").slice(0, 60));
       }
-    } catch {
-      // persistence failure must never break a turn
+    } catch (err) {
+      // Persistence failure must never break a turn — but surface it ONCE per
+      // distinct error so silent history loss can't go unnoticed (#332).
+      const msg = errText(err);
+      if (msg !== this.lastPersistError) {
+        this.lastPersistError = msg;
+        this.onPersistenceIssue?.(`Session save failing: ${msg}`);
+      }
     }
   }
 
@@ -3278,6 +3448,7 @@ export class AgentLoop {
       // predate on-disk changes — rebuild on the next turn (#302). And the
       // previous conversation's task list must not bleed into this one.
       this.systemPromptDirty = true;
+      this.scheduleRepoMapRebuild();
       this.todos = [];
       this.onTodos?.([]);
       this.turnContext = [];
@@ -3391,8 +3562,11 @@ export class AgentLoop {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const file = join(dir, `transcript-${stamp}.${format === "json" ? "json" : "md"}`);
 
+    // Redact BOTH formats (#355): tool results in history can contain secrets
+    // (env dumps, config echoes) that the UI scrubs but a raw export would
+    // persist to disk verbatim.
     if (format === "json") {
-      writeFileSync(file, JSON.stringify(this.history, null, 2), "utf-8");
+      writeFileSync(file, this.redactor.redact(JSON.stringify(this.history, null, 2)), "utf-8");
       return file;
     }
 
@@ -3401,14 +3575,21 @@ export class AgentLoop {
       .map((m) => {
         if (m.role === "user") return `## You\n\n${m.content}`;
         if (m.role === "assistant") {
-          const tools = m.toolCalls?.length ? `\n\n_Tool calls: ${m.toolCalls.map((t) => t.toolName).join(", ")}_` : "";
+          // Include the arguments, not just tool names (#355) — an export that
+          // says "ran editFile" without what it edited isn't a usable record.
+          const tools = m.toolCalls?.length
+            ? "\n\n" + m.toolCalls.map((t) => {
+                const args = (t.argumentsJson ?? "").replace(/\s+/g, " ");
+                return `- \`${t.toolName}(${args.length > 200 ? args.slice(0, 197) + "…" : args})\``;
+              }).join("\n")
+            : "";
           return `## Assistant\n\n${m.content}${tools}`;
         }
         if (m.role === "tool") return `> tool result:\n>\n> \`\`\`\n> ${m.content.slice(0, 2000).replace(/\n/g, "\n> ")}\n> \`\`\``;
         return m.content;
       })
       .join("\n\n");
-    writeFileSync(file, `# MetalMind transcript\n\n${md}\n`, "utf-8");
+    writeFileSync(file, this.redactor.redact(`# MetalMind transcript\n\n${md}\n`), "utf-8");
     return file;
   }
 

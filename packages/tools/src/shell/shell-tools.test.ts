@@ -8,6 +8,7 @@ import {
   runTestsTool,
   runBuildTool,
   runLintTool,
+  runShellAsync,
 } from "./shell-tools.js";
 
 describe("runCommandTool", () => {
@@ -134,5 +135,39 @@ describe("live output streaming (gap-5)", () => {
     expect(chunks.length).toBeGreaterThanOrEqual(2);
     expect(chunks.join("")).toContain("first");
     expect(chunks.join("")).toContain("second");
+  });
+});
+
+describe("exit-settle and group-kill regressions (#284/#350)", () => {
+  it("settles on parent exit even when a grandchild holds the stdio pipes open", async () => {
+    // `sleep 30 &` inherits the shell's stdout pipe, so 'close' never fires
+    // until the grandchild dies; settling must anchor on 'exit' instead.
+    const start = Date.now();
+    const r = await runShellAsync("sleep 30 & echo done", process.cwd(), 20_000);
+    expect(r.stdout).toContain("done");
+    expect(r.exitCode).toBe(0);
+    expect(Date.now() - start).toBeLessThan(5_000); // NOT the 20s timeout or 30s sleep
+  });
+
+  it("kills the whole process group on timeout — grandchildren do not survive", async () => {
+    const r = await runShellAsync("sleep 30 & echo PID:$!; wait", process.cwd(), 1_500);
+    expect(r.exitCode).toBe(124);
+    expect(r.stderr).toContain("timed out");
+    const pid = Number(/PID:(\d+)/.exec(r.stdout)?.[1]);
+    expect(pid).toBeGreaterThan(0);
+    // Give the SIGKILL a moment, then the grandchild must be gone.
+    await new Promise((res) => setTimeout(res, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("force-settles promptly on abort with exit code 130", async () => {
+    const ac = new AbortController();
+    const start = Date.now();
+    const p = runShellAsync("sleep 30", process.cwd(), 60_000, ac.signal);
+    setTimeout(() => ac.abort(), 200);
+    const r = await p;
+    expect(r.exitCode).toBe(130);
+    expect(r.stderr).toContain("cancelled");
+    expect(Date.now() - start).toBeLessThan(3_000);
   });
 });

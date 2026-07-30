@@ -56,20 +56,27 @@ export class RagIndex {
   async addFile(file: string, content: string): Promise<number> {
     this.chunks = this.chunks.filter((c) => c.file !== file);
     const pieces = chunkText(content);
-    let n = 0;
-    for (const p of pieces) {
-      const vector = await this.embedder.embed(p.text);
+    // Batch-embed where the backend supports it (#349): one HTTP round-trip per
+    // 32 chunks instead of one per chunk.
+    const vectors: number[][] = [];
+    if (this.embedder.embedBatch) {
+      for (let i = 0; i < pieces.length; i += 32) {
+        vectors.push(...(await this.embedder.embedBatch(pieces.slice(i, i + 32).map((p) => p.text))));
+      }
+    } else {
+      for (const p of pieces) vectors.push(await this.embedder.embed(p.text));
+    }
+    pieces.forEach((p, i) => {
       this.chunks.push({
         id: `${file}:${p.startLine}`,
         file,
         startLine: p.startLine,
         endLine: p.endLine,
         text: p.text,
-        vector,
+        vector: vectors[i],
       });
-      n++;
-    }
-    return n;
+    });
+    return pieces.length;
   }
 
   /** Top-k chunks most similar to the query. */

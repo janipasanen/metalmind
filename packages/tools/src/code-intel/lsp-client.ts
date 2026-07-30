@@ -70,9 +70,25 @@ export class LspClient {
       cwd: this.rootPath,
     });
 
-    this.process.on("exit", () => {
+    // Death cleanup (#337): fail in-flight requests immediately (instead of
+    // each waiting out its 30s timeout), release diagnostics waiters, and drop
+    // per-process document state so a later start() re-opens files fresh.
+    // Guarded by generation: a stale exit event from a replaced process must
+    // not clobber the new one's state.
+    const proc = this.process;
+    const onDeath = () => {
+      if (this.process !== proc) return;
       this.connected = false;
-    });
+      this.process = null;
+      for (const p of this.pending.values()) p.reject(new Error("LSP server exited"));
+      this.pending.clear();
+      for (const list of this.diagWaiters.values()) for (const w of list) w.resolve();
+      this.diagWaiters.clear();
+      this.opened.clear();
+      this.docVersions.clear();
+    };
+    proc.on("exit", onDeath);
+    proc.on("error", onDeath); // spawn failure (e.g. npx missing) must not throw uncaught
 
     // LSP base protocol: messages are framed with a `Content-Length` header and
     // a \r\n\r\n separator — NOT newline-delimited JSON. Buffer raw stdout bytes

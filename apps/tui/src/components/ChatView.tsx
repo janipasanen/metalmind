@@ -34,6 +34,52 @@ function truncateJson(json: string, max = 60): string {
   return json.slice(0, max - 3) + "...";
 }
 
+/** One completed history message. Memoized (#339): streaming re-renders the view
+ *  on every token, and re-rendering (and re-parsing markdown for) the whole
+ *  scrollback each time makes long sessions visibly sluggish. Message objects
+ *  are append-only and never mutated (useChat builds fresh objects), so
+ *  reference equality is the correct bail-out. */
+const HistoryMessage = React.memo(function HistoryMessage({ msg, accent }: { msg: ChatMessage; accent: string }) {
+  return (
+    <Box flexDirection="column" marginBottom={0}>
+      <Box flexDirection="row">
+        <Box width={8} flexShrink={0}>
+          <Text color={msg.role === "user" ? "green" : msg.role === "system" ? "gray" : accent} bold>
+            {roleLabel[msg.role] ?? msg.role}
+          </Text>
+        </Box>
+        <Box flexGrow={1}>
+          {msg.role === "assistant"
+            ? <MarkdownText text={msg.content} accent={accent} />
+            : <Text color={msg.role === "system" ? "gray" : undefined}>{msg.content}</Text>}
+        </Box>
+      </Box>
+      {msg.toolCalls?.length ? (
+        msg.toolCalls.map((tc) => (
+          <Box key={tc.id} marginLeft={8} flexDirection="column">
+            <Box>
+              <Text color="yellow" dimColor>
+                ↳ {tc.toolName}({truncateJson(tc.argumentsJson)})
+              </Text>
+            </Box>
+            {tc.diff ? (
+              <Box marginLeft={2} flexDirection="column">
+                <DiffView diff={tc.diff} filePath={tc.filePath} maxLines={12} />
+              </Box>
+            ) : tc.output ? (
+              <Box marginLeft={2}>
+                <Text color="green" dimColor>
+                  ← {truncateJson(tc.output, 200)}
+                </Text>
+              </Box>
+            ) : null}
+          </Box>
+        ))
+      ) : null}
+    </Box>
+  );
+});
+
 export default function ChatView({
   messages,
   streamingContent,
@@ -57,42 +103,7 @@ export default function ChatView({
       )}
 
       {visibleMessages.map((msg) => (
-        <Box key={msg.id} flexDirection="column" marginBottom={0}>
-          <Box flexDirection="row">
-            <Box width={8} flexShrink={0}>
-              <Text color={msg.role === "user" ? "green" : msg.role === "system" ? "gray" : accent} bold>
-                {roleLabel[msg.role] ?? msg.role}
-              </Text>
-            </Box>
-            <Box flexGrow={1}>
-              {msg.role === "assistant"
-                ? <MarkdownText text={msg.content} accent={accent} />
-                : <Text color={msg.role === "system" ? "gray" : undefined}>{msg.content}</Text>}
-            </Box>
-          </Box>
-          {msg.toolCalls?.length ? (
-            msg.toolCalls.map((tc) => (
-              <Box key={tc.id} marginLeft={8} flexDirection="column">
-                <Box>
-                  <Text color="yellow" dimColor>
-                    ↳ {tc.toolName}({truncateJson(tc.argumentsJson)})
-                  </Text>
-                </Box>
-                {tc.diff ? (
-                  <Box marginLeft={2} flexDirection="column">
-                    <DiffView diff={tc.diff} filePath={tc.filePath} maxLines={12} />
-                  </Box>
-                ) : tc.output ? (
-                  <Box marginLeft={2}>
-                    <Text color="green" dimColor>
-                      ← {truncateJson(tc.output, 200)}
-                    </Text>
-                  </Box>
-                ) : null}
-              </Box>
-            ))
-          ) : null}
-        </Box>
+        <HistoryMessage key={msg.id} msg={msg} accent={accent} />
       ))}
 
       {win.hiddenBelow > 0 && (

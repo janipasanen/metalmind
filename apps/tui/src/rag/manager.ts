@@ -81,7 +81,7 @@ export async function retrieveContext(projectRoot: string, query: string, k = 4)
   return `Relevant context retrieved from the indexed documents:\n\n${blocks.join("\n\n")}`;
 }
 
-export async function handleRagCommand(rawArgs: string, projectRoot: string): Promise<string> {
+export async function handleRagCommand(rawArgs: string, projectRoot: string, onProgress?: (msg: string) => void): Promise<string> {
   const parts = rawArgs.trim().split(/\s+/).filter(Boolean);
   const sub = (parts[0] ?? "status").toLowerCase();
   const rest = parts.slice(1).join(" ");
@@ -105,9 +105,12 @@ export async function handleRagCommand(rawArgs: string, projectRoot: string): Pr
 
     const files = statSync(target).isDirectory() ? (() => { const a: string[] = []; walk(target, a); return a; })() : [target];
     let chunks = 0;
-    for (const f of files) {
+    for (let i = 0; i < files.length; i++) {
+      // Per-file progress (#343): a directory index with a real embedding model
+      // can take minutes — show what's being embedded instead of a blank spinner.
+      onProgress?.(`[${i + 1}/${files.length}] ${relative(projectRoot, files[i])}  (${chunks} chunks so far)`);
       try {
-        chunks += await index.addFile(f, readFileSync(f, "utf-8"));
+        chunks += await index.addFile(files[i], readFileSync(files[i], "utf-8"));
       } catch {
         // skip unreadable files
       }

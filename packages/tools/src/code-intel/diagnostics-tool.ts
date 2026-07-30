@@ -14,6 +14,7 @@ const GetDiagnosticsSchema = z.object({
  */
 export function createDiagnosticsTool(projectRoot: string): AgentTool {
   let client: LspClient | null = null;
+  let lastStartAttempt = 0;
 
   return createTool({
     toolName: "getDiagnostics",
@@ -23,7 +24,17 @@ export function createDiagnosticsTool(projectRoot: string): AgentTool {
     requiresConfirmation: false,
     async execute(input) {
       try {
+        // Server died mid-session (crash/OOM/kill) — restart it, but at most
+        // once per 30s so a crash-looping server degrades to a clear error
+        // instead of a spawn storm (#337).
+        if (client && !client.isConnected()) {
+          if (Date.now() - lastStartAttempt < 30_000) {
+            return "LSP server is down and was restarted recently. Diagnostics temporarily unavailable — try again in ~30s.";
+          }
+          client = null;
+        }
         if (!client) {
+          lastStartAttempt = Date.now();
           client = new LspClient(projectRoot);
           await client.start();
           // Share the running server so the symbol tools prefer LSP too (#178).

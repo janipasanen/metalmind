@@ -122,6 +122,9 @@ vi.mock("@metalmind/tools", async () => {
   allDocumentTools: [],
   backgroundShellTools: [],
   isBlockedPath: (p: string) => /(^|\/|\\)(\.ssh|\.gnupg|\.aws|\.kube|\.env|\.git-credentials|\.npmrc|id_rsa|id_ed25519|authorized_keys)(\/|\\|$)/.test(p),
+  // Async shell runner used by project check, format-on-write, and lifecycle
+  // hooks — a successful no-op keeps those paths inert in unit tests.
+  runShellAsync: async () => ({ stdout: "", stderr: "", exitCode: 0, duration: 1 }),
   killAllBackgroundProcesses: () => {},
   indexFile: () => {},
   getReferenceIndex: () => ({ indexFile: () => {} }),
