@@ -62,6 +62,17 @@ interface OllamaChatRequest {
 /** How long Ollama keeps the model loaded after a request (avoids cold reloads). */
 const OLLAMA_KEEP_ALIVE = "10m";
 
+/** Ollama defaults num_ctx to the modelfile value (often 4096) regardless of what
+ *  the model can do, and silently truncates anything longer — so a provider that
+ *  ADVERTISES a 128k window must ask for it explicitly (#423). Sized from the
+ *  actual prompt so small turns don't reserve (and allocate) a huge KV cache. */
+function contextOptionFor(messages: Array<{ content: string }>, ceiling: number): number {
+  const chars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  const estimated = Math.ceil(chars / 4) + 2048; // rough tokens + headroom for the reply
+  const rounded = 1 << Math.ceil(Math.log2(Math.max(4096, estimated)));
+  return Math.min(ceiling, rounded);
+}
+
 /** Map ollama's done_reason onto the neutral finish reason (#366). */
 function mapOllamaDoneReason(reason: string | undefined): "stop" | "length" | "tool_calls" | "content_filter" | "other" {
   if (!reason) return "stop";
@@ -178,6 +189,7 @@ export class OllamaProvider implements ModelProvider {
       messages: ollamaMessages,
       stream: false,
       keep_alive: OLLAMA_KEEP_ALIVE,
+      options: { num_ctx: contextOptionFor(ollamaMessages, ollamaCapabilities.maximumContextTokens) },
     };
 
     // Forward tools so non-streaming calls can request tool use too (#222).
@@ -233,6 +245,7 @@ export class OllamaProvider implements ModelProvider {
       messages: ollamaMessages,
       stream: true,
       keep_alive: OLLAMA_KEEP_ALIVE,
+      options: { num_ctx: contextOptionFor(ollamaMessages, ollamaCapabilities.maximumContextTokens) },
     };
 
     if (request.tools && request.tools.length > 0) {

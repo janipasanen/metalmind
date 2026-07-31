@@ -136,6 +136,17 @@ function truncateMessageToFit(m: AgentMessage, maxTokens: number): AgentMessage 
   };
 }
 
+/** Whether the provider backing `tier` can actually execute tool calls (#422).
+ *  PROVIDER_CAPABILITIES mirrors the provider classes' own constants. */
+function tierCanCallTools(router: ModelRouter, tier: "tier1-local" | "tier2-medium" | "tier3-cloud"): boolean {
+  try {
+    const d = router.decisionForTier(tier, "capability probe", false);
+    return PROVIDER_CAPABILITIES[d.provider]?.supportsToolCalling !== false;
+  } catch {
+    return true; // never block routing on a probe failure
+  }
+}
+
 /** Exponential backoff for transient retries: 0.5s, 1s, 2s, … capped at 8s. */
 function backoffMs(attempt: number): number {
   return Math.min(8000, 500 * 2 ** attempt);
@@ -1956,6 +1967,16 @@ export class AgentLoop {
     // chosen tier's first response, evaluate it, and escalate UP to the next
     // tier if it's weak/empty/errored — instead of returning a poor tier-1
     // answer as-is. recordFailure feeds escalation thresholds + telemetry.
+    // Capability floor (#422): the coordinator path picks a tier from the intent
+    // classification and calls decisionForTier directly, bypassing the router's
+    // capability filter. MetalMind always sends tool definitions, and a provider
+    // that can't call tools (MLX) silently ignores them — the model then
+    // "answers" without ever touching the codebase. Bump to a tier that can.
+    if (toolDefs.length > 0 && !tierCanCallTools(this.router, targetTierKey)) {
+      const upgraded: Array<"tier2-medium" | "tier3-cloud"> = ["tier2-medium", "tier3-cloud"];
+      const better = upgraded.find((t) => t !== targetTierKey && tierCanCallTools(this.router!, t));
+      if (better) targetTierKey = better;
+    }
     let decision = this.router.decisionForTier(targetTierKey, `coordinator classified: ${targetTierKey}`);
     this.recordRoute(decision);
     let provider = this.getProvider(decision.provider, decision.modelId);

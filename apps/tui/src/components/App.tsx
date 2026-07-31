@@ -56,7 +56,29 @@ interface AppProps {
 }
 
 /** Messages shown per screen in the scrollback pager (#159). */
-const CHAT_PAGE_SIZE = 12;
+/** Rows the surrounding chrome needs (header, status bar, input box, margins).
+ *  The transcript gets whatever is left (#430). */
+const CHROME_ROWS = 14;
+const MIN_PAGE_SIZE = 3;
+const DEFAULT_PAGE_SIZE = 12;
+
+/** Messages that fit on screen, derived from the ACTUAL terminal height and kept
+ *  in sync on resize (#430). A fixed 12 overflowed short terminals, which makes
+ *  Ink clear and repaint the ENTIRE screen on every streamed token — the visible
+ *  flicker, and a wall of noise for a screen reader. */
+function useChatPageSize(): number {
+  const measure = () =>
+    Math.max(MIN_PAGE_SIZE, (process.stdout.rows ?? DEFAULT_PAGE_SIZE + CHROME_ROWS) - CHROME_ROWS);
+  const [size, setSize] = useState(measure);
+  useEffect(() => {
+    const onResize = () => setSize(measure());
+    process.stdout.on?.("resize", onResize);
+    return () => {
+      process.stdout.off?.("resize", onResize);
+    };
+  }, []);
+  return size;
+}
 
 /** Convert restored persisted messages into chat-view messages (#140). */
 function restoredToChatMessages(msgs: Array<{ role: string; content: string }>): ChatMessage[] {
@@ -121,6 +143,7 @@ export default function App({ config }: AppProps) {
   // Staged vision attachments (#375): without a persistent indicator an image
   // staged before /clear was invisible but still attached to the next message.
   const [stagedImages, setStagedImages] = useState(0);
+  const chatPageSize = useChatPageSize();
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
@@ -1046,6 +1069,13 @@ export default function App({ config }: AppProps) {
 
       yield* agentRef.current.run(input, signal);
     },
+    // Agent notices (truncation, provider fallback, tier escalation) were shown
+    // for a single frame with no record anywhere. Route them to the notification
+    // system so /notifications keeps a text-only history (#429).
+    onNotice: (text) => {
+      const clean = text.replace(/^\s*\[|\]\s*$/g, "").trim();
+      if (clean) notify("info", clean);
+    },
   });
 
   // Keep the pre-declared ref in sync for callbacks defined above useChat.
@@ -1142,8 +1172,8 @@ export default function App({ config }: AppProps) {
     if (key.ctrl && input === "p") setShowCommandPalette(prev => !prev);
     if (key.ctrl && input === "o") setStatusCollapsed(prev => !prev); // toggle Models panel (#266)
     // Scrollback: PgUp/PgDn page the transcript; End jumps back to the latest (#159).
-    if (key.pageUp) setScrollOffset(prev => prev + CHAT_PAGE_SIZE);
-    if (key.pageDown) setScrollOffset(prev => Math.max(0, prev - CHAT_PAGE_SIZE));
+    if (key.pageUp) setScrollOffset(prev => prev + chatPageSize);
+    if (key.pageDown) setScrollOffset(prev => Math.max(0, prev - chatPageSize));
     if (input === "G") setScrollOffset(0);
   }, { isActive: !anyOverlayOpen || pendingApproval !== null }); // approval keys must ALWAYS win, even under an overlay
 
@@ -1172,7 +1202,7 @@ export default function App({ config }: AppProps) {
   return (
     <Box flexDirection="column" padding={1} height="100%">
       <Header projectName={projectName} modelName={getActiveModel()} accent={theme.colors.accent} />
-      <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} scrollOffset={scrollOffset} pageSize={CHAT_PAGE_SIZE} />
+      <ChatView messages={messages} streamingContent={streamingContent} activeToolCalls={activeToolCalls} isStreaming={isStreaming} accent={theme.colors.accent} scrollOffset={scrollOffset} pageSize={chatPageSize} />
       {streamingReasoning && !streamingContent && (
         <Box>
           <Text color="gray" dimColor>{"💭 "}reasoning ({Math.round(streamingReasoning.length / 4)} tokens{reasoningSecs > 0 ? `, ${reasoningSecs}s` : ""})… {streamingReasoning.replace(/\s+/g, " ").slice(-160)}</Text>

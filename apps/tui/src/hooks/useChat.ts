@@ -3,6 +3,8 @@ import type { ChatMessage } from "../components/App.js";
 
 export interface UseChatOptions {
   generateResponse: (input: string, signal?: AbortSignal) => AsyncGenerator<ChatStreamEvent>;
+  /** Durable sink for agent control-plane notices (#429). */
+  onNotice?: (text: string) => void;
 }
 
 export type ChatStreamEvent =
@@ -75,6 +77,10 @@ export function useChat(options: UseChatOptions) {
               // it OUT of assistantContent so it is never persisted, replayed to
               // the model, or exported as the assistant's own words (#404).
               setStreamingContent(assistantContent + event.text);
+              // …and keep a durable, text-only record (#429): these were visible
+              // for a single frame, so a user who looked away never learned that
+              // their answer was truncated or served by a fallback provider.
+              options.onNotice?.(event.text.trim());
               break;
 
             case "reasoning":
