@@ -156,6 +156,16 @@ export function resolveConfig(
     }
   }
 
+  // An unknown provider (typo in --provider, a stale env var, or a config.json
+  // from a newer/older build) has no PROVIDER_DEFAULTS entry, so rawModel was
+  // `undefined` and the very next line threw a raw TypeError before the first
+  // paint (#436). Fail with a message that names the valid values instead.
+  if (!(provider in PROVIDER_DEFAULTS)) {
+    throw new Error(
+      `Unknown provider "${provider}". Valid providers: ${Object.keys(PROVIDER_DEFAULTS).join(", ")}. ` +
+        `Check --provider, METALMIND_PROVIDER, or "activeProvider" in your config.json.`,
+    );
+  }
   const rawModel = explicitModel || (explicitProvider || autoDetected ? PROVIDER_DEFAULTS[provider] : (mergedConfig.activeModel || PROVIDER_DEFAULTS[provider]));
   // Strip any accidental "provider/" prefix from the model name.
   const prefix = provider + "/";

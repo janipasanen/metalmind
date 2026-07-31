@@ -41,16 +41,20 @@ export interface HookOutcome {
 const EVENTS: HookEvent[] = ["preTool", "postTool", "sessionStart", "stop"];
 const MAX_HOOKS_PER_EVENT = 10;
 
-export function hookFiles(projectRoot: string): string[] {
-  return [
-    join(XDG_CONFIG_DIR, "hooks.json"),
-    join(projectRoot, ".metalmind", "hooks.json"),
-  ];
+export function hookFiles(projectRoot: string, includeProject = true): string[] {
+  const files = [join(XDG_CONFIG_DIR, "hooks.json")];
+  // The PROJECT file is execute-on-open, so the caller gates it on workspace
+  // trust (#442). The global file is the user's own and always applies.
+  if (includeProject) files.push(join(projectRoot, ".metalmind", "hooks.json"));
+  return files;
 }
 
-export function loadHooks(projectRoot: string): Partial<Record<HookEvent, HookDef[]>> {
+export function loadHooks(
+  projectRoot: string,
+  opts: { includeProject?: boolean } = {},
+): Partial<Record<HookEvent, HookDef[]>> {
   const merged: Partial<Record<HookEvent, HookDef[]>> = {};
-  for (const file of hookFiles(projectRoot)) {
+  for (const file of hookFiles(projectRoot, opts.includeProject ?? true)) {
     try {
       if (!existsSync(file)) continue;
       const raw = JSON.parse(readFileSync(file, "utf-8")) as Record<string, unknown>;

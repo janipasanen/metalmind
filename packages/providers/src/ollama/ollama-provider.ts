@@ -66,10 +66,28 @@ const OLLAMA_KEEP_ALIVE = "10m";
  *  the model can do, and silently truncates anything longer — so a provider that
  *  ADVERTISES a 128k window must ask for it explicitly (#423). Sized from the
  *  actual prompt so small turns don't reserve (and allocate) a huge KV cache. */
-function contextOptionFor(messages: Array<{ content: string }>, ceiling: number): number {
-  const chars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
-  const estimated = Math.ceil(chars / 4) + 2048; // rough tokens + headroom for the reply
-  const rounded = 1 << Math.ceil(Math.log2(Math.max(4096, estimated)));
+function contextOptionFor(
+  messages: Array<{ content: string; images?: string[] }>,
+  tools: unknown[] | undefined,
+  ceiling: number,
+): number {
+  let chars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  // Tool definitions are rendered into the SAME prompt by ollama's chat
+  // template, so they consume num_ctx — excluding them meant the 4096 floor was
+  // smaller than the ~4k-token tool block alone, and the very first turn was
+  // truncated with no room left for a reply (#434).
+  if (tools?.length) {
+    try {
+      chars += JSON.stringify(tools).length;
+    } catch {
+      chars += tools.length * 400; // unserializable — rough per-tool estimate
+    }
+  }
+  // Vision payloads are base64 in the same request.
+  for (const m of messages) for (const img of m.images ?? []) chars += img.length;
+  const REPLY_HEADROOM_TOKENS = 4096; // a flat 2048 left no room for a long answer
+  const estimated = Math.ceil(chars / 4) + REPLY_HEADROOM_TOKENS;
+  const rounded = 1 << Math.ceil(Math.log2(Math.max(8192, estimated)));
   return Math.min(ceiling, rounded);
 }
 
@@ -189,7 +207,7 @@ export class OllamaProvider implements ModelProvider {
       messages: ollamaMessages,
       stream: false,
       keep_alive: OLLAMA_KEEP_ALIVE,
-      options: { num_ctx: contextOptionFor(ollamaMessages, ollamaCapabilities.maximumContextTokens) },
+      options: { num_ctx: contextOptionFor(ollamaMessages, request.tools, ollamaCapabilities.maximumContextTokens) },
     };
 
     // Forward tools so non-streaming calls can request tool use too (#222).
@@ -245,7 +263,7 @@ export class OllamaProvider implements ModelProvider {
       messages: ollamaMessages,
       stream: true,
       keep_alive: OLLAMA_KEEP_ALIVE,
-      options: { num_ctx: contextOptionFor(ollamaMessages, ollamaCapabilities.maximumContextTokens) },
+      options: { num_ctx: contextOptionFor(ollamaMessages, request.tools, ollamaCapabilities.maximumContextTokens) },
     };
 
     if (request.tools && request.tools.length > 0) {

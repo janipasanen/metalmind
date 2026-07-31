@@ -2775,3 +2775,34 @@ describe("undo after a file is edited twice in one turn (gap10 #425)", () => {
     rmSync(file, { force: true });
   });
 });
+
+describe("mid-stream provider error preserves what was streamed (gap11 #441)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("commits the partial answer and closes out any pending tool calls", async () => {
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        yield { type: "text", text: "Here is the first half of the answer." };
+        yield { type: "tool-call", toolCall: { toolCallId: "tc9", toolName: "successTool", argumentsJson: "{}" } };
+        yield { type: "error", message: "upstream connection reset mid-stream" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("go"));
+
+    const streamed = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+    expect(streamed).toContain("first half");
+
+    // What the user saw must also be in history.
+    const assistant = loop.conversation().filter((m) => m.role === "assistant");
+    expect(assistant.at(-1)?.content).toContain("first half");
+    // Exactly one done event, and the turn ended.
+    expect(events.filter((e) => e.type === "done")).toHaveLength(1);
+  });
+});

@@ -54,5 +54,25 @@ process.once("SIGHUP", () => {
   process.exit(129);
 });
 
-const config = resolveConfig();
+// Startup must never die silently (#435/#436): resolveConfig touches the config
+// directory (which can be unwritable or read-only) and normalizes a provider
+// name that may not exist. Both used to throw BEFORE the first paint, and
+// because Ink was not mounted yet the process exited with no output at all.
+let config;
+try {
+  config = resolveConfig();
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  logError("startup", err);
+  process.stderr.write(
+    `\nMetalMind could not start.\n\n  ${msg}\n\n` +
+      `Common causes:\n` +
+      `  • ~/.config/metalmind is not writable — fix permissions, or set\n` +
+      `    METALMIND_CONFIG_DIR=/some/writable/dir\n` +
+      `  • an unknown provider in config.json / --provider / METALMIND_PROVIDER\n` +
+      `    (valid: ollama, ollama-cloud, anthropic, openai, mlx)\n\n`,
+  );
+  restoreTerminal();
+  process.exit(1);
+}
 render(React.createElement(App, { config }));

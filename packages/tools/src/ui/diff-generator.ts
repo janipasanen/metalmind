@@ -27,8 +27,11 @@ export class DiffGenerator {
     const original = existsSync(resolved) ? readFileSync(resolved, "utf-8") : "";
 
     const modified = replaceAll
-      ? original.replaceAll(oldString, newString)
-      : original.replace(oldString, newString);
+      // Must mirror the tool exactly (#438) — function replacement, so a
+      // newString containing $& or $1 previews as the literal text that
+      // will actually be written.
+      ? original.replaceAll(oldString, () => newString)
+      : original.replace(oldString, () => newString);
 
     const patch = this.generatePatch(path, original, modified);
     return { path, original, modified, patch };
@@ -73,8 +76,8 @@ export class DiffGenerator {
         return;
       }
       buf.current = e.replaceAll
-        ? buf.current.replaceAll(e.oldString, e.newString)
-        : buf.current.replace(e.oldString, e.newString);
+        ? buf.current.replaceAll(e.oldString, () => e.newString)
+        : buf.current.replace(e.oldString, () => e.newString);
     });
     const files = [...buffers.values()].filter((b) => b.current !== b.original);
     const parts: string[] = [];

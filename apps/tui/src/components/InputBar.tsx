@@ -56,6 +56,7 @@ const SLASH_COMMANDS = [
   { syntax: "/apikey ",     description: "Update API key for current provider" },
   { syntax: "/workspace ",  description: "Allow AI to access a directory" },
   { syntax: "/init",        description: "Generate a starter project memory file" },
+  { syntax: "/trust ",      description: "Review/grant project startup hooks & servers" },
   { syntax: "/skill ",      description: "list / activate / deactivate skills" },
   { syntax: "/prompt ",     description: "Prompt library: save|list|delete|<name>" },
   { syntax: "/image ",      description: "Attach an image for a vision model" },

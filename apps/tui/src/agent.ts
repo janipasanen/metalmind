@@ -1,5 +1,5 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, isProviderScopedError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, runShellAsync, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, shutdownLspClient, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
+import { PathValidator, ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, runShellAsync, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, shutdownLspClient, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
 import { loadConfigFromFile, loadMergedConfig, loadXdgConfig, saveXdgConfig, getConfigLoadIssue, XDG_CONFIG_DIR } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
@@ -41,7 +41,7 @@ interface McpToolClient {
   getPrompt?(name: string, args?: Record<string, unknown>): Promise<string>;
 }
 import { zodToJsonSchema } from "./zod-to-json.js";
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { isAbsolute, resolve, join, dirname, extname, relative } from "node:path";
 import { execSync, execFileSync, spawnSync } from "node:child_process";
@@ -56,6 +56,7 @@ import type { ChatStreamEvent } from "./hooks/useChat.js";
 import { providerCredentials, type TuiConfig } from "./config.js";
 import { Redactor, StreamRedactor, collectSecrets } from "./redact.js";
 import { loadHooks, runHooks, type HookDef, type HookEvent } from "./lifecycle-hooks.js";
+import { isWorkspaceTrusted, trustWorkspace, revokeWorkspaceTrust, declaredCapabilities } from "./workspace-trust.js";
 import { retrieveContext } from "./rag/manager.js";
 import { mentionsContextBlock } from "./mentions.js";
 import { isAllowlisted } from "./approval-allowlist.js";
@@ -654,6 +655,8 @@ export class AgentLoop {
   private repoMapRebuildQueued = false;
   /** User lifecycle hooks: pre/post-tool, sessionStart, stop (#346). */
   private lifecycleHooks: Partial<Record<HookEvent, HookDef[]>> = {};
+  /** Execute-on-open features this project declares but is not trusted for (#442). */
+  private untrustedCapabilities: string[] = [];
   /** metalmind.yaml permissions/tools sections, honored since #347. */
   private yamlPermissions: MetalmindConfig["permissions"];
   private yamlTools: MetalmindConfig["tools"];
@@ -712,7 +715,10 @@ export class AgentLoop {
     this.projectRoot = options.projectRoot ?? process.cwd();
     // metalmind.yaml permissions/tools now shape the registry + approval gate (#347).
     const yamlCfg = loadConfigFromFile(this.projectRoot);
-    this.yamlPermissions = yamlCfg.permissions;
+    // A repo must not be able to switch OFF the approval gate just by shipping a
+    // metalmind.yaml (#443) — permission grants require trust. tools:* (which
+    // only ever REMOVES tools) stays honoured, since it cannot escalate.
+    this.yamlPermissions = isWorkspaceTrusted(this.projectRoot) ? yamlCfg.permissions : undefined;
     this.yamlTools = yamlCfg.tools;
     this.registry = buildRegistry(this.projectRoot, yamlCfg.tools);
     this.workspaceRoots = loadXdgConfig().workspacePaths ?? [];
@@ -738,10 +744,37 @@ export class AgentLoop {
     } catch {
       // skill discovery failure must never block startup
     }
-    // User lifecycle hooks (#346): load definitions and fire sessionStart in the
-    // background — hook failures must never block or crash the session.
-    this.lifecycleHooks = loadHooks(this.projectRoot);
+    // User lifecycle hooks (#346), gated by workspace trust (#442): a cloned
+    // repo's .metalmind/hooks.json used to run its sessionStart command as soon
+    // as the agent was constructed — opening a project was enough to execute
+    // that project's code. The GLOBAL hooks file is always honoured (the user
+    // wrote it); the PROJECT one requires trust.
+    const trusted = isWorkspaceTrusted(this.projectRoot);
+    this.lifecycleHooks = loadHooks(this.projectRoot, { includeProject: trusted });
+    this.untrustedCapabilities = trusted ? [] : declaredCapabilities(this.projectRoot);
+    if (this.untrustedCapabilities.length > 0) {
+      this.onPersistenceIssue?.(
+        `This project declares ${this.untrustedCapabilities.length} startup hook(s)/server(s) that are NOT running because the workspace is untrusted. Review them, then run /trust to enable.`,
+      );
+    }
     void runHooks(this.lifecycleHooks, "sessionStart", this.projectRoot).catch(() => {});
+  }
+
+  /** Workspace trust state, for /trust (#442/#443). */
+  trustStatus(): { trusted: boolean; declared: string[] } {
+    return { trusted: isWorkspaceTrusted(this.projectRoot), declared: declaredCapabilities(this.projectRoot) };
+  }
+
+  /** Trust this project's execute-on-open features; takes effect on reload. */
+  trustThisWorkspace(): string {
+    trustWorkspace(this.projectRoot);
+    return `Trusted ${this.projectRoot}. Project hooks and metalmind.yaml servers/permissions apply from the next session (/clear or restart to apply now).`;
+  }
+
+  /** Revoke trust for this project. */
+  revokeThisWorkspace(): string {
+    revokeWorkspaceTrust(this.projectRoot);
+    return `Revoked trust for ${this.projectRoot}. Project hooks and metalmind.yaml servers/permissions are disabled again.`;
   }
 
   /** List discovered skills with their active state, for `/skill list` (#156). */
@@ -1215,7 +1248,12 @@ export class AgentLoop {
     if (this.yamlTools?.mcp === false) return;
     // Merged view: project metalmind.yaml `mcp` servers appear alongside the
     // globally configured ones (#347).
-    const userConfig = loadMergedConfig(this.projectRoot);
+    // Project metalmind.yaml can declare an stdio "MCP server" — an arbitrary
+    // command spawned at startup. Only honour those for a TRUSTED workspace
+    // (#443); the user's own global config is always honoured.
+    const userConfig = isWorkspaceTrusted(this.projectRoot)
+      ? loadMergedConfig(this.projectRoot)
+      : loadXdgConfig();
     for (const [id, srv] of Object.entries(userConfig.mcpServers || {})) {
       if (!srv.enabled) continue;
       try {
@@ -2166,7 +2204,32 @@ export class AgentLoop {
             text: "\n\n[⚠ output truncated at the model's max output tokens — ask it to continue for the rest]\n",
           };
         }
-        if (sawError) { yield { type: "done" }; return; }
+        if (sawError) {
+          // Commit what the model DID stream before the error (#441): the user
+          // saw it, but history kept nothing — so /export, the resumed session
+          // and the model's own next-turn view all lost it, and any tool calls
+          // it had already emitted were left without their assistant message.
+          if (assistantText.trim() || pendingToolCalls.length > 0) {
+            this.history.push({
+              role: "assistant",
+              content: this.redactor.redact(assistantText),
+              ...(pendingToolCalls.length > 0
+                ? { toolCalls: pendingToolCalls.map((c) => ({ toolCallId: c.toolCallId, toolName: c.toolName, argumentsJson: c.argumentsJson })), metadata: { hasToolCalls: true } }
+                : {}),
+            });
+            // A tool_call with no tool_result is invalid on the next request —
+            // close each one out with an explicit failure note.
+            for (const c of pendingToolCalls) {
+              this.history.push({
+                role: "tool",
+                content: "Not executed — the provider stream failed before this tool ran.",
+                metadata: { toolCallId: c.toolCallId },
+              });
+            }
+          }
+          yield { type: "done" };
+          return;
+        }
         // User cancelled mid-stream: persist partial output and end cleanly.
         if (signal?.aborted) {
           if (assistantText) this.history.push({ role: "assistant", content: this.redactor.redact(assistantText) });
@@ -2251,6 +2314,21 @@ export class AgentLoop {
             content: output,
             metadata: { toolCallId: call.toolCallId, ...(readPath ? { filePath: readPath, readWindow } : {}) },
           });
+          // No-progress detection must cover batched calls too (#444): the batch
+          // path returns before the ordered path's tracker, so a model looping
+          // on the same failing read burned the whole iteration budget.
+          const bFailed = output.startsWith("Error") || output.startsWith("Blocked");
+          const bSig = `${call.toolName}:${call.argumentsJson}`;
+          if (bFailed) {
+            if (lastFailure && lastFailure.signature === bSig && lastFailure.output === output) {
+              lastFailure.count++;
+              if (lastFailure.count >= 3) stuckOnRepeat = true;
+            } else {
+              lastFailure = { signature: bSig, output, count: 1 };
+            }
+          } else {
+            lastFailure = null;
+          }
           if (this.lifecycleHooks.postTool?.length && !batchBlocked.has(call.toolCallId)) {
             void runHooks(this.lifecycleHooks, "postTool", this.projectRoot, {
               MM_TOOL_NAME: call.toolName,
@@ -2259,10 +2337,11 @@ export class AgentLoop {
             }).catch(() => {});
           }
         }
-        continue;
+        if (!stuckOnRepeat) continue;
+        // fall through to the shared stuck-handling below
       }
 
-      for (const call of pendingToolCalls) {
+      for (const call of stuckOnRepeat ? [] : pendingToolCalls) {
         // Esc must stop the WHOLE batch: without this, aborting a long tool let
         // the remaining queued calls execute (and even pop approval prompts
         // after the user cancelled). Stub results keep call/result pairing valid.
@@ -3137,7 +3216,16 @@ export class AgentLoop {
       const input = (inp && typeof inp === "object" ? { ...(inp as Record<string, unknown>) } : { value: inp }) as Record<string, unknown>;
       if (NEEDS_CONTENT.has(taskType) && typeof input.filePath === "string" && typeof input.fileContent !== "string") {
         try {
-          const abs = this.resolveProjectPath(input.filePath);
+          // Route through the SAME validator every other read uses (#433).
+          // resolveProjectPath is pure path math: reading through it gave the
+          // model an unrestricted read primitive reaching exactly the files the
+          // product promises are blocked (.ssh/.aws/.env), and the worker's
+          // summary then lands in history and ships to the cloud provider.
+          const abs = new PathValidator(this.projectRoot, this.workspaceRoots).resolveSafePath(input.filePath);
+          // Don't pull a multi-GB file into memory just to slice 30k off it.
+          const st = statSync(abs);
+          if (!st.isFile()) throw new Error("not a regular file");
+          if (st.size > 2 * 1024 * 1024) throw new Error(`file too large (${Math.round(st.size / 1024)}KB) for delegation`);
           // Schemas cap content at 30k chars; stay under it.
           input.fileContent = readFileSync(abs, "utf8").slice(0, 30_000);
         } catch (err) {

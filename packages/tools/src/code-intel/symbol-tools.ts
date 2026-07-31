@@ -142,7 +142,12 @@ export const findSymbolTool: AgentTool = createTool({
  */
 export const findReferencesTool: AgentTool = createTool({
   toolName: "findReferences",
-  description: "Find all references to a symbol across the codebase.",
+  description:
+    "Find references to a symbol. When a language server is running this is a true " +
+    "cross-file lookup; otherwise it falls back to a heuristic index that only records " +
+    "references WITHIN each file's own source — so a caller in another file may be missed. " +
+    "The result says which mode produced it. For an exhaustive cross-file search regardless " +
+    "of language-server availability, use searchInFiles.",
   inputSchema: FindReferencesSchema,
   requiresConfirmation: false,
   async execute(input) {
@@ -172,10 +177,16 @@ export const findReferencesTool: AgentTool = createTool({
       }
     }
 
+    // Heuristic fallback (#437): the index only records same-file references, so
+    // label the result rather than letting the model treat it as exhaustive.
     const refs = index.findReferences(input.name);
 
+    const HEURISTIC_NOTE =
+      "\n(heuristic index: same-file references only — no language server is connected. " +
+      'Use searchInFiles("' + "" + '") for an exhaustive cross-file search.)';
+
     if (refs.length === 0) {
-      return `No references found for "${input.name}".`;
+      return `No references found for "${input.name}" in the heuristic index.${HEURISTIC_NOTE.replace('searchInFiles("")', `searchInFiles("${input.name}")`)}`;
     }
 
     const lines = refs.slice(0, 30).map(
@@ -188,7 +199,7 @@ export const findReferencesTool: AgentTool = createTool({
       output += `\n  ... and ${refs.length - 30} more`;
     }
 
-    return output;
+    return output + HEURISTIC_NOTE.replace('searchInFiles("")', `searchInFiles("${input.name}")`);
   },
 });
 

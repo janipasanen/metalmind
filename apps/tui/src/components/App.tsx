@@ -172,6 +172,8 @@ export default function App({ config }: AppProps) {
   // finishes must WIN (its config is newer) and the loser must dispose its own
   // half-built agent instead of leaking it or clobbering the newer one.
   const reloadSeq = useRef(0);
+  /** Set when a reload had to be abandoned mid-turn; retried on idle (#440). */
+  const pendingReloadRef = useRef(false);
   // Mirror of useChat's isStreaming (declared later) for use in callbacks
   // defined before it.
   const isStreamingRef = useRef(false);
@@ -220,7 +222,12 @@ export default function App({ config }: AppProps) {
         // the user is told to retry, exactly like the entry check.
         if (isStreamingRef.current) {
           agent.dispose();
-          notify("warning", "Model switch cancelled — a turn started while loading. Finish it, then retry.");
+          // Queue the retry instead of just telling the user (#440): /apikey and
+          // /model already reported success and PERSISTED the new config, so
+          // silently abandoning the rebuild left the app running the old
+          // provider while the UI and config both said otherwise.
+          pendingReloadRef.current = true;
+          notify("warning", "Model switch deferred — a turn was in flight. It will apply automatically when this turn finishes.");
           return;
         }
         // Carry the conversation and session-scoped settings over to the new
@@ -342,6 +349,7 @@ export default function App({ config }: AppProps) {
           "  /apikey <key>     - Update API key for current provider",
           "  /workspace <path> - Allow AI to access an additional directory",
           "  /init             - Generate a starter project memory file (.metalmind/MEMORY.md)",
+          "  /trust [allow|revoke] - Review/grant this project's startup hooks & MCP servers",
           "  /skill            - list | activate <name> | deactivate <name>",
           "  /resume [id]      - List/resume sessions; search <text> | rename <id> <title> | tag <id> <tags>",
           "  /compact          - Summarize older turns to reclaim context window",
@@ -492,6 +500,37 @@ export default function App({ config }: AppProps) {
         const fmt = input.slice(7).trim().toLowerCase() === "json" ? "json" : "md";
         const path = agentRef.current?.exportTranscript(fmt as "md" | "json");
         yield { type: "text", text: path ? `Exported transcript to ${path}` : "Agent not initialised." } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/trust" || input.startsWith("/trust ")) {
+        const agent = agentRef.current;
+        const sub = input.slice(6).trim().toLowerCase();
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+        } else if (sub === "revoke") {
+          yield { type: "text", text: agent.revokeThisWorkspace() } as const;
+        } else if (sub === "allow" || sub === "yes") {
+          yield { type: "text", text: agent.trustThisWorkspace() } as const;
+        } else {
+          const { trusted, declared } = agent.trustStatus();
+          const lines = [
+            `Workspace trust: ${trusted ? "TRUSTED" : "NOT trusted"}`,
+            "",
+            "An untrusted project's own .metalmind/hooks.json (commands run at startup),",
+            "metalmind.yaml `mcp` servers (spawned at startup) and `permissions` grants",
+            "(which pre-approve mutating tools) are IGNORED — so cloning a repo and opening",
+            "it here cannot execute that repo's code.",
+          ];
+          if (declared.length > 0) {
+            lines.push("", "This project declares:", ...declared.map((d) => `  • ${d}`));
+          } else {
+            lines.push("", "This project declares no startup hooks.");
+          }
+          lines.push("", trusted ? "/trust revoke — disable them again" : "/trust allow — enable them (review the list above first)");
+          yield { type: "text", text: lines.join("\n") } as const;
+        }
         yield { type: "done" } as const;
         return;
       }
@@ -1088,6 +1127,15 @@ export default function App({ config }: AppProps) {
     sendMessage(text);
   }, [sendMessage]);
 
+  // A reload deferred because a turn was in flight retries as soon as the turn
+  // ends, so the config the user already saved actually takes effect (#440).
+  useEffect(() => {
+    if (isStreaming || !pendingReloadRef.current) return;
+    pendingReloadRef.current = false;
+    notify("info", "Applying the deferred model/provider switch…");
+    void reloadAgent();
+  }, [isStreaming, reloadAgent]);
+
   // Re-run the startup health probe when a turn finishes (#417). The warning
   // was set once at launch and never revisited, so a user who followed its own
   // advice — start ollama, pull the model, set a key — kept staring at a stale
@@ -1138,6 +1186,12 @@ export default function App({ config }: AppProps) {
   const anyOverlayOpen =
     showCommandPalette || showProviderSelection || showModelSelection ||
     showMcpConfig || showThemeSelection || showFileTree || tierModelPickerFor !== null;
+  // An approval prompt is MODAL (#439). Overlays register their own useInput, so
+  // while both were mounted every keystroke reached BOTH handlers — typing "a"
+  // into the API-key field or the palette silently answered the approval with
+  // "always allow". Overlays are unmounted (not merely ignored) for the
+  // duration, which also removes their input handlers.
+  const overlaysVisible = anyOverlayOpen && pendingApproval === null;
 
   useInput((input, key) => {
     // Approval prompt takes priority over all other input while it's open (#138).
@@ -1253,7 +1307,7 @@ export default function App({ config }: AppProps) {
       )}
       <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />
 
-      {showCommandPalette && (
+      {overlaysVisible && showCommandPalette && (
         <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} accent={theme.colors.accent}
           commands={[
             { id: "tier-auto", title: "Tier: Auto", description: "Let router pick tier per request", action: () => applyForcedTier(null) },
@@ -1268,7 +1322,7 @@ export default function App({ config }: AppProps) {
           ]}
         />
       )}
-      {showProviderSelection && (
+      {overlaysVisible && showProviderSelection && (
         <ProviderSelection onSelect={async (providerId) => {
           setShowProviderSelection(false);
           setActiveProvider(providerId);
@@ -1277,15 +1331,15 @@ export default function App({ config }: AppProps) {
           await reloadAgent();
         }} onCancel={() => setShowProviderSelection(false)} accent={theme.colors.accent} />
       )}
-      {showModelSelection && (
+      {overlaysVisible && showModelSelection && (
         <ModelSelection providerId={activeProvider} onSelect={async (modelId) => {
           setShowModelSelection(false);
           setActiveModel(`${activeProvider}/${modelId}`);
           await reloadAgent();
         }} onCancel={() => setShowModelSelection(false)} accent={theme.colors.accent} />
       )}
-      {showMcpConfig && <McpConfig onDone={() => setShowMcpConfig(false)} accent={theme.colors.accent} />}
-      {showFileTree && (
+      {overlaysVisible && showMcpConfig && <McpConfig onDone={() => setShowMcpConfig(false)} accent={theme.colors.accent} />}
+      {overlaysVisible && showFileTree && (
         <FileTree
           root={agentRef.current?.projectRootPath ?? process.cwd()}
           onClose={() => setShowFileTree(false)}
@@ -1293,7 +1347,7 @@ export default function App({ config }: AppProps) {
           onSelectFile={(rel) => setPendingInsert({ text: formatMention(rel), nonce: Date.now() })}
         />
       )}
-      {tierModelPickerFor !== null && (
+      {overlaysVisible && tierModelPickerFor !== null && (
         <TierModelPicker
           tier={tierModelPickerFor}
           currentModel={tierModels[tierModelPickerFor]?.model}
@@ -1305,7 +1359,7 @@ export default function App({ config }: AppProps) {
           accent={theme.colors.accent}
         />
       )}
-      {showThemeSelection && (
+      {overlaysVisible && showThemeSelection && (
         <ThemeSelection currentTheme={theme.id} onSelect={async (themeId) => {
           const newTheme = switchTheme(themeId);
           setTheme(newTheme);

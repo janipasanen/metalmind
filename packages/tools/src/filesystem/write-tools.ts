@@ -117,7 +117,11 @@ export const editFileTool: AgentTool<z.input<typeof editFileSchema>, string> = c
       if (count === 0) {
         throw new Error(`String not found in ${input.path}. ${nearMissHint(original, input.oldString)}`);
       }
-      const updated = original.replaceAll(input.oldString, input.newString);
+      // Function replacement (#438): a STRING replacement makes String.replace
+      // expand $&, $`, $', $$ and $1 — so newString containing any of them
+      // silently corrupted the file (and the diff preview). A function
+      // replacement is inserted verbatim.
+      const updated = original.replaceAll(input.oldString, () => input.newString);
       writeFileSync(safePath, updated, "utf-8");
       return `Replaced ${count} occurrence(s) in ${input.path}`;
     }
@@ -133,7 +137,7 @@ export const editFileTool: AgentTool<z.input<typeof editFileSchema>, string> = c
       );
     }
 
-    const updated = original.replace(input.oldString, input.newString);
+    const updated = original.replace(input.oldString, () => input.newString);
     writeFileSync(safePath, updated, "utf-8");
     // Anchor the verification snippet on the edit's actual position (known from
     // the unique match), not a text search for newString.
@@ -273,7 +277,7 @@ export const multiEditTool: AgentTool<z.input<typeof multiEditSchema>, string> =
         }
         buffers.set(
           e.safePath,
-          e.replaceAll ? current.replaceAll(e.oldString, e.newString) : current.replace(e.oldString, e.newString),
+          e.replaceAll ? current.replaceAll(e.oldString, () => e.newString) : current.replace(e.oldString, () => e.newString),
         );
       }
       // All edits computed successfully → commit every changed file.
