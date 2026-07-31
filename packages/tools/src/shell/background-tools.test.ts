@@ -65,7 +65,7 @@ describe("group termination (#408)", () => {
     const id = startBackgroundProcess("sleep 30 & echo PID:$!; wait", process.cwd());
     // Let the shell start its child and print the pid.
     await new Promise((r) => setTimeout(r, 400));
-    const out = pollBackgroundProcess(id, 50);
+    const out = pollBackgroundProcess(id);
     const pid = Number(/PID:(\d+)/.exec(out)?.[1]);
     expect(pid).toBeGreaterThan(0);
     expect(() => process.kill(pid, 0)).not.toThrow(); // alive before the stop
@@ -80,7 +80,7 @@ describe("group termination (#408)", () => {
   it("killAllBackgroundProcesses takes the whole group down", async () => {
     const id = startBackgroundProcess("sleep 30 & echo PID:$!; wait", process.cwd());
     await new Promise((r) => setTimeout(r, 400));
-    const pid = Number(/PID:(\d+)/.exec(pollBackgroundProcess(id, 50))?.[1]);
+    const pid = Number(/PID:(\d+)/.exec(pollBackgroundProcess(id))?.[1]);
     expect(pid).toBeGreaterThan(0);
 
     killAllBackgroundProcesses();

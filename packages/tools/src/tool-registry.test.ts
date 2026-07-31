@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import { ToolRegistry, parseInput } from "./tool-registry.js";
+import { allReadOnlyTools } from "./filesystem/readonly-tools.js";
 import type { AgentTool, ToolExecutionContext } from "./types.js";
 
 describe("ToolRegistry", () => {
@@ -76,7 +77,8 @@ describe("ToolRegistry", () => {
 
   it("throws executing unknown tool", async () => {
     const registry = new ToolRegistry();
-    await expect(registry.execute("unknown", {}, ctx)).rejects.toThrow(/not found/);
+    // Message improved in #418: names what IS available so the model can recover.
+    await expect(registry.execute("unknown", {}, ctx)).rejects.toThrow(/does not exist/);
   });
 
   it("removes and clears tools", () => {
@@ -167,5 +169,31 @@ describe("parseInput", () => {
 
   it("returns string as-is for non-JSON", () => {
     expect(parseInput("hello")).toBe("hello");
+  });
+});
+
+describe("unknown tool feedback (#418)", () => {
+  function reg() {
+    const r = new ToolRegistry();
+    for (const t of allReadOnlyTools) r.register(t);
+    return r;
+  }
+
+  it("suggests the near-miss and lists what is available", async () => {
+    await expect(
+      reg().execute("readFiles", { path: "a.ts" }, { projectRoot: process.cwd() } as never),
+    ).rejects.toThrow(/does not exist\. Did you mean: readFile\?/);
+  });
+
+  it("still lists the available tools when nothing is close", async () => {
+    await expect(
+      reg().execute("teleport", {}, { projectRoot: process.cwd() } as never),
+    ).rejects.toThrow(/Available tools: .*readFile/);
+  });
+
+  it("matches a plural/singular slip in either direction", async () => {
+    await expect(
+      reg().execute("findFile", { pattern: "*.ts" }, { projectRoot: process.cwd() } as never),
+    ).rejects.toThrow(/Did you mean: findFiles\?/);
   });
 });

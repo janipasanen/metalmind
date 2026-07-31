@@ -2041,6 +2041,11 @@ export class AgentLoop {
     let iterations = 0;
     const maxIterations = opts.maxIterations ?? 10;
     let pending = opts.primed;
+    // No-progress detection (#419): a model that repeats the SAME failing call
+    // (same tool, same arguments, same error) otherwise burns the entire
+    // iteration budget — ten identical round-trips, real spend, no answer.
+    let lastFailure: { signature: string; output: string; count: number } | null = null;
+    let stuckOnRepeat = false;
 
     while (iterations < maxIterations) {
       if (signal?.aborted) { yield { type: "done" }; return; }
@@ -2363,6 +2368,23 @@ export class AgentLoop {
         // Scrub any secret values before the output reaches the model or UI (#168).
         output = this.redactor.redact(output);
 
+        // Repeated identical FAILURE → tell the model plainly, then stop (#419).
+        const failed = output.startsWith("Error") || output.startsWith("Blocked") || output.startsWith("Plan mode:");
+        const signature = `${call.toolName}:${call.argumentsJson}`;
+        if (failed) {
+          if (lastFailure && lastFailure.signature === signature && lastFailure.output === output) {
+            lastFailure.count++;
+            output +=
+              `\n\n[This is attempt ${lastFailure.count} of the SAME call with the SAME arguments and the SAME failure. ` +
+              `Repeating it will not change the result — change the arguments, use a different tool, or answer from what you already have.]`;
+            if (lastFailure.count >= 3) stuckOnRepeat = true;
+          } else {
+            lastFailure = { signature, output, count: 1 };
+          }
+        } else {
+          lastFailure = null; // any success resets the streak
+        }
+
         // User postTool hooks (#346) — observational, fire-and-forget.
         if (this.lifecycleHooks.postTool?.length) {
           void runHooks(this.lifecycleHooks, "postTool", this.projectRoot, {
@@ -2408,6 +2430,32 @@ export class AgentLoop {
             ...(readPath ? { filePath: readPath, readWindow } : {}),
           },
         });
+      }
+
+      // Three identical consecutive failures: stop looping and let the model
+      // answer from what it has, instead of spending the rest of the budget
+      // on a call that cannot succeed (#419).
+      if (stuckOnRepeat) {
+        yield {
+          type: "notice",
+          text: "\n[stopping the tool loop — the same call failed identically 3 times]\n",
+        };
+        this.iterationCapNotice =
+          "You repeated the same failing tool call three times. No further tool calls will run this turn. " +
+          "Explain what you were unable to do and give your best answer from the information you already have.";
+        const finalProviders = providers;
+        for await (const ev of this.streamResilient(finalProviders, [], signal)) {
+          if (ev.type === "notice") { yield { type: "notice", text: ev.text }; continue; }
+          if (ev.type === "text") {
+            const safe = this.redactor.redact(ev.text);
+            if (safe) yield { type: "text", text: safe };
+          } else if (ev.type === "error") {
+            yield { type: "error", message: ev.message };
+          } else if (ev.type === "done") break;
+        }
+        this.iterationCapNotice = null;
+        yield { type: "done" };
+        return;
       }
     }
 

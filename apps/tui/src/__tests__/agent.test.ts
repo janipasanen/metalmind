@@ -2595,3 +2595,73 @@ describe("streamResilient retry + fallback engine (gap9 #414)", () => {
     expect(attempts).toBeLessThanOrEqual(4);
   });
 });
+
+describe("no-progress detection for repeated tool calls (gap10 #419)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("annotates a repeated identical failure and stops the loop after 3", async () => {
+    let streamCalls = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        streamCalls++;
+        // Always ask for the same nonexistent tool with the same arguments.
+        yield {
+          type: "tool-call",
+          toolCall: { toolCallId: `tc${streamCalls}`, toolName: "noSuchTool", argumentsJson: '{"x":1}' },
+        };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("go"));
+
+    // The loop stopped well before the 10-iteration cap.
+    expect(streamCalls).toBeLessThanOrEqual(4);
+    // The model was told it was repeating itself.
+    const toolResults = events
+      .filter((e) => e.type === "tool-result")
+      .map((e) => (e as { output: string }).output)
+      .join("\n");
+    expect(toolResults).toMatch(/SAME call with the SAME arguments/);
+    // (The unknown-tool message itself is asserted against the REAL registry in
+    // packages/tools/src/tool-registry.test.ts — this file mocks the registry.)
+    // A notice explains the early stop.
+    const notices = events.filter((e) => e.type === "notice").map((e) => (e as { text: string }).text).join("");
+    expect(notices).toMatch(/stopping the tool loop/);
+  });
+
+  it("does not trip when calls differ or a call succeeds", async () => {
+    let n = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        n++;
+        if (n <= 2) {
+          // Different arguments each time → not a repeat.
+          yield { type: "tool-call", toolCall: { toolCallId: `t${n}`, toolName: "noSuchTool", argumentsJson: `{"x":${n}}` } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done thinking" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("go"));
+    const notices = events.filter((e) => e.type === "notice").map((e) => (e as { text: string }).text).join("");
+    expect(notices).not.toMatch(/stopping the tool loop/);
+    const text = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+    expect(text).toContain("done thinking");
+  });
+});
