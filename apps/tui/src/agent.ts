@@ -1,5 +1,5 @@
 import { createProvider, OllamaWorkerProvider, isAbortError, isRetryableError, isProviderScopedError, ProviderError } from "@metalmind/providers";
-import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, runShellAsync, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
+import { ToolRegistry, allReadOnlyTools, allWriteTools, allGitTools, runShellTools, runShellAsync, allSymbolTools, allWebTools, allDocumentTools, backgroundShellTools, killAllBackgroundProcesses, createDiagnosticsTool, shutdownLspClient, AuditLog, DiffGenerator, RepoMapV2, indexFile, getReferenceIndex } from "@metalmind/tools";
 import { loadConfigFromFile, loadMergedConfig, loadXdgConfig, saveXdgConfig, getConfigLoadIssue, XDG_CONFIG_DIR } from "@metalmind/config";
 import { McpHttpClient, type McpToolDef } from "./mcp-http.js";
 import { McpClient, normalizeMcpResult } from "@metalmind/mcp";
@@ -115,6 +115,25 @@ function readWindowKey(input: Record<string, unknown>): string {
   const hasLimit = typeof input.limit === "number";
   if (!hasOffset && !hasLimit) return "full";
   return `${hasOffset ? input.offset : 0}:${hasLimit ? input.limit : "default"}`;
+}
+
+/** Shrink an oversized single message instead of deleting it (#421).
+ *  A single huge tool result (e.g. gitDiff of a large change) could otherwise
+ *  drive the trim loop past the last user message and leave history = [system]:
+ *  the model then answered a question it could no longer see, and the
+ *  conversation was destroyed for the rest of the session. */
+function truncateMessageToFit(m: AgentMessage, maxTokens: number): AgentMessage {
+  const maxChars = Math.max(400, maxTokens * 4);
+  if (m.content.length <= maxChars) return m;
+  const head = Math.floor(maxChars * 0.3);
+  const tail = maxChars - head;
+  return {
+    ...m,
+    content:
+      m.content.slice(0, head) +
+      `\n\n…[${(m.content.length - maxChars).toLocaleString()} characters omitted — this result was too large for the context window]…\n\n` +
+      m.content.slice(m.content.length - tail),
+  };
 }
 
 /** Exponential backoff for transient retries: 0.5s, 1s, 2s, … capped at 8s. */
@@ -233,8 +252,10 @@ const DELEGATE_TO_LOCAL_DEF = {
   description:
     "Offload bounded, repetitive subtasks to the fast LOCAL model — they run in parallel and are cached. " +
     "Use this in remote-brain mode to process many files or items cheaply before you reason over the results. " +
-    "taskType is one of: summarizeFile, extractSymbols, rankRelevantFiles, summarizeDiff, classifyUserIntent. " +
-    "inputs is an array where each item is the input object for one task (e.g. { filePath } for summarizeFile).",
+    "taskType is one of: summarizeFile, extractSymbols, extractImports, rankRelevantFiles, summarizeDiff, summarizeCommandOutput. " +
+    "Each item of `inputs` is one task's input object: summarizeFile/extractSymbols/extractImports take { filePath } " +
+    "(file contents are read for you), rankRelevantFiles takes { userGoal, candidateFiles }, summarizeDiff takes " +
+    "{ diff }, summarizeCommandOutput takes { command, output }.",
   inputSchema: {
     type: "object",
     properties: {
@@ -2168,14 +2189,54 @@ export class AgentLoop {
         pendingToolCalls.length > 1 &&
         pendingToolCalls.every((c) => READ_ONLY_PARALLEL_TOOLS.has(c.toolName) && !this.mcpTools.has(c.toolName))
       ) {
-        const outputs = await this.runReadOnlyBatch(pendingToolCalls);
-        for (let i = 0; i < pendingToolCalls.length; i++) {
-          yield { type: "tool-result", toolCallId: pendingToolCalls[i].toolCallId, output: outputs[i] };
+        // preTool hooks apply to batched calls too (#432): without this a user's
+        // blocking hook was defeated simply by the model batching its reads.
+        const batchBlocked = new Map<string, string>();
+        if (this.lifecycleHooks.preTool?.length) {
+          for (const c of pendingToolCalls) {
+            const pre = await runHooks(this.lifecycleHooks, "preTool", this.projectRoot, {
+              MM_TOOL_NAME: c.toolName,
+              MM_TOOL_INPUT: c.argumentsJson.slice(0, 4000),
+            }).catch(() => ({ blocked: undefined, notes: [] as string[] }));
+            if (pre.blocked) batchBlocked.set(c.toolCallId, `Blocked by preTool hook: ${this.redactor.redact(pre.blocked)}`);
+          }
+        }
+        const runnable = pendingToolCalls.filter((c) => !batchBlocked.has(c.toolCallId));
+        const runnableOutputs = await this.runReadOnlyBatch(runnable);
+        const outputByg = new Map<string, string>();
+        runnable.forEach((c, i) => outputByg.set(c.toolCallId, runnableOutputs[i]));
+
+        for (const call of pendingToolCalls) {
+          const output = batchBlocked.get(call.toolCallId) ?? outputByg.get(call.toolCallId) ?? "Error: no result";
+          yield { type: "tool-result", toolCallId: call.toolCallId, output };
+          // Carry the read metadata the ordered path records (#426): without
+          // filePath/readWindow the stale-read supersession never fired for
+          // batched reads, so every re-read of a file kept a full extra copy of
+          // it in history.
+          const inputObj = this.safeParseArgs(call.argumentsJson);
+          const readPath = call.toolName === "readFile" && typeof inputObj.path === "string" ? inputObj.path : undefined;
+          const readWindow = readPath ? readWindowKey(inputObj) : undefined;
+          if (readPath) {
+            for (const m of this.history) {
+              if (m.role !== "tool" || m.metadata?.filePath !== readPath) continue;
+              if (String(m.content).startsWith("[stale read")) continue;
+              const prevWindow = typeof m.metadata?.readWindow === "string" ? m.metadata.readWindow : "full";
+              if (readWindow !== "full" && prevWindow !== readWindow) continue;
+              m.content = `[stale read of ${readPath} superseded by a later read]`;
+            }
+          }
           this.history.push({
             role: "tool",
-            content: outputs[i],
-            metadata: { toolCallId: pendingToolCalls[i].toolCallId },
+            content: output,
+            metadata: { toolCallId: call.toolCallId, ...(readPath ? { filePath: readPath, readWindow } : {}) },
           });
+          if (this.lifecycleHooks.postTool?.length && !batchBlocked.has(call.toolCallId)) {
+            void runHooks(this.lifecycleHooks, "postTool", this.projectRoot, {
+              MM_TOOL_NAME: call.toolName,
+              MM_TOOL_INPUT: call.argumentsJson.slice(0, 4000),
+              MM_TOOL_OUTPUT: output.slice(0, 4000),
+            }).catch(() => {});
+          }
         }
         continue;
       }
@@ -2443,10 +2504,16 @@ export class AgentLoop {
         this.iterationCapNotice =
           "You repeated the same failing tool call three times. No further tool calls will run this turn. " +
           "Explain what you were unable to do and give your best answer from the information you already have.";
-        const finalProviders = providers;
-        for await (const ev of this.streamResilient(finalProviders, [], signal)) {
+        // Accumulate the wrap-up answer and COMMIT it to history (#431): the
+        // first version of this stop path streamed it to the UI only, so the
+        // model's own final answer never entered this.history — the transcript
+        // and the model's view diverged and the answer was missing from the
+        // saved session, /export and the next turn's context.
+        let finalText = "";
+        for await (const ev of this.streamResilient(providers, [], signal)) {
           if (ev.type === "notice") { yield { type: "notice", text: ev.text }; continue; }
           if (ev.type === "text") {
+            finalText += ev.text;
             const safe = this.redactor.redact(ev.text);
             if (safe) yield { type: "text", text: safe };
           } else if (ev.type === "error") {
@@ -2454,6 +2521,9 @@ export class AgentLoop {
           } else if (ev.type === "done") break;
         }
         this.iterationCapNotice = null;
+        if (finalText.trim()) {
+          this.history.push({ role: "assistant", content: this.redactor.redact(finalText) });
+        }
         yield { type: "done" };
         return;
       }
@@ -2730,7 +2800,10 @@ export class AgentLoop {
     if (!find) return [];
     const args = ["--files-with-matches"];
     if (input.isRegex !== true) args.push("--fixed-strings");
-    args.push("--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
+    // Must mirror replaceInProject's match phase exactly (#420) — this drives
+    // the approval preview and the /undo snapshot, so a narrower arg list would
+    // under-report what the tool is about to change.
+    args.push("--hidden", "--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
     if (typeof input.include === "string") args.push("--glob", input.include);
     args.push("-e", find, ".");
     try {
@@ -2791,8 +2864,13 @@ export class AgentLoop {
     const earliest = new Map<string, string | null>();
     for (const f of set.files) if (!earliest.has(f.path)) earliest.set(f.path, f.before);
     // Post-edit hash per path, for the "did the user touch this since?" check (#382).
+    // Take the LAST entry, not the first (#425): when the agent edited a file
+    // twice in one turn, the first entry's hash describes the intermediate
+    // state, so the check compared disk against a version that no longer
+    // existed and undo refused to restore the file — reporting it as
+    // "modified since the agent edited them" when the agent itself did it.
     const expected = new Map<string, string | null | undefined>();
-    for (const f of set.files) if (!expected.has(f.path)) expected.set(f.path, f.afterHash);
+    for (const f of set.files) if (f.afterHash !== undefined) expected.set(f.path, f.afterHash);
 
     const inverse: EditSet = { turn: set.turn, files: [] };
     const changed: string[] = [];
@@ -3029,21 +3107,42 @@ export class AgentLoop {
     if (!taskType || inputs.length === 0) {
       return 'delegateToLocal requires { taskType: string, inputs: object[] }.';
     }
-    const tasks = inputs.slice(0, 16).map((inp, i) => ({
-      taskId: `delegate-${i}`,
-      taskType,
-      input: (inp && typeof inp === "object" ? inp : { value: inp }) as Record<string, unknown>,
-    }));
+    // The worker schemas require `fileContent`, but asking the MODEL for it is
+    // absurd — it would have to paste whole files through the tool call. Read it
+    // here from the given filePath (#428). Without this every delegated
+    // summarizeFile/extractSymbols/extractImports failed schema validation.
+    const NEEDS_CONTENT = new Set(["summarizeFile", "extractSymbols", "extractImports"]);
+    const tasks = inputs.slice(0, 16).map((inp, i) => {
+      const input = (inp && typeof inp === "object" ? { ...(inp as Record<string, unknown>) } : { value: inp }) as Record<string, unknown>;
+      if (NEEDS_CONTENT.has(taskType) && typeof input.filePath === "string" && typeof input.fileContent !== "string") {
+        try {
+          const abs = this.resolveProjectPath(input.filePath);
+          // Schemas cap content at 30k chars; stay under it.
+          input.fileContent = readFileSync(abs, "utf8").slice(0, 30_000);
+        } catch (err) {
+          input.fileContent = "";
+          input.__readError = errText(err);
+        }
+      }
+      return { taskId: `delegate-${i}`, taskType, input };
+    });
+    // A file we could not read can never satisfy the schema — report it instead
+    // of letting it fail as an opaque validation error.
+    const unreadable = tasks.filter((t) => typeof t.input.__readError === "string");
+    for (const t of tasks) delete t.input.__readError;
     // Esc must cancel a long local batch (#365).
     const results = await this.coordinator.runParallelTasks(tasks as never, 4, signal);
     const lines = results.map(
       (r, i) => `[${i}] ${r?.success ? JSON.stringify(r.output) : `FAILED: ${r?.error ?? "unknown error"}`}`,
     );
     const cancelledCount = results.filter((r) => r?.error === "cancelled").length;
+    const readNote = unreadable.length
+      ? `\n⚠ ${unreadable.length} input(s) named a file that could not be read: ${unreadable.map((t) => String(t.input.filePath)).slice(0, 5).join(", ")}.`
+      : "";
     const header = cancelledCount
       ? `Delegation CANCELLED — ${tasks.length - cancelledCount} of ${tasks.length} "${taskType}" task(s) completed:`
       : `Delegated ${tasks.length} "${taskType}" task(s) to the local model:`;
-    return `${header}\n${lines.join("\n")}`.slice(0, 8000);
+    return `${header}\n${lines.join("\n")}${readNote}`.slice(0, 8000);
   }
 
   /**
@@ -3273,10 +3372,17 @@ export class AgentLoop {
       rest = rest.slice(1);
     }
     // Never lead with an orphaned tool result — providers reject a tool message
-    // without its preceding assistant tool_calls.
-    while (rest.length && rest[0].role === "tool") {
+    // without its preceding assistant tool_calls. Keep at least one message so
+    // the request never degenerates to a bare system prompt (#421).
+    while (rest.length > 1 && rest[0].role === "tool") {
       total -= tokensOf(rest[0]);
       rest = rest.slice(1);
+    }
+    if (rest.length === 1 && tokensOf(rest[0]) > budget) {
+      rest = [truncateMessageToFit(rest[0], budget)];
+    }
+    if (rest.length === 1 && rest[0].role === "tool") {
+      rest = [{ role: "user", content: `[previous tool result, trimmed to fit the context window]\n${rest[0].content}` }];
     }
     return [...sys, ...rest];
   }
@@ -3328,10 +3434,23 @@ export class AgentLoop {
         rest = rest.slice(1);
       }
       // Never leave an orphaned tool result at the front — providers reject a
-      // tool message without its preceding assistant tool_calls.
-      while (rest.length && rest[0].role === "tool") {
+      // tool message without its preceding assistant tool_calls. Stop before
+      // emptying the list: deleting the LAST remaining message wiped the whole
+      // conversation, user request included (#421).
+      while (rest.length > 1 && rest[0].role === "tool") {
         total -= tokensOf(rest[0]);
         rest = rest.slice(1);
+      }
+      // A single message still over budget is TRUNCATED, never dropped, so the
+      // turn keeps its user request and the model can still answer.
+      if (rest.length === 1 && tokensOf(rest[0]) > budget) {
+        rest = [truncateMessageToFit(rest[0], budget)];
+        total = sys.reduce((s2, m) => s2 + tokensOf(m), 0) + tokensOf(rest[0]);
+      }
+      // A lone leading tool message has no matching assistant tool_calls after
+      // trimming; relabel it so the provider accepts the request.
+      if (rest.length === 1 && rest[0].role === "tool") {
+        rest = [{ role: "user", content: `[previous tool result, trimmed to fit the context window]\n${rest[0].content}` }];
       }
       this.history = [...sys, ...rest];
     }
@@ -4195,6 +4314,10 @@ export class AgentLoop {
    *  should take those down — index.tsx's exit/signal handlers do that. */
   dispose(opts: { killBackgroundProcesses?: boolean } = {}): void {
     if (opts.killBackgroundProcesses) killAllBackgroundProcesses();
+    // Stop the shared language server (#424): nothing ever called shutdown(),
+    // so every model/provider switch orphaned another typescript-language-server
+    // for the rest of the terminal session.
+    void shutdownLspClient().catch(() => {});
     for (const client of this.mcpStdioClients) {
       void client.disconnect().catch(() => {});
     }

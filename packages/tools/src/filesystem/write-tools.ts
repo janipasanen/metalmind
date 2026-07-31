@@ -314,7 +314,11 @@ export const replaceInProjectTool: AgentTool<z.input<typeof replaceInProjectSche
     // Match phase via ripgrep — respects ignore files, excludes vendored dirs.
     const args = ["--files-with-matches"];
     if (!input.isRegex) args.push("--fixed-strings");
-    args.push("--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
+    // --hidden so the WRITE path sees what the READ path advertises (#420): #406
+    // taught searchInFiles/findFiles about .github/.claude/.vscode, but this
+    // match phase still skipped them, so a repo-wide rename silently missed
+    // every workflow and dotfile while reporting full success.
+    args.push("--hidden", "--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
     if (input.include) args.push("--glob", input.include);
     args.push("-e", input.find, ".");
 
@@ -336,10 +340,20 @@ export const replaceInProjectTool: AgentTool<z.input<typeof replaceInProjectSche
       return `No files contain ${input.isRegex ? "pattern" : "string"} "${input.find}".`;
     }
 
-    // Snapshot all targets up-front (resolveSafePath also enforces blocked paths).
+    // Snapshot all targets up-front. Blocked paths are SKIPPED, not fatal (#420):
+    // with --hidden the match set can now include .env* files, and
+    // resolveSafePath throws on those — which would abort an otherwise valid
+    // refactor instead of just leaving the secret file alone.
     const snapshots = new Map<string, string>();
+    const skippedSensitive: string[] = [];
     for (const rel of matched) {
-      const safe = validator.resolveSafePath(rel);
+      let safe: string;
+      try {
+        safe = validator.resolveSafePath(rel);
+      } catch {
+        skippedSensitive.push(rel);
+        continue;
+      }
       if (existsSync(safe) && statSync(safe).isFile()) snapshots.set(safe, readFileSync(safe, "utf-8"));
     }
 
@@ -387,6 +401,9 @@ export const replaceInProjectTool: AgentTool<z.input<typeof replaceInProjectSche
 
     const changedFiles = snapshots.size - unchanged.length;
     let report = `Replaced ${totalReplacements} occurrence(s) across ${changedFiles} file(s).`;
+    if (skippedSensitive.length > 0) {
+      report += `\n⚠ skipped ${skippedSensitive.length} sensitive file(s) (never edited by this tool): ${skippedSensitive.slice(0, 5).join(", ")}.`;
+    }
     if (unchanged.length > 0) {
       // Actionable partial-success signal: name the files so the model can fix
       // its pattern instead of believing the refactor is complete (#394).

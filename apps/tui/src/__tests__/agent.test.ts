@@ -2636,6 +2636,37 @@ describe("no-progress detection for repeated tool calls (gap10 #419)", () => {
     expect(notices).toMatch(/stopping the tool loop/);
   });
 
+  it("commits the wrap-up answer to history so transcript and model view agree (#431)", async () => {
+    let n = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion(req: { tools?: unknown[] }) {
+        n++;
+        // Once the loop stops, it re-asks with NO tools — answer then.
+        if (!req?.tools || (req.tools as unknown[]).length === 0) {
+          yield { type: "text", text: "I could not read that file; here is what I know." };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "tool-call", toolCall: { toolCallId: `t${n}`, toolName: "noSuchTool", argumentsJson: '{"a":1}' } };
+        yield { type: "done" };
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    const events = await collect(loop.run("read it"));
+
+    const streamed = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
+    expect(streamed).toContain("here is what I know");
+    // The same answer must be in the model-facing history, not only on screen.
+    const assistant = loop.conversation().filter((m) => m.role === "assistant");
+    expect(assistant.at(-1)?.content).toContain("here is what I know");
+  });
+
   it("does not trip when calls differ or a call succeeds", async () => {
     let n = 0;
     mockCreateProvider.mockReturnValue({
@@ -2663,5 +2694,84 @@ describe("no-progress detection for repeated tool calls (gap10 #419)", () => {
     expect(notices).not.toMatch(/stopping the tool loop/);
     const text = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("");
     expect(text).toContain("done thinking");
+  });
+});
+
+describe("context trimming never empties the conversation (gap10 #421)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("truncates a single oversized tool result instead of deleting the whole history", async () => {
+    // A tiny context window makes one big tool result exceed the budget alone.
+    const huge = "x".repeat(500_000);
+    let call = 0;
+    const sent: Array<{ role: string; content: string }[]> = [];
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: { maximumContextTokens: 8_000 } as never,
+      async *streamChatCompletion(req: { messages: Array<{ role: string; content: string }> }) {
+        sent.push(req.messages);
+        call++;
+        if (call === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "t1", toolName: "successTool", argumentsJson: "{}" } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "answer" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: true });
+    (globalThis as Record<string, unknown>).__MM_HUGE__ = huge;
+    await collect(loop.run("review my changes"));
+
+    // The SECOND request must still carry a non-system message — previously the
+    // trim loop deleted everything and sent the system prompt alone.
+    const second = sent[1] ?? [];
+    expect(second.length).toBeGreaterThan(1);
+    expect(second.some((m) => m.role !== "system")).toBe(true);
+  });
+});
+
+describe("undo after a file is edited twice in one turn (gap10 #425)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("restores the pre-agent content instead of refusing as 'modified since'", async () => {
+    const file = join(tmpdir(), `mm-twice-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`);
+    writeFileSync(file, "ORIGINAL");
+
+    let n = 0;
+    mockCreateProvider.mockReturnValue({
+      providerName: "stub",
+      supportedCapabilities: {} as never,
+      async *streamChatCompletion() {
+        n++;
+        if (n === 1) {
+          yield { type: "tool-call", toolCall: { toolCallId: "a", toolName: "writeFile", argumentsJson: JSON.stringify({ path: file, content: "FIRST" }) } };
+          yield { type: "done" };
+        } else if (n === 2) {
+          yield { type: "tool-call", toolCall: { toolCallId: "b", toolName: "writeFile", argumentsJson: JSON.stringify({ path: file, content: "SECOND" }) } };
+          yield { type: "done" };
+        } else {
+          yield { type: "text", text: "done" };
+          yield { type: "done" };
+        }
+      },
+      async completeChat() {
+        return { message: { role: "assistant" as const, content: "" } };
+      },
+    } as never);
+
+    const loop = new AgentLoop({ provider: "stub", model: "test", explicit: true });
+    await collect(loop.run("edit it twice"));
+    expect(readFileSync(file, "utf8")).toBe("SECOND");
+
+    const report = loop.undoLastEdit();
+    expect(report).not.toMatch(/skipped/i);
+    expect(readFileSync(file, "utf8")).toBe("ORIGINAL");
+    rmSync(file, { force: true });
   });
 });

@@ -60,6 +60,7 @@ export {
   resetReferenceIndex,
   indexFile,
   setLspClient,
+  shutdownLspClient,
 } from "./code-intel/symbol-tools.js";
 export { createDiagnosticsTool } from "./code-intel/diagnostics-tool.js";
 export { LspClient } from "./code-intel/lsp-client.js";

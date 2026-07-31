@@ -11,6 +11,21 @@ export function setLspClient(client: LspClient | null): void {
   activeLspClient = client;
 }
 
+/** Shut down the shared language server, if one is running (#424).
+ *  LspClient.shutdown() existed but nothing ever called it, so every agent
+ *  rebuild (model switch, provider switch) left another typescript-language-
+ *  server running for the lifetime of the terminal session. */
+export async function shutdownLspClient(): Promise<void> {
+  const client = activeLspClient;
+  activeLspClient = null;
+  if (!client) return;
+  try {
+    await client.shutdown();
+  } catch {
+    /* best-effort */
+  }
+}
+
 const FindSymbolSchema = z.object({
   name: z.string().min(1).describe("Symbol name to find"),
   filePath: z.string().optional().describe("Limit search to this file"),
