@@ -9,3 +9,6 @@ dist-tsc
 .venv/
 sidecar.log
 .audit3/
+
+# Runtime state (sessions.db, transcripts, rag-index, checkpoints)
+.metalmind/
