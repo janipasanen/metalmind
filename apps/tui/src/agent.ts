@@ -1732,13 +1732,19 @@ export class AgentLoop {
               err instanceof ProviderError && err.retryAfterMs ? err.retryAfterMs : backoffMs(attempt),
               15_000,
             );
+            // A local model that hasn't answered yet is almost always LOADING,
+            // not failing — say so, because "busy, retrying" reads like an error
+            // and hides the real cause (a big model on a tight machine).
+            const isLocalStall = /127\.0\.0\.1|localhost/.test(errText(err)) && /timed out/i.test(errText(err));
             yield {
               // A NOTICE, not model output (#404): emitting these as `text` made
               // agenticLoop accumulate them into assistantText, so a transient
               // 429 permanently prefixed the stored assistant turn with the
               // retry banner — replayed to the model on every later request.
               type: "notice",
-              text: `\n[${provider.providerName} busy (${errText(err).slice(0, 80)}) — retrying in ${Math.ceil(waitMs / 1000)}s, attempt ${attempt + 2}/${maxRetries + 1}]\n`,
+              text: isLocalStall
+                ? `\n[${provider.providerName} is still loading the model — this can take minutes the first time a large model is used. Waiting…]\n`
+                : `\n[${provider.providerName} busy (${errText(err).slice(0, 80)}) — retrying in ${Math.ceil(waitMs / 1000)}s, attempt ${attempt + 2}/${maxRetries + 1}]\n`,
             };
             await sleep(waitMs, signal);
             continue; // retry same provider

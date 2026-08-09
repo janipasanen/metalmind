@@ -9,7 +9,7 @@ import type {
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse, ProviderError } from "../normalization/provider-error.js";
-import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
+import { fetchWithTimeout, connectTimeoutFor } from "../normalization/fetch-with-timeout.js";
 import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 
 const mlxCapabilities: ModelCapabilities = {
@@ -117,7 +117,7 @@ export class MlxProvider implements ModelProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, connectTimeoutFor(this.config.baseUrl));
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "mlx", "MLX chat failed");
@@ -160,7 +160,7 @@ export class MlxProvider implements ModelProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, connectTimeoutFor(this.config.baseUrl));
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "mlx", "MLX stream failed");

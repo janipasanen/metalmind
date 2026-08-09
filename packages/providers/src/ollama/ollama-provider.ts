@@ -9,7 +9,7 @@ import type {
 } from "@metalmind/core";
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse, ProviderError } from "../normalization/provider-error.js";
-import { fetchWithTimeout } from "../normalization/fetch-with-timeout.js";
+import { fetchWithTimeout, connectTimeoutFor } from "../normalization/fetch-with-timeout.js";
 import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 import { JsonRepair } from "../normalization/json-repair.js";
 
@@ -223,7 +223,7 @@ export class OllamaProvider implements ModelProvider {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, connectTimeoutFor(this.baseUrl));
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "ollama", "Ollama chat failed");
@@ -278,7 +278,7 @@ export class OllamaProvider implements ModelProvider {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, connectTimeoutFor(this.baseUrl));
 
     if (!res.ok) {
       throw await providerErrorFromResponse(res, "ollama", "Ollama stream failed");

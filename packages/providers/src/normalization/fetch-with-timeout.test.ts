@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchWithTimeout } from "./fetch-with-timeout.js";
+import { fetchWithTimeout, isLocalEndpoint, connectTimeoutFor, LOCAL_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS } from "./fetch-with-timeout.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -38,5 +38,44 @@ describe("fetchWithTimeout (#137)", () => {
     // Wait beyond the timeout to ensure no late abort fires.
     await new Promise((r) => setTimeout(r, 30));
     expect(res.status).toBe(201);
+  });
+});
+
+describe("local endpoints get a load-aware connect budget", () => {
+  // Ollama and the MLX sidecar send no response headers until the model is
+  // LOADED, so time-to-first-byte includes loading the weights. A 12B model on
+  // a machine it barely fits took minutes and was aborted at 60s, then retried
+  // — queueing a second load behind the first. A local endpoint that is truly
+  // down fails connect immediately, so the long budget costs nothing.
+  it("recognises loopback hosts", () => {
+    for (const u of [
+      "http://127.0.0.1:11434/api/chat",
+      "http://localhost:11434/api/chat",
+      "http://127.0.0.1:8742/chat",
+    ]) {
+      expect(isLocalEndpoint(u)).toBe(true);
+      expect(connectTimeoutFor(u)).toBe(LOCAL_CONNECT_TIMEOUT_MS);
+    }
+  });
+
+  it("keeps the strict default for remote providers", () => {
+    for (const u of [
+      "https://api.ollama.com/api/chat",
+      "https://api.anthropic.com/v1/messages",
+      "https://api.openai.com/v1/chat/completions",
+    ]) {
+      expect(isLocalEndpoint(u)).toBe(false);
+      expect(connectTimeoutFor(u)).toBe(DEFAULT_CONNECT_TIMEOUT_MS);
+    }
+  });
+
+  it("gives local models minutes, not seconds", () => {
+    expect(LOCAL_CONNECT_TIMEOUT_MS).toBeGreaterThanOrEqual(10 * 60_000);
+    expect(DEFAULT_CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(60_000);
+  });
+
+  it("treats an unparseable url as remote (fail fast, not hang)", () => {
+    expect(isLocalEndpoint("not a url")).toBe(false);
+    expect(connectTimeoutFor("not a url")).toBe(DEFAULT_CONNECT_TIMEOUT_MS);
   });
 });
