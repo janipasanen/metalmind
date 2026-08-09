@@ -10,6 +10,7 @@ import sys
 import time
 import os
 import argparse
+import threading
 from typing import Optional, AsyncGenerator
 
 try:
@@ -29,6 +30,13 @@ app = FastAPI(title="Metalmind MLX Sidecar")
 loaded_model = None
 loaded_tokenizer = None
 model_name = None
+
+# Weight loading takes tens of seconds for a 9B model, and it can fail (wrong
+# path, an architecture this mlx-lm is too old to know). Both states have to be
+# reportable over HTTP: the client needs to tell "warming up" from "broken" from
+# "absent", and previously it could tell none of them apart -- see main().
+loading_model = None
+load_error = None
 
 
 class ChatMessage(BaseModel):
@@ -64,15 +72,76 @@ class LoadModelRequest(BaseModel):
 
 
 def load_model(model_path: str, trust_remote_code: bool = False):
-    global loaded_model, loaded_tokenizer, model_name
+    global loaded_model, loaded_tokenizer, model_name, loading_model, load_error
+    loading_model = model_path
+    load_error = None
     try:
         from mlx_lm import load
 
-        loaded_model, loaded_tokenizer = load(model_path, trust_remote_code=trust_remote_code)
+        try:
+            loaded_model, loaded_tokenizer = load(
+                model_path, trust_remote_code=trust_remote_code
+            )
+        except TypeError as e:
+            # mlx-lm >= 0.30 dropped the trust_remote_code kwarg from load();
+            # remote code is now opted into through tokenizer_config. Retry the
+            # new way rather than failing on a purely cosmetic signature change.
+            if "trust_remote_code" not in str(e):
+                raise
+            kwargs = (
+                {"tokenizer_config": {"trust_remote_code": True}}
+                if trust_remote_code
+                else {}
+            )
+            loaded_model, loaded_tokenizer = load(model_path, **kwargs)
         model_name = model_path
         return {"status": "loaded", "model": model_path}
     except Exception as e:
+        load_error = str(e)
         raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
+    finally:
+        loading_model = None
+
+
+def reasoning_is_open(prompt: str) -> bool:
+    """True when the rendered prompt leaves a <think> block unclosed.
+
+    Qwen3-family templates (Ornith among them) append a bare "<think>" after the
+    generation marker, so the model's first tokens are chain-of-thought with no
+    opening tag of their own. Only the side that rendered the prompt can know
+    this; without it the client would have to guess, and guessing wrong either
+    leaks reasoning into the answer or swallows an answer as reasoning.
+    """
+    opened = prompt.rfind("<think>")
+    if opened == -1:
+        return False
+    return prompt.rfind("</think>") < opened
+
+
+def iter_text(prompt, max_tokens: int, temperature: float):
+    """Yield generated text chunks for a prompt.
+
+    Wraps mlx-lm's stream_generate, which is the stable public API: it takes a
+    string prompt and yields GenerationResponse objects carrying decoded .text.
+    The previous code reached for the internal generate_step instead and got
+    three things wrong that no version of mlx-lm accepted -- it passed the
+    tokenizer into a keyword-only slot positionally, passed a `temp` argument
+    that is now expressed as a sampler, and concatenated the yielded values as
+    if they were strings when they are token-id arrays.
+    """
+    from mlx_lm import stream_generate
+    from mlx_lm.sample_utils import make_sampler
+
+    sampler = make_sampler(temp=temperature)
+    for chunk in stream_generate(
+        loaded_model,
+        loaded_tokenizer,
+        prompt,
+        max_tokens=max_tokens,
+        sampler=sampler,
+    ):
+        if chunk.text:
+            yield chunk.text
 
 
 @app.get("/health")
@@ -82,6 +151,11 @@ async def health():
         "model_loaded": loaded_model is not None,
         "model": model_name,
         "platform": sys.platform,
+        # "loading" lets a client wait instead of routing around a tier that is
+        # seconds from being ready; "error" lets it say WHY tier 1 is dead
+        # instead of silently falling through to the cloud.
+        "loading": loading_model,
+        "load_error": load_error,
     }
 
 
@@ -113,9 +187,6 @@ async def chat(req: ChatRequest):
 
     start = time.time()
     try:
-        from mlx_lm.utils import generate_step
-        import mlx.core as mx
-
         # A model whose chat template understands `tools` renders them into the
         # prompt itself. Templates that don't accept the kwarg raise TypeError —
         # fall back to a plain prompt so an older model still answers instead of
@@ -133,23 +204,18 @@ async def chat(req: ChatRequest):
         else:
             prompt = loaded_tokenizer.apply_chat_template(messages, **template_kwargs)
 
+        reasoning_open = reasoning_is_open(prompt if isinstance(prompt, str) else "")
+
         if req.stream:
             from fastapi.responses import StreamingResponse
 
             async def stream_gen():
                 response = ""
-                for token, _ in zip(
-                    generate_step(
-                        prompt,
-                        loaded_model,
-                        loaded_tokenizer,
-                        max_tokens=req.max_tokens,
-                        temp=req.temperature,
-                    ),
-                    range(req.max_tokens),
-                ):
-                    response += token
-                    yield json.dumps({"message": {"content": token}}) + "\n"
+                # Preamble: tells the client how to classify the first tokens.
+                yield json.dumps({"reasoning_open": reasoning_open}) + "\n"
+                for text in iter_text(prompt, req.max_tokens, req.temperature):
+                    response += text
+                    yield json.dumps({"message": {"content": text}}) + "\n"
                 yield json.dumps({
                     "message": {"content": ""},
                     "done": True,
@@ -158,18 +224,7 @@ async def chat(req: ChatRequest):
 
             return StreamingResponse(stream_gen(), media_type="application/x-ndjson")
 
-        response = ""
-        for token, _ in zip(
-            generate_step(
-                prompt,
-                loaded_model,
-                loaded_tokenizer,
-                max_tokens=req.max_tokens,
-                temp=req.temperature,
-            ),
-            range(req.max_tokens),
-        ):
-            response += token
+        response = "".join(iter_text(prompt, req.max_tokens, req.temperature))
 
         duration_ms = (time.time() - start) * 1000
         return {
@@ -178,6 +233,7 @@ async def chat(req: ChatRequest):
             # tool definitions. Without it the client cannot distinguish "the
             # model chose not to call a tool" from "this model never saw them".
             "tools_applied": tools_applied,
+            "reasoning_open": reasoning_open,
             "usage": {
                 "prompt_tokens": len(prompt) // 4,
                 "completion_tokens": len(response) // 4,
@@ -196,20 +252,7 @@ async def complete(req: CompleteRequest):
 
     start = time.time()
     try:
-        from mlx_lm.utils import generate_step
-
-        response = ""
-        for token, _ in zip(
-            generate_step(
-                req.prompt,
-                loaded_model,
-                loaded_tokenizer,
-                max_tokens=req.max_tokens,
-                temp=req.temperature,
-            ),
-            range(req.max_tokens),
-        ):
-            response += token
+        response = "".join(iter_text(req.prompt, req.max_tokens, req.temperature))
 
         duration_ms = (time.time() - start) * 1000
         return {
@@ -269,8 +312,23 @@ def main():
     args = parser.parse_args()
 
     if args.model:
+        # Load on a background thread so the HTTP server binds immediately.
+        # Loading inline meant nothing answered on the port for the whole load
+        # (a minute or more for a 9B), so a client probing /health saw a closed
+        # port and concluded the sidecar was absent -- and if the load raised,
+        # the exception propagated out of main() and killed the process before
+        # uvicorn ever started, turning a bad --model into a silently missing
+        # tier 1 with no way to ask what went wrong.
         print(f"Loading model: {args.model}")
-        load_model(args.model)
+
+        def _load():
+            try:
+                load_model(args.model)
+                print(f"Model loaded: {args.model}")
+            except Exception as e:  # already recorded in load_error for /health
+                print(f"Model load failed: {e}", file=sys.stderr)
+
+        threading.Thread(target=_load, daemon=True).start()
 
     print(f"MLX sidecar starting on {args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

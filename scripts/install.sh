@@ -181,10 +181,34 @@ if [ "$WITH_MLX" = "1" ]; then
   elif ! have python3; then
     warn "python3 not found — skipping MLX setup"
   else
-    if [ ! -x "$MLX_VENV/bin/python3" ]; then
+    # macOS ships Python 3.9, where pip resolves mlx-lm to 0.29 — too old to
+    # load current architectures ("Model type qwen3_5 not supported"). Prefer a
+    # 3.10+ interpreter; the venv is what the sidecar runs on forever after.
+    MLX_PY=""
+    for cand in python3.13 python3.12 python3.14 python3.11 python3; do
+      have "$cand" || continue
+      if "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+        MLX_PY="$cand"; break
+      fi
+    done
+    if [ -z "$MLX_PY" ]; then
+      warn "no Python 3.10+ found — install one (brew install python@3.13) and re-run"
+      warn "the bundled python3 ($(python3 -V 2>&1)) cannot run current mlx-lm"
+    fi
+
+    if [ -n "$MLX_PY" ] && [ -x "$MLX_VENV/bin/python3" ]; then
+      # An existing venv built on an old interpreter stays broken forever, so
+      # replace it rather than installing into it.
+      if ! "$MLX_VENV/bin/python3" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+        warn "existing venv runs $("$MLX_VENV/bin/python3" -V 2>&1) — rebuilding on $MLX_PY"
+        rm -rf "$MLX_VENV"
+      fi
+    fi
+
+    if [ -n "$MLX_PY" ] && [ ! -x "$MLX_VENV/bin/python3" ]; then
       mkdir -p "$(dirname "$MLX_VENV")"
-      python3 -m venv "$MLX_VENV"
-      ok "created venv at $MLX_VENV"
+      "$MLX_PY" -m venv "$MLX_VENV"
+      ok "created venv at $MLX_VENV ($("$MLX_VENV/bin/python3" -V 2>&1))"
     fi
     if "$MLX_VENV/bin/python3" -c "import mlx_lm" >/dev/null 2>&1; then
       ok "mlx-lm already installed in the venv"

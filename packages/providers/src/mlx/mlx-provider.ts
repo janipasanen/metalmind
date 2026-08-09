@@ -16,8 +16,8 @@ import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 const mlxCapabilities: ModelCapabilities = {
   supportsStreaming: true,
   supportsToolCalling: true,
-  supportsVision: false,
-  supportsReasoning: false,
+  supportsVision: false, // the sidecar has no image path at all
+  supportsReasoning: true,
   supportsJsonMode: false,
   maximumContextTokens: 32_768,
 };
@@ -46,17 +46,37 @@ function toMlxTools(tools: unknown[]): Array<Record<string, unknown>> {
  *  could be recognised. This holds back any tail that might be the beginning of
  *  an opening tag (the same trick the secret redactor uses for split secrets)
  *  and releases it once it is clearly not one. */
+const THINK_CLOSE = "</think>";
+
+/** Split a response that begins inside an open <think> block.
+ *
+ *  Qwen3-family templates pre-open the block in the prompt, so the model's
+ *  output starts as chain-of-thought and ends it with a bare closing tag. Shown
+ *  verbatim the user reads the model's private deliberation followed by a
+ *  stray "</think>" before the actual answer. */
+function splitReasoning(raw: string): { reasoning: string; answer: string } {
+  const end = raw.indexOf(THINK_CLOSE);
+  if (end === -1) return { reasoning: raw, answer: "" };
+  return {
+    reasoning: raw.slice(0, end),
+    answer: raw.slice(end + THINK_CLOSE.length).replace(/^\n+/, ""),
+  };
+}
+
 const TOOL_OPEN = "<tool_call>";
-function splitStreamable(buffer: string): { emit: string; keep: string } {
-  const open = buffer.indexOf(TOOL_OPEN);
+function splitOnMarker(buffer: string, marker: string): { emit: string; keep: string } {
+  const open = buffer.indexOf(marker);
   if (open !== -1) return { emit: buffer.slice(0, open), keep: buffer.slice(open) };
   // No complete tag: withhold the longest suffix that could still become one.
-  for (let n = Math.min(TOOL_OPEN.length - 1, buffer.length); n > 0; n--) {
-    if (TOOL_OPEN.startsWith(buffer.slice(buffer.length - n))) {
+  for (let n = Math.min(marker.length - 1, buffer.length); n > 0; n--) {
+    if (marker.startsWith(buffer.slice(buffer.length - n))) {
       return { emit: buffer.slice(0, buffer.length - n), keep: buffer.slice(buffer.length - n) };
     }
   }
   return { emit: buffer, keep: "" };
+}
+function splitStreamable(buffer: string): { emit: string; keep: string } {
+  return splitOnMarker(buffer, TOOL_OPEN);
 }
 
 export class MlxProvider implements ModelProvider {
@@ -162,6 +182,7 @@ export class MlxProvider implements ModelProvider {
     const data = (await res.json()) as {
       message?: { role: string; content: string };
       error?: string;
+      reasoning_open?: boolean;
       usage?: { prompt_tokens: number; completion_tokens: number; duration_ms: number };
     };
 
@@ -174,7 +195,14 @@ export class MlxProvider implements ModelProvider {
       throw new ProviderError("MLX chat returned no message");
     }
 
-    const extracted = new ToolCallExtractor().extract(data.message.content ?? "", "mlx");
+    // Strip the chain-of-thought before extraction so neither the reasoning nor
+    // the closing tag reaches the user as part of the answer.
+    const rawContent = data.message.content ?? "";
+    const split = data.reasoning_open ? splitReasoning(rawContent) : null;
+    // A generation cut short by max_tokens may never close the block. Falling
+    // back to the partial reasoning beats handing the agent an empty message.
+    const content = split ? split.answer || split.reasoning : rawContent;
+    const extracted = new ToolCallExtractor().extract(content, "mlx");
     return {
       message: {
         role: "assistant",
@@ -213,7 +241,17 @@ export class MlxProvider implements ModelProvider {
     // the not-yet-emittable tail held by the gate above.
     let raw = "";
     let held = "";
+    // Set from the sidecar's preamble line: true when the prompt left a <think>
+    // block open, so the first tokens are reasoning rather than the answer.
+    let inReasoning = false;
+    let thinkBuf = "";
     const flushToolCalls = function* (this: void): Generator<ModelStreamEvent> {
+      // A generation cut short by max_tokens never closes the block; surface
+      // what it was thinking rather than dropping those tokens entirely.
+      if (thinkBuf) {
+        yield { type: "reasoning", text: thinkBuf };
+        thinkBuf = "";
+      }
       const extracted = new ToolCallExtractor().extract(raw, "mlx");
       // Anything held back that turned out NOT to be a tool call is real text.
       const leftover = extracted.text.slice(Math.min(extracted.text.length, raw.length - held.length));
@@ -242,8 +280,14 @@ export class MlxProvider implements ModelProvider {
             const chunk = JSON.parse(line) as {
               message?: { content: string };
               done?: boolean;
+              reasoning_open?: boolean;
               usage?: { prompt_tokens?: number; completion_tokens?: number };
             };
+
+            if (chunk.reasoning_open !== undefined) {
+              inReasoning = chunk.reasoning_open;
+              continue;
+            }
 
             if (chunk.done) {
               yield* flushToolCalls();
@@ -255,8 +299,29 @@ export class MlxProvider implements ModelProvider {
             }
 
             if (chunk.message?.content) {
-              raw += chunk.message.content;
-              held += chunk.message.content;
+              let piece = chunk.message.content;
+
+              if (inReasoning) {
+                thinkBuf += piece;
+                const end = thinkBuf.indexOf(THINK_CLOSE);
+                if (end === -1) {
+                  // Still thinking — stream it as reasoning, holding back any
+                  // tail that might turn out to be the closing tag.
+                  const r = splitOnMarker(thinkBuf, THINK_CLOSE);
+                  thinkBuf = r.keep;
+                  if (r.emit) yield { type: "reasoning", text: r.emit };
+                  continue;
+                }
+                const before = thinkBuf.slice(0, end);
+                if (before) yield { type: "reasoning", text: before };
+                piece = thinkBuf.slice(end + THINK_CLOSE.length).replace(/^\n+/, "");
+                thinkBuf = "";
+                inReasoning = false;
+                if (!piece) continue;
+              }
+
+              raw += piece;
+              held += piece;
               const { emit, keep } = splitStreamable(held);
               held = keep;
               if (emit) yield { type: "text", text: emit };

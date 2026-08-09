@@ -66,7 +66,7 @@ would keep preferring.
 | **Xcode CLT** (macOS) | native addons (`better-sqlite3`, `tree-sitter`) | `xcode-select --install` |
 | **ripgrep** | search, findFiles, and `replaceInProject` | `brew install ripgrep` |
 | **Ollama** | tier 2 (local) and tier 3 (cloud) | `brew install ollama` |
-| **Python 3** | MLX sidecar only (tier 1) | preinstalled on macOS |
+| **Python 3.10+** | MLX sidecar only (tier 1) | `brew install python@3.13` — the preinstalled 3.9 is too old for current `mlx-lm` |
 
 ripgrep is worth singling out: `search` and `findFiles` fall back to a slower
 built-in walk without it, but **`replaceInProject` has no fallback and will
@@ -119,8 +119,13 @@ if a yaml model change seems ignored, that override is why.
 
 or manually:
 
+> **Use Python 3.10 or newer.** macOS still ships 3.9, and pip silently pins
+> `mlx-lm` to 0.29 there — a version that cannot load recent architectures
+> (`Model type qwen3_5 not supported`). Install a newer Python
+> (`brew install python@3.13`) and build the venv with it.
+
 ```bash
-python3 -m venv ~/.local/share/metalmind/.venv
+/opt/homebrew/bin/python3.13 -m venv ~/.local/share/metalmind/.venv
 ~/.local/share/metalmind/.venv/bin/python3 -m pip install mlx-lm fastapi uvicorn
 
 # Download a model (cached in ~/.cache/huggingface)

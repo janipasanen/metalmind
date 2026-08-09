@@ -12,3 +12,7 @@ sidecar.log
 
 # Runtime state (sessions.db, transcripts, rag-index, checkpoints)
 .metalmind/
+
+# Python bytecode from the MLX sidecar
+__pycache__/
+*.pyc

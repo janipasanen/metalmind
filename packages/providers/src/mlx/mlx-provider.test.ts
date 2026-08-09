@@ -32,7 +32,10 @@ describe("MlxProvider", () => {
         // Tier 1 gained tool calling: the sidecar renders tool definitions through
     // the model's chat template and the provider parses the calls back out.
     expect(p.supportedCapabilities.supportsToolCalling).toBe(true);
-    expect(p.supportedCapabilities.supportsReasoning).toBe(false);
+    // Qwen3-family MLX models emit chain-of-thought that the provider splits
+    // into reasoning events; vision stays false until the sidecar grows an
+    // image path.
+    expect(p.supportedCapabilities.supportsReasoning).toBe(true);
     expect(p.supportedCapabilities.supportsVision).toBe(false);
     expect(p.supportedCapabilities.maximumContextTokens).toBe(32_768);
   });
@@ -166,6 +169,85 @@ describe("MlxProvider", () => {
       const textEvents = events.filter((e) => e.type === "text");
       expect(textEvents).toHaveLength(2);
       expect(textEvents[0].text).toBe("Hello");
+    });
+
+    // Qwen3-family templates pre-open a <think> block in the prompt, so the
+    // model's first tokens are chain-of-thought terminated by a bare closing
+    // tag. The sidecar flags this; without honouring the flag the user reads
+    // the model's private deliberation and a stray "</think>" as the answer.
+    async function streamOf(lines: unknown[]): Promise<ModelStreamEvent[]> {
+      const ndjson = lines.map((l) => JSON.stringify(l)).join("\n");
+      const data = new TextEncoder().encode(ndjson);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => ndjson,
+        json: async () => ({}),
+        body: new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(data);
+            c.close();
+          },
+        }),
+      }));
+      const events: ModelStreamEvent[] = [];
+      for await (const e of new MlxProvider(defaultConfig).streamChatCompletion({ messages: [] })) {
+        events.push(e);
+      }
+      return events;
+    }
+
+    const joined = (events: ModelStreamEvent[], type: string) =>
+      events.filter((e) => e.type === type).map((e) => (e as { text: string }).text).join("");
+
+    it("routes pre-opened chain-of-thought to reasoning, not the answer", async () => {
+      const events = await streamOf([
+        { reasoning_open: true },
+        { message: { content: "Let me think" } },
+        { message: { content: " about it.\n</think>\n\nThe answer is 42." } },
+        { message: { content: "" }, done: true },
+      ]);
+
+      // Trailing newline belongs to the reasoning span — only the tag itself
+      // and the blank line after it are consumed.
+      expect(joined(events, "reasoning")).toBe("Let me think about it.\n");
+      expect(joined(events, "text")).toBe("The answer is 42.");
+      expect(joined(events, "text")).not.toContain("</think>");
+    });
+
+    it("holds back a closing tag split across chunks", async () => {
+      const events = await streamOf([
+        { reasoning_open: true },
+        { message: { content: "hmm</thi" } },
+        { message: { content: "nk>\n\nDone." } },
+        { message: { content: "" }, done: true },
+      ]);
+
+      expect(joined(events, "reasoning")).toBe("hmm");
+      expect(joined(events, "text")).toBe("Done.");
+    });
+
+    it("treats output as the answer when no block was left open", async () => {
+      const events = await streamOf([
+        { reasoning_open: false },
+        { message: { content: "Straight answer." } },
+        { message: { content: "" }, done: true },
+      ]);
+
+      expect(joined(events, "reasoning")).toBe("");
+      expect(joined(events, "text")).toBe("Straight answer.");
+    });
+
+    it("surfaces unterminated reasoning rather than dropping it", async () => {
+      // max_tokens can cut the generation before the block ever closes.
+      const events = await streamOf([
+        { reasoning_open: true },
+        { message: { content: "still thinking" } },
+        { message: { content: "" }, done: true },
+      ]);
+
+      expect(joined(events, "reasoning")).toBe("still thinking");
+      expect(joined(events, "text")).toBe("");
     });
   });
 });

@@ -379,7 +379,9 @@ const PROVIDER_CAPABILITIES: Record<string, ModelCapabilities> = {
     // real agentic tier rather than chat-only.
     supportsToolCalling: true,
     supportsVision: false,
-    supportsReasoning: false,
+    // Qwen3-family MLX models stream chain-of-thought; the provider splits it
+    // into reasoning events instead of leaking it into the answer.
+    supportsReasoning: true,
     supportsJsonMode: false,
     maximumContextTokens: 32_768,
   },

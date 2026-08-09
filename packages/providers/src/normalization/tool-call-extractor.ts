@@ -80,7 +80,14 @@ export class ToolCallExtractor {
       try {
         parsed = JSON.parse(JsonRepair.repair(m[1]));
       } catch {
-        continue; // malformed block — leave it in the text rather than guessing
+        // Not JSON — Qwen3-class templates (and Ornith, built on Qwen3.5) emit
+        // an XML body instead: <function=name><parameter=key>value</parameter>.
+        // Verified against a live Ornith-1.0-9B-MLX-4bit response.
+        const xml = this.parseXmlFunctionCall(m[1]);
+        if (!xml) continue; // malformed — leave it in the text rather than guessing
+        toolCalls.push(xml);
+        text = text.replace(m[0], "");
+        continue;
       }
       const obj = parsed as { name?: unknown; arguments?: unknown; parameters?: unknown };
       const name = typeof obj?.name === "string" ? obj.name : "";
@@ -94,6 +101,50 @@ export class ToolCallExtractor {
       text = text.replace(m[0], "");
     }
     return { text: text.trim(), toolCalls };
+  }
+
+  /** Parse the XML tool-call body Qwen3-family templates emit:
+   *
+   *    <function=listFiles>
+   *    <parameter=path>
+   *    src
+   *    </parameter>
+   *    </function>
+   *
+   *  Values are untyped text, so numbers and booleans are coerced back to JSON
+   *  scalars — a tool declaring `{count: number}` must not receive "5". */
+  private parseXmlFunctionCall(body: string): AgentToolCall | null {
+    const fn = body.match(/<function=([^>\s]+)\s*>/);
+    if (!fn) return null;
+
+    const args: Record<string, unknown> = {};
+    const paramRe = /<parameter=([^>\s]+)\s*>([\s\S]*?)<\/parameter>/g;
+    let p: RegExpExecArray | null;
+    while ((p = paramRe.exec(body)) !== null) {
+      args[p[1]] = this.coerceScalar(p[2].trim());
+    }
+
+    return {
+      toolCallId: `mlx-tc-${++this.counter}`,
+      toolName: fn[1],
+      argumentsJson: JSON.stringify(args),
+    };
+  }
+
+  /** "5" → 5, "true" → true, "{...}" → object; anything else stays a string. */
+  private coerceScalar(value: string): unknown {
+    if (value === "true") return true;
+    if (value === "false") return false;
+    if (value === "null") return null;
+    if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+    if (/^[[{]/.test(value)) {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value; // looked structured but wasn't — keep the raw text
+      }
+    }
+    return value;
   }
 
   private extractFromMarkdownFence(raw: string): ToolCallExtract {

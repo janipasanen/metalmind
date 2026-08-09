@@ -6,7 +6,7 @@ models:
   # Tier 1 — Apple Silicon GPU via MLX sidecar (fastest local)
   local-mlx:
     provider: mlx
-    model: /Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-12b-it-qat-4bit
+    model: /Users/janipasanen/.lmstudio/models/lmstudio-community/Ornith-1.0-9B-MLX-4bit
 
   # Tier 2 — Local Ollama model (installed locally; check with `ollama list`)
   local-ollama:

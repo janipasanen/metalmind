@@ -130,4 +130,43 @@ describe("tagged <tool_call> blocks (MLX / Qwen / Hermes templates)", () => {
     expect(r.toolCalls).toHaveLength(0);
     expect(r.text).toBe("Just an explanation, no tools needed.");
   });
+
+  // Qwen3-family templates put XML in the <tool_call> block, not JSON. The raw
+  // string below is a verbatim response from Ornith-1.0-9B-MLX-4bit running on
+  // the sidecar; the JSON-only parser dropped it silently and the turn looked
+  // like the model had simply declined to use its tools.
+  it("parses the XML function form Qwen3-family templates emit", () => {
+    const raw =
+      "I should use the listFiles tool.\n</think>\n\n<tool_call>\n<function=listFiles>\n<parameter=path>\nsrc\n</parameter>\n</function>\n</tool_call>";
+    const r = x().extract(raw, "mlx");
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r.toolCalls[0].toolName).toBe("listFiles");
+    expect(JSON.parse(r.toolCalls[0].argumentsJson)).toEqual({ path: "src" });
+  });
+
+  it("keeps multiple XML calls and their parameters distinct", () => {
+    const raw =
+      "<tool_call>\n<function=readFile>\n<parameter=path>\na.ts\n</parameter>\n</function>\n</tool_call>" +
+      "<tool_call>\n<function=readFile>\n<parameter=path>\nb.ts\n</parameter>\n</function>\n</tool_call>";
+    const r = x().extract(raw, "mlx");
+    expect(r.toolCalls.map((c) => JSON.parse(c.argumentsJson).path)).toEqual(["a.ts", "b.ts"]);
+  });
+
+  it("coerces XML parameter text to JSON scalars", () => {
+    const raw =
+      "<tool_call>\n<function=head>\n<parameter=path>\na.ts\n</parameter>\n<parameter=lines>\n20\n</parameter>\n<parameter=raw>\ntrue\n</parameter>\n</function>\n</tool_call>";
+    const r = x().extract(raw, "mlx");
+    expect(JSON.parse(r.toolCalls[0].argumentsJson)).toEqual({
+      path: "a.ts",
+      lines: 20,
+      raw: true,
+    });
+  });
+
+  it("still rejects an XML block with no function name", () => {
+    const raw = "<tool_call>\n<parameter=path>\nsrc\n</parameter>\n</tool_call>";
+    const r = x().extract(raw, "mlx");
+    expect(r.toolCalls).toHaveLength(0);
+    expect(r.text).toContain("parameter=path");
+  });
 });

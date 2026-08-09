@@ -2,7 +2,7 @@
 import { createRequire } from "module";
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, resolve, join } from "path";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { spawn, spawnSync } from "child_process";
 import { createConnection } from "net";
@@ -41,18 +41,51 @@ function findMlxPython() {
   return null;
 }
 
+/**
+ * The tier-1 model from the nearest metalmind.yaml, matching what
+ * scripts/start-mlx-sidecar.sh resolves. Read with a narrow scan rather than a
+ * YAML parser so the launcher keeps no dependencies of its own.
+ *
+ * Previously this was a hardcoded model id. If that model was not downloaded --
+ * and it never is, unless you happened to pick the same one -- the sidecar
+ * started, failed to load, and tier 1 was silently unavailable no matter what
+ * metalmind.yaml said.
+ */
+function configuredMlxModel() {
+  const candidates = [
+    join(process.cwd(), "metalmind.yaml"),
+    resolve(__dirname, "../../../metalmind.yaml"),
+  ];
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    try {
+      const lines = readFileSync(file, "utf8").split("\n");
+      const start = lines.findIndex((l) => /^\s*local-mlx:/.test(l));
+      if (start === -1) continue;
+      for (let i = start + 1; i < lines.length; i++) {
+        if (/^\s{0,2}\S/.test(lines[i])) break; // dedented out of the block
+        const m = lines[i].match(/^\s*model:\s*(.+?)\s*$/);
+        if (m) return m[1].replace(/^["']|["']$/g, "");
+      }
+    } catch {
+      // Unreadable config is not worth failing the launch over.
+    }
+  }
+  return null;
+}
+
 // On Apple Silicon, ensure the MLX sidecar is running for GPU-local inference.
 if (process.platform === "darwin" && process.arch === "arm64") {
   const already = await portOpen(8742);
   if (!already) {
     const python = findMlxPython();
     const sidecar = resolve(__dirname, "../scripts/mlx-sidecar.py");
-    if (python && existsSync(sidecar)) {
+    const model = configuredMlxModel();
+    if (python && model && existsSync(sidecar)) {
       // Pass --model so the sidecar starts loading the model in the background
-      // immediately. The HTTP server starts right away; model_loaded becomes true
-      // once the weights are in memory (a few seconds if cached, longer on first run).
-      const defaultMlxModel = "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit";
-      spawn(python, [sidecar, "--model", defaultMlxModel], {
+      // immediately. The HTTP server binds right away and reports
+      // {"loading": …} on /health until the weights are in memory.
+      spawn(python, [sidecar, "--model", model], {
         detached: true,
         stdio: "ignore",
         env: { ...process.env },
