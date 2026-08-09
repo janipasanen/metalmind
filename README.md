@@ -165,6 +165,13 @@ disappear before starting the sidecar.
 Check it with `curl -s 127.0.0.1:8742/health`. If it is not running, tier 1
 falls back to a local Ollama model and the status line says so.
 
+Tier 1 supports **tool calling**: the sidecar renders the tool definitions
+through the model's chat template and the provider parses the calls back out, so
+tier 1 does real agentic work rather than chat only. Pick a model whose template
+is tool-aware (Qwen, Llama 3.1+, Hermes and most modern instruct models are); if
+a template does not accept tools the sidecar falls back to a plain prompt and
+reports `tools_applied: false` rather than failing the request.
+
 **Verify the whole setup** with `/doctor` inside the app — it reports each tier,
 names any unusable one, and gives the exact command to fix it.
 

@@ -374,7 +374,10 @@ interface TierTarget {
 const PROVIDER_CAPABILITIES: Record<string, ModelCapabilities> = {
   mlx: {
     supportsStreaming: true,
-    supportsToolCalling: false,
+    // The sidecar now renders tool definitions through the model's chat
+    // template and the provider parses the calls back out, so tier 1 is a
+    // real agentic tier rather than chat-only.
+    supportsToolCalling: true,
     supportsVision: false,
     supportsReasoning: false,
     supportsJsonMode: false,

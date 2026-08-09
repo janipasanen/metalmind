@@ -5,6 +5,9 @@
  * - Markdown-wrapped JSON code fences
  * - Custom [TOOL_CALL: name] format
  * - Bare JSON objects with tool/args keys
+ * - <tool_call>{...}</tool_call> tags (Qwen / Hermes / most tool-aware chat
+ *   templates, which is what an MLX model emits once its template renders the
+ *   tool definitions)
  */
 import type { AgentToolCall } from "@metalmind/schemas";
 import { JsonRepair } from "./json-repair.js";
@@ -23,6 +26,8 @@ export class ToolCallExtractor {
     switch (provider) {
       case "ollama":
         return this.extractOllama(raw);
+      case "mlx":
+        return this.extractMlx(raw);
       default:
         return this.extractUniversal(raw);
     }
@@ -45,7 +50,50 @@ export class ToolCallExtractor {
   }
 
   private extractUniversal(raw: string): ToolCallExtract {
+    // Tagged calls first: they are unambiguous, so they win over a fence that
+    // might just be an example the model wrote out.
+    const tagged = this.extractTaggedToolCalls(raw);
+    if (tagged.toolCalls.length > 0) return tagged;
     return this.extractFromMarkdownFence(raw);
+  }
+
+  /** MLX models emit whatever their chat template defines — in practice the
+   *  <tool_call> tag form, with a fence or bare JSON as a fallback. */
+  private extractMlx(raw: string): ToolCallExtract {
+    const tagged = this.extractTaggedToolCalls(raw);
+    if (tagged.toolCalls.length > 0) return tagged;
+    const fence = this.extractFromMarkdownFence(raw);
+    if (fence.toolCalls.length > 0) return fence;
+    return this.extractBareJson(raw);
+  }
+
+  /** Parse <tool_call>{"name":…,"arguments":{…}}</tool_call> blocks — the
+   *  format Qwen, Hermes and most tool-aware templates produce. Several calls
+   *  may appear in one response, and the surrounding prose is preserved. */
+  private extractTaggedToolCalls(raw: string): ToolCallExtract {
+    const re = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+    const toolCalls: AgentToolCall[] = [];
+    let text = raw;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(raw)) !== null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(JsonRepair.repair(m[1]));
+      } catch {
+        continue; // malformed block — leave it in the text rather than guessing
+      }
+      const obj = parsed as { name?: unknown; arguments?: unknown; parameters?: unknown };
+      const name = typeof obj?.name === "string" ? obj.name : "";
+      if (!name) continue;
+      const args = obj.arguments ?? obj.parameters ?? {};
+      toolCalls.push({
+        toolCallId: `mlx-tc-${++this.counter}`,
+        toolName: name,
+        argumentsJson: typeof args === "string" ? args : JSON.stringify(args),
+      });
+      text = text.replace(m[0], "");
+    }
+    return { text: text.trim(), toolCalls };
   }
 
   private extractFromMarkdownFence(raw: string): ToolCallExtract {

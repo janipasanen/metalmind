@@ -29,7 +29,9 @@ describe("MlxProvider", () => {
   it("has Apple Silicon-focused capabilities", () => {
     const p = new MlxProvider(defaultConfig);
     expect(p.supportedCapabilities.supportsStreaming).toBe(true);
-    expect(p.supportedCapabilities.supportsToolCalling).toBe(false);
+        // Tier 1 gained tool calling: the sidecar renders tool definitions through
+    // the model's chat template and the provider parses the calls back out.
+    expect(p.supportedCapabilities.supportsToolCalling).toBe(true);
     expect(p.supportedCapabilities.supportsReasoning).toBe(false);
     expect(p.supportedCapabilities.supportsVision).toBe(false);
     expect(p.supportedCapabilities.maximumContextTokens).toBe(32_768);

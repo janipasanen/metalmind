@@ -10,11 +10,12 @@ import type {
 import type { AgentMessage } from "@metalmind/schemas";
 import { providerErrorFromResponse, ProviderError } from "../normalization/provider-error.js";
 import { fetchWithTimeout, connectTimeoutFor } from "../normalization/fetch-with-timeout.js";
+import { ToolCallExtractor } from "../normalization/tool-call-extractor.js";
 import { roughTokenCountMessages } from "../normalization/token-estimate.js";
 
 const mlxCapabilities: ModelCapabilities = {
   supportsStreaming: true,
-  supportsToolCalling: false,
+  supportsToolCalling: true,
   supportsVision: false,
   supportsReasoning: false,
   supportsJsonMode: false,
@@ -24,6 +25,38 @@ const mlxCapabilities: ModelCapabilities = {
 export interface MlxSidecarConfig {
   baseUrl: string;
   model: string;
+}
+
+/** Neutral tool defs → the OpenAI function shape that chat templates expect. */
+function toMlxTools(tools: unknown[]): Array<Record<string, unknown>> {
+  return (tools as Array<{ name: string; description?: string; inputSchema?: unknown }>).map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description ?? "",
+      parameters: t.inputSchema ?? { type: "object", properties: {} },
+    },
+  }));
+}
+
+/** Streaming gate for tool-call syntax.
+ *
+ *  Tool calls arrive as ordinary TEXT tokens, so the raw
+ *  `<tool_call>{…}</tool_call>` markup would be shown to the user before it
+ *  could be recognised. This holds back any tail that might be the beginning of
+ *  an opening tag (the same trick the secret redactor uses for split secrets)
+ *  and releases it once it is clearly not one. */
+const TOOL_OPEN = "<tool_call>";
+function splitStreamable(buffer: string): { emit: string; keep: string } {
+  const open = buffer.indexOf(TOOL_OPEN);
+  if (open !== -1) return { emit: buffer.slice(0, open), keep: buffer.slice(open) };
+  // No complete tag: withhold the longest suffix that could still become one.
+  for (let n = Math.min(TOOL_OPEN.length - 1, buffer.length); n > 0; n--) {
+    if (TOOL_OPEN.startsWith(buffer.slice(buffer.length - n))) {
+      return { emit: buffer.slice(0, buffer.length - n), keep: buffer.slice(buffer.length - n) };
+    }
+  }
+  return { emit: buffer, keep: "" };
 }
 
 export class MlxProvider implements ModelProvider {
@@ -111,6 +144,9 @@ export class MlxProvider implements ModelProvider {
       stream: false,
       max_tokens: 2048,
       temperature: 0.7,
+      // The sidecar feeds these to the tokenizer's chat template, which is what
+      // teaches the model the tool-call syntax to emit.
+      ...(request.tools?.length ? { tools: toMlxTools(request.tools) } : {}),
     };
 
     const res = await fetchWithTimeout(`${this.config.baseUrl}/chat`, {
@@ -138,10 +174,12 @@ export class MlxProvider implements ModelProvider {
       throw new ProviderError("MLX chat returned no message");
     }
 
+    const extracted = new ToolCallExtractor().extract(data.message.content ?? "", "mlx");
     return {
       message: {
         role: "assistant",
-        content: data.message.content ?? "",
+        content: extracted.text,
+        ...(extracted.toolCalls.length ? { toolCalls: extracted.toolCalls } : {}),
       },
     };
   }
@@ -154,6 +192,7 @@ export class MlxProvider implements ModelProvider {
       stream: true,
       max_tokens: 2048,
       temperature: 0.7,
+      ...(request.tools?.length ? { tools: toMlxTools(request.tools) } : {}),
     };
 
     const res = await fetchWithTimeout(`${this.config.baseUrl}/chat`, {
@@ -170,6 +209,23 @@ export class MlxProvider implements ModelProvider {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    // Everything the model produced, for tool-call extraction at the end, plus
+    // the not-yet-emittable tail held by the gate above.
+    let raw = "";
+    let held = "";
+    const flushToolCalls = function* (this: void): Generator<ModelStreamEvent> {
+      const extracted = new ToolCallExtractor().extract(raw, "mlx");
+      // Anything held back that turned out NOT to be a tool call is real text.
+      const leftover = extracted.text.slice(Math.min(extracted.text.length, raw.length - held.length));
+      if (extracted.toolCalls.length === 0 && held) {
+        yield { type: "text", text: held };
+      } else if (extracted.toolCalls.length > 0 && leftover.trim()) {
+        yield { type: "text", text: leftover };
+      }
+      for (const tc of extracted.toolCalls) {
+        yield { type: "tool-call", toolCall: { toolCallId: tc.toolCallId, toolName: tc.toolName, argumentsJson: tc.argumentsJson } };
+      }
+    };
 
     try {
       while (true) {
@@ -190,6 +246,7 @@ export class MlxProvider implements ModelProvider {
             };
 
             if (chunk.done) {
+              yield* flushToolCalls();
               if (chunk.usage) {
                 yield { type: "usage", usage: { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens } };
               }
@@ -198,7 +255,11 @@ export class MlxProvider implements ModelProvider {
             }
 
             if (chunk.message?.content) {
-              yield { type: "text", text: chunk.message.content };
+              raw += chunk.message.content;
+              held += chunk.message.content;
+              const { emit, keep } = splitStreamable(held);
+              held = keep;
+              if (emit) yield { type: "text", text: emit };
             }
           } catch {
             continue;
@@ -209,6 +270,8 @@ export class MlxProvider implements ModelProvider {
       reader.releaseLock();
     }
 
+    // Stream ended without an explicit done marker.
+    yield* flushToolCalls();
     yield { type: "done" };
   }
 

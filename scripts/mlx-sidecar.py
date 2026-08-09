@@ -42,6 +42,10 @@ class ChatRequest(BaseModel):
     max_tokens: int = 2048
     temperature: float = 0.7
     top_p: float = 0.9
+    # OpenAI-shaped tool definitions. Passed to the tokenizer's chat template,
+    # which is what teaches the model the tool-call syntax it should emit; the
+    # client parses the calls back out of the generated text.
+    tools: list[dict] | None = None
 
 
 class CompleteRequest(BaseModel):
@@ -112,9 +116,22 @@ async def chat(req: ChatRequest):
         from mlx_lm.utils import generate_step
         import mlx.core as mx
 
-        prompt = loaded_tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        # A model whose chat template understands `tools` renders them into the
+        # prompt itself. Templates that don't accept the kwarg raise TypeError —
+        # fall back to a plain prompt so an older model still answers instead of
+        # failing the whole request.
+        template_kwargs = {"tokenize": False, "add_generation_prompt": True}
+        tools_applied = False
+        if req.tools:
+            try:
+                prompt = loaded_tokenizer.apply_chat_template(
+                    messages, tools=req.tools, **template_kwargs
+                )
+                tools_applied = True
+            except (TypeError, ValueError):
+                prompt = loaded_tokenizer.apply_chat_template(messages, **template_kwargs)
+        else:
+            prompt = loaded_tokenizer.apply_chat_template(messages, **template_kwargs)
 
         if req.stream:
             from fastapi.responses import StreamingResponse
@@ -157,6 +174,10 @@ async def chat(req: ChatRequest):
         duration_ms = (time.time() - start) * 1000
         return {
             "message": {"role": "assistant", "content": response},
+            # Tells the client whether the chat template actually rendered the
+            # tool definitions. Without it the client cannot distinguish "the
+            # model chose not to call a tool" from "this model never saw them".
+            "tools_applied": tools_applied,
             "usage": {
                 "prompt_tokens": len(prompt) // 4,
                 "completion_tokens": len(response) // 4,

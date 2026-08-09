@@ -38,7 +38,8 @@ describe("Phase 5 integration — MLX provider pipeline", () => {
 
   it("MLX provider capabilities reflect local model constraints", () => {
     const provider = new MlxProvider(mlxConfig);
-    expect(provider.supportedCapabilities.supportsToolCalling).toBe(false);
+        // MLX is tool-capable now (sidecar chat-template tool rendering).
+    expect(provider.supportedCapabilities.supportsToolCalling).toBe(true);
     expect(provider.supportedCapabilities.supportsReasoning).toBe(false);
     expect(provider.supportedCapabilities.supportsStreaming).toBe(true);
   });
