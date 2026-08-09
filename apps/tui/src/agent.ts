@@ -434,6 +434,10 @@ export function resolveNamedTier(
 }
 
 /** Default local tier: MLX on Apple Silicon (GPU), Ollama elsewhere. */
+/** Last-resort tier 2, used only when the Ollama daemon cannot be reached at
+ *  all — with it running, the tier is resolved from what is actually installed. */
+export const DEFAULT_TIER2: TierTarget = { provider: "ollama", model: "qwen3.5:4b-mlx" };
+
 export function defaultLocalTier(appleSilicon: boolean): TierTarget {
   return appleSilicon
     ? { provider: "mlx", model: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit" }
@@ -450,17 +454,52 @@ function tierCapabilities(targets: TierTarget[]): Record<string, ModelCapabiliti
 }
 
 async function mlxSidecarReady(target: TierTarget): Promise<boolean> {
-  const baseUrl = target.baseUrl ?? "http://127.0.0.1:8742";
+  return (await mlxSidecarModel(target.baseUrl)) !== null;
+}
+
+/** The model the sidecar currently has in memory, or null when it is not up,
+ *  still loading, or failed to load. Returns the name so callers can DEFAULT to
+ *  whatever is actually loaded instead of guessing a model id that may well not
+ *  exist on this machine. */
+async function mlxSidecarModel(baseUrl = "http://127.0.0.1:8742"): Promise<string | null> {
   try {
     const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) return false;
-    // If the sidecar is up but no model is loaded yet, don't treat it as
-    // ready — skip to tier 2 instead of returning a 503 to the user.
-    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
-    if (body.model_loaded === false) return false;
-    return true;
+    if (!res.ok) return null;
+    // Up but still warming, or dead on a bad model: not ready either way — skip
+    // to tier 2 rather than returning a 503 to the user.
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (body.model_loaded !== true) return null;
+    return typeof body.model === "string" && body.model ? body.model : null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+/** First model actually installed in the local Ollama daemon.
+ *
+ *  Tier 2 used to fall back to a hardcoded "ministral-3:3b" — a model that is
+ *  not installed by default and, for most people, never at all. The tier then
+ *  looked configured while every request skipped it. Asking the daemon cannot
+ *  name a model that is not there. */
+async function firstInstalledOllamaModel(
+  baseUrl = "http://127.0.0.1:11434",
+): Promise<string | null> {
+  try {
+    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => ({}))) as { models?: Array<{ name?: unknown }> };
+    const names = (body.models ?? [])
+      .map((m) => m?.name)
+      .filter((n): n is string => typeof n === "string" && n.length > 0)
+      // Embedding models cannot answer a chat turn; picking one as the tier-2
+      // default would fail every request. They are conventionally named.
+      .filter((n) => !/embed/i.test(n))
+      // A ":cloud" tag is served remotely even though it is listed locally —
+      // tier 2 is meant to be the on-device tier.
+      .filter((n) => !n.endsWith("-cloud") && !n.endsWith(":cloud"));
+    return names[0] ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -494,9 +533,19 @@ async function resolveLocalTier(fileConfig: MetalmindConfig, userConfig: TuiConf
     }
   }
 
-  // 3. Fallback to hardcoded defaults
-  const fallback = defaultLocalTier(isAppleSilicon());
-  if (fallback.provider !== "mlx" || await mlxSidecarReady(fallback)) return fallback;
+  // 3. Nothing named a tier-1 model. Prefer whatever the sidecar already has in
+  //    memory over a hardcoded id: the guess was
+  //    "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit", which is not
+  //    downloaded unless you happened to pick it, so tier 1 reported a model
+  //    the sidecar had never heard of while a perfectly good one was loaded.
+  if (isAppleSilicon()) {
+    const loaded = await mlxSidecarModel();
+    if (loaded) return { provider: "mlx", model: loaded };
+  }
+
+  // 4. Last resort: a model the local Ollama daemon actually has.
+  const installed = await firstInstalledOllamaModel();
+  if (installed) return { provider: "ollama", model: installed };
 
   return defaultLocalTier(false);
 }
@@ -523,9 +572,17 @@ export function createDefaultRouter(
 
     // Tier 2: local Ollama fallback (named via defaultFallbackModel in yaml,
     // or a sensible built-in default).
-    const tier2 = routing?.defaultFallbackModel
-      ? (resolveNamedTier(routing.defaultFallbackModel, models) ?? { provider: "ollama", model: "ministral-3:3b" })
-      : { provider: "ollama", model: "ministral-3:3b" };
+    // Named in the yaml, else the first model the daemon actually has. The old
+    // hardcoded "ministral-3:3b" is not installed by default and, for most
+    // people, never at all — the tier looked configured while every request
+    // skipped it with "not installed".
+    let tier2: TierTarget | undefined = routing?.defaultFallbackModel
+      ? resolveNamedTier(routing.defaultFallbackModel, models)
+      : undefined;
+    if (!tier2) {
+      const installed = await firstInstalledOllamaModel();
+      tier2 = installed ? { provider: "ollama", model: installed } : DEFAULT_TIER2;
+    }
 
     // Tier 3: cloud model for complex tasks.
     const defaultReasoning = { provider: config.provider, model: config.model };

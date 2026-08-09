@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
+import { discoverMlxModels, discoverOllamaModels } from "../local-model-discovery.js";
 
 export interface TierModelPickerProps {
   tier: 1 | 2 | 3;
@@ -15,25 +16,53 @@ interface ModelOption {
   model: string;
 }
 
-// Known model lists per tier.  Tier 3 lists are the Ollama cloud catalogue.
-const TIER_OPTIONS: Record<1 | 2 | 3, ModelOption[]> = {
-  1: [
-    { label: "gemma-3-12b-it-qat-4bit  (MLX, LM Studio)", provider: "mlx", model: "/Users/janipasanen/.lmstudio/models/mlx-community/gemma-3-12b-it-qat-4bit" },
-    { label: "DeepSeek-Coder-1.3B-4bit (MLX, HuggingFace)", provider: "mlx", model: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit" },
-  ],
-  2: [
-    { label: "gemma4:e2b-mlx           (2B, Apple Silicon)", provider: "ollama", model: "gemma4:e2b-mlx" },
-    { label: "gemma3:4b                (4B, general)", provider: "ollama", model: "gemma3:4b" },
-    { label: "deepseek-coder:1.3b      (1.3B, coding)", provider: "ollama", model: "deepseek-coder:1.3b" },
-  ],
-  3: [
-    { label: "gemini-3-flash-preview   (fast, default)", provider: "ollama-cloud", model: "gemini-3-flash-preview:latest" },
-    { label: "gemma4:31b-cloud         (31B, quality)", provider: "ollama-cloud", model: "gemma4:31b-cloud" },
-    { label: "glm-5.1:cloud            (reasoning)", provider: "ollama-cloud", model: "glm-5.1:cloud" },
-    { label: "devstral-small-2:24b     (coding, 24B)", provider: "ollama-cloud", model: "devstral-small-2:24b-cloud" },
-    { label: "devstral-2:123b          (coding, 123B)", provider: "ollama-cloud", model: "devstral-2:123b-cloud" },
-  ],
-};
+// Tiers 1 and 2 are DISCOVERED from the machine (see useTierOptions): a static
+// list could not offer a model you had just downloaded, and offered several you
+// had never installed. Tier 3 is a remote catalogue, so it stays declared.
+const CLOUD_OPTIONS: ModelOption[] = [
+  { label: "glm-5.2:cloud            (reasoning, default)", provider: "ollama-cloud", model: "glm-5.2:cloud" },
+  { label: "gemini-3-flash-preview   (fast)", provider: "ollama-cloud", model: "gemini-3-flash-preview:latest" },
+  { label: "gemma4:31b-cloud         (31B, quality)", provider: "ollama-cloud", model: "gemma4:31b-cloud" },
+  { label: "devstral-small-2:24b     (coding, 24B)", provider: "ollama-cloud", model: "devstral-small-2:24b-cloud" },
+  { label: "devstral-2:123b          (coding, 123B)", provider: "ollama-cloud", model: "devstral-2:123b-cloud" },
+];
+
+/** Options for a tier: what is installed for the local tiers, the catalogue for
+ *  the cloud one. The currently configured model is always included, even when
+ *  discovery cannot see it, so the picker never hides the active choice. */
+function useTierOptions(tier: 1 | 2 | 3, currentModel?: string): ModelOption[] {
+  const [discovered, setDiscovered] = useState<ModelOption[] | null>(
+    tier === 3 ? CLOUD_OPTIONS : null,
+  );
+
+  useEffect(() => {
+    if (tier === 3) return;
+    let cancelled = false;
+
+    if (tier === 1) {
+      const opts = discoverMlxModels().map((m) => ({ label: m.label, provider: "mlx", model: m.model }));
+      setDiscovered(opts);
+      return;
+    }
+
+    discoverOllamaModels().then((models) => {
+      if (cancelled) return;
+      setDiscovered(models.map((m) => ({ label: m.label, provider: "ollama", model: m.model })));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tier]);
+
+  const options = discovered ?? [];
+  if (currentModel && !options.some((o) => o.model === currentModel)) {
+    return [
+      { label: `${currentModel}  (current)`, provider: TIER_PROVIDERS[tier], model: currentModel },
+      ...options,
+    ];
+  }
+  return options;
+}
 
 const TIER_LABELS: Record<1 | 2 | 3, string> = {
   1: "Tier 1 — MLX GPU",
@@ -48,13 +77,17 @@ const TIER_PROVIDERS: Record<1 | 2 | 3, string> = {
 };
 
 export default function TierModelPicker({ tier, currentModel, onSelect, onCancel, accent = "cyan" }: TierModelPickerProps) {
-  const options = TIER_OPTIONS[tier];
+  const options = useTierOptions(tier, currentModel);
   const allOptions = [...options, { label: "Custom...", provider: TIER_PROVIDERS[tier], model: "" }];
 
-  const [selectedIndex, setSelectedIndex] = useState(() => {
-    const idx = options.findIndex(o => o.model === currentModel);
-    return idx >= 0 ? idx : 0;
-  });
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // Discovery for tier 2 resolves after the first render, so start the cursor
+  // on the model already in use once the list arrives.
+  useEffect(() => {
+    const idx = options.findIndex((o) => o.model === currentModel);
+    if (idx >= 0) setSelectedIndex(idx);
+  }, [options.length, currentModel]);
   const [isCustom, setIsCustom] = useState(false);
   const [customModel, setCustomModel] = useState("");
 
@@ -94,6 +127,13 @@ export default function TierModelPicker({ tier, currentModel, onSelect, onCancel
         </Box>
       ) : (
         <Box flexDirection="column" paddingY={1}>
+          {options.length === 0 && (
+            <Text dimColor>
+              {tier === 1
+                ? "No MLX models found in ~/.lmstudio/models or the HuggingFace cache."
+                : "No local Ollama models found (is the daemon running?)."}
+            </Text>
+          )}
           {allOptions.map((opt, i) => {
             const isCurrent = opt.model === currentModel;
             const isSelected = i === selectedIndex;

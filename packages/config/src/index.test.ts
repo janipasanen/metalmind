@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import {
   loadConfig,
   loadConfigFromFile,
@@ -11,6 +11,19 @@ import {
   GLOBAL_CONFIG_FILE,
   XDG_CONFIG_DIR,
 } from "./index.js";
+
+// A "packages/*" glob in the vitest workspace did not inherit the root
+// setupFiles, so METALMIND_CONFIG_DIR stayed unset here and XDG_CONFIG_DIR
+// resolved to the developer's REAL ~/.config/metalmind — a test writing or
+// deleting a file there hit the real one. Guard the invariant directly.
+describe("test isolation (#415)", () => {
+  it("never resolves the config dir to the real home directory", () => {
+    expect(process.env.METALMIND_CONFIG_DIR).toBeTruthy();
+    expect(XDG_CONFIG_DIR).toBe(process.env.METALMIND_CONFIG_DIR);
+    expect(XDG_CONFIG_DIR).not.toBe(join(homedir(), ".config", "metalmind"));
+    expect(GLOBAL_CONFIG_FILE.startsWith(homedir() + "/.config/metalmind")).toBe(false);
+  });
+});
 
 describe("loadConfig", () => {
   it("returns defaults for empty input", () => {
