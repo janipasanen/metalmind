@@ -12,6 +12,12 @@ export const CONFIG_FILE = "metalmind.yaml";
 export const XDG_CONFIG_DIR =
   process.env.METALMIND_CONFIG_DIR?.trim() || join(homedir(), ".config", "metalmind");
 export const XDG_CONFIG_FILE = join(XDG_CONFIG_DIR, "config.json");
+/** User-level metalmind.yaml, applied when a project does not define its own.
+ *  `metalmind` is installed once and run in any directory, but models/routing
+ *  used to come only from a metalmind.yaml found by walking up from the cwd —
+ *  so outside a configured project every tier silently fell back to a built-in
+ *  default (tier 2 as "ministral-3:3b", whether or not it was installed). */
+export const GLOBAL_CONFIG_FILE = join(XDG_CONFIG_DIR, CONFIG_FILE);
 
 export const defaultConfig: MetalmindConfig = {
   models: {},
@@ -37,36 +43,91 @@ export function getConfigLoadIssue(): ConfigLoadIssue | null {
   return lastConfigIssue;
 }
 
-export function loadConfigFromFile(
-  directory: string = process.cwd(),
-): MetalmindConfig {
-  lastConfigIssue = null;
-  const configPath = findConfigFile(directory);
-  if (!configPath) return structuredClone(defaultConfig);
+/** Read and validate one metalmind.yaml. Returns null — and records why — when
+ *  the file is unusable, so a broken file is discarded whole rather than
+ *  half-applied. */
+function readConfigAt(configPath: string): MetalmindConfig | null {
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf-8");
+  } catch (err) {
+    lastConfigIssue = { path: configPath, reason: `unreadable: ${err instanceof Error ? err.message : String(err)}` };
+    return null;
+  }
 
-  const raw = readFileSync(configPath, "utf-8");
   let data: unknown;
-
   try {
     data = parseYaml(raw);
   } catch (err) {
     lastConfigIssue = { path: configPath, reason: `YAML parse error: ${err instanceof Error ? err.message : String(err)}` };
-    return structuredClone(defaultConfig);
+    return null;
   }
 
   if (!data || typeof data !== "object") {
     lastConfigIssue = { path: configPath, reason: "file is empty or not a YAML mapping" };
-    return structuredClone(defaultConfig);
+    return null;
   }
+
   const parsed = MetalmindConfigSchema.safeParse(data);
   if (!parsed.success) {
     lastConfigIssue = {
       path: configPath,
       reason: parsed.error.errors.map((e) => `${e.path.join(".") || "(root)"}: ${e.message}`).join("; "),
     };
-    return structuredClone(defaultConfig);
+    return null;
   }
   return parsed.data;
+}
+
+/** Layer a project config over the user-level one.
+ *
+ *  `models` is a registry, so it merges by name — a project adding one model
+ *  keeps the rest. Every other section is replaced wholesale when the project
+ *  defines it, which keeps the rule easy to state: define a section and you own
+ *  it. `models` cannot use that rule because the schema defaults it to `{}` on
+ *  every parse, so wholesale replacement would erase the global registry from
+ *  any project config that never mentioned models. */
+function layerConfig(base: MetalmindConfig, over: MetalmindConfig): MetalmindConfig {
+  const merged: MetalmindConfig = { ...base };
+  for (const [key, value] of Object.entries(over) as Array<[keyof MetalmindConfig, unknown]>) {
+    if (value === undefined) continue;
+    if (key === "models") continue; // handled below
+    (merged as Record<string, unknown>)[key] = value;
+  }
+  merged.models = { ...(base.models ?? {}), ...(over.models ?? {}) };
+  return merged;
+}
+
+export interface LoadConfigOptions {
+  /** User-level config path. Defaults to GLOBAL_CONFIG_FILE; pass an explicit
+   *  path (or null to skip it) so a test never reads or writes the shared one —
+   *  vitest runs files in parallel, and that file is now an input to every
+   *  loadConfigFromFile call in the run. */
+  globalFile?: string | null;
+}
+
+export function loadConfigFromFile(
+  directory: string = process.cwd(),
+  options: LoadConfigOptions = {},
+): MetalmindConfig {
+  lastConfigIssue = null;
+  const projectPath = findConfigFile(directory);
+
+  const globalCandidate = options.globalFile === undefined ? GLOBAL_CONFIG_FILE : options.globalFile;
+  // Skip the global file when the walk already found it, so a config living in
+  // the config dir is not applied twice.
+  const globalPath =
+    globalCandidate && projectPath !== globalCandidate && existsSync(globalCandidate)
+      ? globalCandidate
+      : null;
+
+  const globalConfig = globalPath ? readConfigAt(globalPath) : null;
+  const projectConfig = projectPath ? readConfigAt(projectPath) : null;
+
+  if (!globalConfig && !projectConfig) return structuredClone(defaultConfig);
+  if (!projectConfig) return globalConfig!;
+  if (!globalConfig) return projectConfig;
+  return layerConfig(globalConfig, projectConfig);
 }
 
 function findConfigFile(startDir: string): string | null {

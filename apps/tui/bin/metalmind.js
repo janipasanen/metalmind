@@ -52,10 +52,19 @@ function findMlxPython() {
  * metalmind.yaml said.
  */
 function configuredMlxModel() {
-  const candidates = [
-    join(process.cwd(), "metalmind.yaml"),
+  // Same precedence the app uses: the nearest project config wins, then the
+  // user-level one. Without the user-level entry the sidecar would start with
+  // the wrong model in every directory that is not itself a configured project.
+  const candidates = [];
+  for (let dir = process.cwd(); ; dir = dirname(dir)) {
+    candidates.push(join(dir, "metalmind.yaml"));
+    if (dirname(dir) === dir) break;
+  }
+  candidates.push(
+    join(process.env.METALMIND_CONFIG_DIR?.trim() || join(homedir(), ".config", "metalmind"), "metalmind.yaml"),
     resolve(__dirname, "../../../metalmind.yaml"),
-  ];
+  );
+
   for (const file of candidates) {
     if (!existsSync(file)) continue;
     try {

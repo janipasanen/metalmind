@@ -77,6 +77,7 @@ fail**, so repo-wide refactors need it.
 | Path | What |
 |---|---|
 | `~/.config/metalmind/config.json` | provider, model, API keys, tier overrides, settings (mode `0600`) |
+| `~/.config/metalmind/metalmind.yaml` | models + routing applied in every directory |
 | `~/.config/metalmind/instructions.md` | standing instructions applied in every project |
 | `~/.config/metalmind/commands/*.md` | your own `/<name>` slash commands |
 | `~/.config/metalmind/hooks.json` | global lifecycle hooks |
@@ -279,7 +280,22 @@ CLI flags override env vars, which override saved config.
 
 ### Named models (`metalmind.yaml`)
 
-Place a `metalmind.yaml` in your project directory or home directory to define named model references and routing:
+Define named model references and routing in a `metalmind.yaml`. Two locations
+are read, in this order:
+
+| File | Applies to |
+|---|---|
+| `~/.config/metalmind/metalmind.yaml` | every directory — put your tiers here |
+| `<project>/metalmind.yaml` (nearest, walking up from the cwd) | that project |
+
+A section defined in the project file replaces the user-level one, except
+`models`, which merges by name — so a project can override a single tier and
+inherit the rest. Without a user-level file, running `metalmind` outside a
+configured project leaves every tier on a built-in default, which is rarely a
+model you have installed.
+
+`routing` requires `defaultLocalModel` and `defaultReasoningModel`; a file that
+omits either is rejected **whole** (run `/doctor` — it reports the reason).
 
 ```yaml
 models:

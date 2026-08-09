@@ -1,8 +1,16 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfig, loadConfigFromFile, validateConfig, CONFIG_FILE } from "./index.js";
+import {
+  loadConfig,
+  loadConfigFromFile,
+  validateConfig,
+  getConfigLoadIssue,
+  CONFIG_FILE,
+  GLOBAL_CONFIG_FILE,
+  XDG_CONFIG_DIR,
+} from "./index.js";
 
 describe("loadConfig", () => {
   it("returns defaults for empty input", () => {
@@ -122,5 +130,109 @@ describe("validateConfig", () => {
   it("still rejects a config whose sections have the wrong shape", () => {
     expect(validateConfig({ tools: { shell: "yes" } }).success).toBe(false);
     expect(validateConfig({ models: { a: { provider: 1 } } }).success).toBe(false);
+  });
+});
+
+// `metalmind` is installed once and run in any directory, but models/routing
+// used to come only from a metalmind.yaml found by walking up from the cwd. Run
+// it outside a configured project and every tier fell back to a built-in
+// default — tier 2 as "ministral-3:3b" whether or not it was installed.
+describe("loadConfigFromFile — user-level config", () => {
+  const testRoot = join(tmpdir(), `metalmind-global-test-${process.pid}`);
+  const projectDir = join(testRoot, "project");
+  // Never the real GLOBAL_CONFIG_FILE: vitest runs files in parallel and that
+  // path is now an input to every loadConfigFromFile call in the run, so
+  // writing it here would intermittently break unrelated tests.
+  const globalFile = join(testRoot, "global", CONFIG_FILE);
+
+  const writeGlobal = (yaml: string) => {
+    mkdirSync(dirname(globalFile), { recursive: true });
+    writeFileSync(globalFile, yaml);
+  };
+
+  beforeEach(() => {
+    rmSync(testRoot, { recursive: true, force: true });
+    mkdirSync(projectDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testRoot, { recursive: true, force: true });
+  });
+
+  it("reads the user-level config from the config dir by default", () => {
+    expect(GLOBAL_CONFIG_FILE).toBe(join(XDG_CONFIG_DIR, CONFIG_FILE));
+  });
+
+  it("applies the user-level config in a directory with no project config", () => {
+    writeGlobal(`models:
+  local-ollama:
+    provider: ollama
+    model: qwen3.5:4b-mlx
+routing:
+  defaultLocalModel: local-mlx
+  defaultFallbackModel: local-ollama
+  defaultReasoningModel: cloud-reasoning
+`);
+    const cfg = loadConfigFromFile(projectDir, { globalFile });
+    expect(cfg.models["local-ollama"]?.model).toBe("qwen3.5:4b-mlx");
+    expect(cfg.routing?.defaultFallbackModel).toBe("local-ollama");
+  });
+
+  it("lets a project config override a section it defines", () => {
+    writeGlobal(`routing:
+  defaultLocalModel: local-mlx
+  defaultFallbackModel: global-tier
+  defaultReasoningModel: cloud-reasoning
+`);
+    writeFileSync(
+      join(projectDir, CONFIG_FILE),
+      `routing:
+  defaultLocalModel: local-mlx
+  defaultFallbackModel: project-tier
+  defaultReasoningModel: cloud-reasoning
+`,
+    );
+    expect(loadConfigFromFile(projectDir, { globalFile }).routing?.defaultFallbackModel).toBe("project-tier");
+  });
+
+  it("merges models by name so a project adding one keeps the rest", () => {
+    // `models` defaults to {} on every parse, so replacing the section
+    // wholesale would erase the global registry from any project config that
+    // never mentioned models.
+    writeGlobal(`models:
+  local-mlx:
+    provider: mlx
+    model: global-mlx
+  local-ollama:
+    provider: ollama
+    model: global-ollama
+`);
+    writeFileSync(
+      join(projectDir, CONFIG_FILE),
+      `models:
+  local-mlx:
+    provider: mlx
+    model: project-mlx
+`,
+    );
+    const cfg = loadConfigFromFile(projectDir, { globalFile });
+    expect(cfg.models["local-mlx"]?.model).toBe("project-mlx"); // project wins
+    expect(cfg.models["local-ollama"]?.model).toBe("global-ollama"); // inherited
+  });
+
+  it("keeps the user-level config when a project config is unusable", () => {
+    writeGlobal(`models:
+  local-ollama:
+    provider: ollama
+    model: from-global
+`);
+    writeFileSync(join(projectDir, CONFIG_FILE), "models: [this is not a mapping\n");
+    const cfg = loadConfigFromFile(projectDir, { globalFile });
+    expect(cfg.models["local-ollama"]?.model).toBe("from-global");
+    expect(getConfigLoadIssue()?.path).toBe(join(projectDir, CONFIG_FILE));
+  });
+
+  it("still returns defaults when neither config exists", () => {
+    expect(loadConfigFromFile(projectDir, { globalFile }).models).toEqual({});
   });
 });
