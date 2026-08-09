@@ -4,31 +4,152 @@ An agentic AI assistant for the terminal with intelligent three-tier routing: si
 
 ## Install
 
-### From npm (recommended)
-
-```bash
-npm install -g metalmind
-metalmind
-```
-
-On Apple Silicon, `postinstall` automatically creates a Python `.venv` at
-`~/.local/share/metalmind/.venv` and installs `mlx-lm` so the MLX sidecar
-is ready for GPU inference with no extra steps. Requires Python 3 and
-Xcode Command Line Tools (`xcode-select --install`).
-
-### From source (development)
+### Quick start (from source)
 
 ```bash
 git clone https://github.com/janipasanen/metalmind
 cd metalmind
-npm install        # installs all workspace packages
-npm run build      # type-checks + bundles apps/tui → dist/index.js
-npm link -w metalmind   # registers the `metalmind` command globally
+npm install
+./scripts/install.sh --all
 ```
 
+`install.sh` checks prerequisites, builds, registers the `metalmind` command,
+creates the config directory with the right permissions, and optionally sets up
+local inference. It asks before installing anything outside the repo.
+
+| Flag | Effect |
+|---|---|
+| *(none)* | check prerequisites, build, link the command |
+| `--with-model` | also pull a local Ollama model for tier 2 |
+| `--with-mlx` | also create the MLX venv for tier 1 (Apple Silicon) |
+| `--all` | everything |
+| `--check` | report what is missing and change nothing |
+
+### Manual build and install
+
 ```bash
-metalmind          # run from any directory
+npm install             # all workspace packages
+npm run build           # tsc -b (typecheck) + tsup → apps/tui/dist/index.js
+npm link -w metalmind   # register the `metalmind` command globally
+metalmind               # run from any directory
 ```
+
+`npm link` symlinks into your active Node prefix and keeps pointing at this
+checkout, so a later `npm run build` updates the installed command with no
+reinstall. To remove it: `npm unlink -g metalmind`.
+
+Two ways to run without installing:
+
+```bash
+npm run dev --workspace apps/tui   # TypeScript directly, no build step
+node apps/tui/dist/index.js        # the built bundle
+```
+
+One caveat: **only the `metalmind` command auto-starts the MLX sidecar.**
+`npm run dev` and running `dist/index.js` directly do not.
+
+### From npm
+
+```bash
+npm install -g metalmind
+```
+
+On Apple Silicon, `postinstall` creates the MLX venv described below. If that
+step fails it removes the half-built venv rather than leaving one MetalMind
+would keep preferring.
+
+### Prerequisites
+
+| | Needed for | Install |
+|---|---|---|
+| **Node 20+** | everything | [nodejs.org](https://nodejs.org) or nvm |
+| **Xcode CLT** (macOS) | native addons (`better-sqlite3`, `tree-sitter`) | `xcode-select --install` |
+| **ripgrep** | search, findFiles, and `replaceInProject` | `brew install ripgrep` |
+| **Ollama** | tier 2 (local) and tier 3 (cloud) | `brew install ollama` |
+| **Python 3** | MLX sidecar only (tier 1) | preinstalled on macOS |
+
+ripgrep is worth singling out: `search` and `findFiles` fall back to a slower
+built-in walk without it, but **`replaceInProject` has no fallback and will
+fail**, so repo-wide refactors need it.
+
+### Where everything lives
+
+| Path | What |
+|---|---|
+| `~/.config/metalmind/config.json` | provider, model, API keys, tier overrides, settings (mode `0600`) |
+| `~/.config/metalmind/instructions.md` | standing instructions applied in every project |
+| `~/.config/metalmind/commands/*.md` | your own `/<name>` slash commands |
+| `~/.config/metalmind/hooks.json` | global lifecycle hooks |
+| `~/.local/share/metalmind/.venv` | Python venv for the MLX sidecar |
+| `~/.cache/huggingface` | downloaded MLX model weights |
+| `<project>/.metalmind/` | per-project session db, transcripts, RAG index |
+| `<project>/metalmind.yaml` | per-project models, routing, permissions, tools |
+
+Set `METALMIND_CONFIG_DIR` to relocate the config root (useful for containers or
+separate profiles).
+
+### Setting up the tiers
+
+**Tier 3 — cloud** (default, needs an API key):
+
+```bash
+export OLLAMA_API_KEY=...        # add to ~/.zshrc to persist
+```
+
+The key is auto-detected on first run. Inside the app, `/model` opens a picker
+listing the models your account actually serves.
+
+**Tier 2 — local Ollama:**
+
+```bash
+brew install ollama
+ollama serve                     # leave running (or use the menu-bar app)
+ollama pull qwen3.5:4b-mlx       # any model you like
+```
+
+Then point tier 2 at it with `/tier 2 qwen3.5:4b-mlx`, or edit `metalmind.yaml`.
+Note that a per-tier override saved in `config.json` wins over `metalmind.yaml` —
+if a yaml model change seems ignored, that override is why.
+
+**Tier 1 — MLX sidecar** (Apple Silicon GPU, fastest local):
+
+```bash
+./scripts/install.sh --with-mlx      # creates the venv and offers to fetch a model
+```
+
+or manually:
+
+```bash
+python3 -m venv ~/.local/share/metalmind/.venv
+~/.local/share/metalmind/.venv/bin/python3 -m pip install mlx-lm fastapi uvicorn
+
+# Download a model (cached in ~/.cache/huggingface)
+~/.local/share/metalmind/.venv/bin/python3 -m mlx_lm generate \
+  --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit --prompt hi --max-tokens 4
+```
+
+Point tier 1 at that model in `metalmind.yaml`:
+
+```yaml
+models:
+  local-mlx:
+    provider: mlx
+    model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+```
+
+The sidecar listens on `127.0.0.1:8742` and starts automatically when you launch
+with the `metalmind` command. To run it yourself:
+
+```bash
+~/.local/share/metalmind/.venv/bin/python3 scripts/mlx-sidecar.py \
+  --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+```
+
+Check it with `curl -s 127.0.0.1:8742/health`. If it is not running, tier 1
+falls back to a local Ollama model and the status line says so.
+
+**Verify the whole setup** with `/doctor` inside the app — it reports each tier,
+names any unusable one, and gives the exact command to fix it.
 
 ### Publishing a new release
 
@@ -43,8 +164,8 @@ npm publish --workspace apps/tui
 
 The published package contains only `dist/`, `bin/`, and `scripts/`. All
 `@metalmind/*` internal packages are bundled into `dist/index.js` at build
-time. The only runtime npm dependency is `tree-sitter` (native addon, compiled
-on install by node-gyp — requires Xcode CLT on macOS).
+time. `tsc` emits to `dist-tsc/` so a typecheck can never overwrite the
+published bundle.
 
 ## Providers
 
