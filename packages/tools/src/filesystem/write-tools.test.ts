@@ -257,6 +257,7 @@ describe("deleteDirectoryTool (#191)", () => {
   });
 });
 
+import { DiffGenerator } from "../ui/diff-generator.js";
 import { multiEditTool } from "./write-tools.js";
 
 describe("multiEditTool (#151)", () => {
@@ -366,5 +367,61 @@ describe("replaceInProjectTool (#164)", () => {
       { projectRoot: testDir },
     );
     expect(result).toMatch(/No files contain/);
+  });
+});
+
+describe("replacement text is inserted verbatim (#438)", () => {
+  const dir = join(tmpdir(), `mm-dollar-${Date.now()}`);
+  beforeEach(() => { rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true }); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  // String.replace expands $&, $`, $', $$ and $N in a STRING replacement, so
+  // these inputs silently corrupted real code. A function replacement is the
+  // guard; if someone reverts it, these fail loudly.
+  const cases: Array<[string, string]> = [
+    ["$& expansion", "const m = '$&';"],
+    ["backtick expansion", "const b = '$`';"],
+    ["quote expansion", "const q = \"$'\";"],
+    ["double dollar", "const tpl = `$${amount}`;"],
+    ["numbered group", "const n = '$1 and $2';"],
+  ];
+
+  for (const [name, replacement] of cases) {
+    it(`editFile preserves ${name}`, async () => {
+      const file = join(dir, "a.ts");
+      writeFileSync(file, "PLACEHOLDER\n");
+      await editFileTool.execute(
+        { path: file, oldString: "PLACEHOLDER", newString: replacement },
+        { projectRoot: dir },
+      );
+      expect(readFileSync(file, "utf-8")).toBe(`${replacement}\n`);
+    });
+  }
+
+  it("multiEdit preserves them too", async () => {
+    const file = join(dir, "b.ts");
+    writeFileSync(file, "ONE\nTWO\n");
+    await multiEditTool.execute(
+      {
+        edits: [
+          { path: file, oldString: "ONE", newString: "const a = '$&';" },
+          { path: file, oldString: "TWO", newString: "const b = `$${x}`;" },
+        ],
+      },
+      { projectRoot: dir },
+    );
+    expect(readFileSync(file, "utf-8")).toBe("const a = '$&';\nconst b = `$${x}`;\n");
+  });
+
+  it("the diff preview shows the same text that gets written", async () => {
+    const file = join(dir, "c.ts");
+    writeFileSync(file, "PLACEHOLDER\n");
+    const preview = DiffGenerator.previewEdit(file, dir, "PLACEHOLDER", "const m = '$&';");
+    expect(preview.modified).toBe("const m = '$&';\n");
+    await editFileTool.execute(
+      { path: file, oldString: "PLACEHOLDER", newString: "const m = '$&';" },
+      { projectRoot: dir },
+    );
+    expect(readFileSync(file, "utf-8")).toBe(preview.modified);
   });
 });

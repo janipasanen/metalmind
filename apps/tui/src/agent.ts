@@ -3400,13 +3400,67 @@ export class AgentLoop {
 
   /** Pre-flight health check for the active provider/model (#174). */
   async checkHealth(): Promise<{ ok: boolean; message: string }> {
+    const problems: string[] = [];
     try {
       const provider = this.getProvider(this.config.provider, this.config.model);
-      if (provider.health) return await provider.health();
-      return { ok: true, message: "" };
+      if (provider.health) {
+        const h = await provider.health();
+        if (!h.ok) problems.push(h.message);
+      }
     } catch (err) {
-      return { ok: false, message: errText(err) };
+      problems.push(errText(err));
     }
+    // Report EVERY unusable configured tier, not just the active provider.
+    // A configured-but-missing local model made requests fall silently through
+    // to the cloud with the warning naming only MLX — the user had no way to
+    // know why "local" work was being billed to a cloud tier.
+    problems.push(...(await this.unusableTiers()));
+    return problems.length === 0
+      ? { ok: true, message: "" }
+      : { ok: false, message: problems.join("  |  ") };
+  }
+
+  /** Configured tiers that cannot actually serve a request right now. */
+  private async unusableTiers(): Promise<string[]> {
+    if (!this.router) return [];
+    const out: string[] = [];
+    const tiers: Array<["tier1-local" | "tier2-medium" | "tier3-cloud", string]> = [
+      ["tier1-local", "tier 1"],
+      ["tier2-medium", "tier 2"],
+    ];
+    for (const [tier, label] of tiers) {
+      let d: RouteDecision;
+      try {
+        d = this.router.decisionForTier(tier, "health probe", false);
+      } catch {
+        continue;
+      }
+      // Only local tiers are cheap to probe; the cloud tier is covered by the
+      // provider health check above.
+      if (d.provider === "ollama") {
+        try {
+          const res = await fetch("http://127.0.0.1:11434/api/tags", { signal: AbortSignal.timeout(2000) });
+          if (!res.ok) continue;
+          const installed = ((await res.json()) as { models?: Array<{ name: string }> }).models ?? [];
+          const bare = d.modelId.split(":")[0];
+          if (!installed.some((m) => m.name === d.modelId || m.name.split(":")[0] === bare)) {
+            out.push(
+              `${label}: "${d.modelId}" is not installed (ollama pull ${d.modelId}) — requests skip this tier`,
+            );
+          }
+        } catch {
+          out.push(`${label}: local ollama not reachable — requests skip this tier`);
+        }
+      } else if (d.provider === "mlx") {
+        try {
+          const res = await fetch("http://127.0.0.1:8742/health", { signal: AbortSignal.timeout(1500) });
+          if (!res.ok) throw new Error("unhealthy");
+        } catch {
+          out.push(`${label}: MLX sidecar not running — requests skip this tier`);
+        }
+      }
+    }
+    return out;
   }
 
   /** Record a routing decision (accumulated, not overwritten) and notify the UI (#165). */

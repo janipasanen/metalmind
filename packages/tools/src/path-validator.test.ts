@@ -207,3 +207,37 @@ describe("case-insensitive blocking + symlink resolution (#359)", () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe("blocked-path guard is the shared gate for every read (#433)", () => {
+  // #433 was a regression: a new code path read files via plain path resolution
+  // instead of this validator, creating an unrestricted read primitive. These
+  // assertions pin the contract that path must rely on.
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "mm-guard-"));
+    mkdirSync(join(root, ".aws"), { recursive: true });
+    mkdirSync(join(root, ".ssh"), { recursive: true });
+    writeFileSync(join(root, ".aws", "credentials"), "aws_secret_access_key=SECRET");
+    writeFileSync(join(root, ".ssh", "id_rsa"), "PRIVATE KEY");
+    writeFileSync(join(root, ".env.local"), "API_KEY=secret");
+    writeFileSync(join(root, "src.ts"), "export const ok = 1;");
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("refuses every credential path a delegated read might be pointed at", () => {
+    const v = new PathValidator(root, []);
+    for (const p of [".aws/credentials", ".ssh/id_rsa", ".env.local"]) {
+      expect(() => v.resolveSafePath(p)).toThrow(/blocked path/i);
+    }
+  });
+
+  it("still allows ordinary project files", () => {
+    const v = new PathValidator(root, []);
+    expect(v.resolveSafePath("src.ts")).toBe(join(root, "src.ts"));
+  });
+
+  it("refuses an ABSOLUTE path into a credential directory", () => {
+    const v = new PathValidator(root, []);
+    expect(() => v.resolveSafePath(join(root, ".aws", "credentials"))).toThrow(/blocked path/i);
+  });
+});

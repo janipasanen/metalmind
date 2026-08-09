@@ -1060,7 +1060,12 @@ export default function App({ config }: AppProps) {
 
       if (input === "/model" || input.startsWith("/model ")) {
         if (input === "/model" || !input.slice(7).trim()) {
-          yield { type: "text", text: `Usage: /model <name>  (current: ${activeModel})` } as const;
+          // Bare /model opens the PICKER rather than printing usage: typing
+          // model names by hand is error-prone (and cloud names like
+          // "deepseek-v4-flash:0731" are easy to misspell). The picker lists
+          // what the active provider actually serves.
+          setShowModelSelection(true);
+          yield { type: "text", text: `Pick a model for ${activeProvider} (↑↓ to move, Enter to select, Esc to cancel). Current: ${activeModel}` } as const;
           yield { type: "done" } as const;
           return;
         }
