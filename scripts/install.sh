@@ -43,6 +43,12 @@ have()  { command -v "$1" >/dev/null 2>&1; }
 
 confirm() {
   [ "$CHECK_ONLY" = "1" ] && return 1
+  # No terminal (CI, piped output): skip optional steps quietly instead of
+  # emitting a bash error about /dev/tty.
+  if [ ! -r /dev/tty ]; then
+    printf '  \033[33m!\033[0m %s — skipped (no terminal; re-run interactively)\n' "$1"
+    return 1
+  fi
   printf '  → %s [y/N] ' "$1"
   read -r reply </dev/tty || return 1
   [[ "$reply" =~ ^[Yy]$ ]]
