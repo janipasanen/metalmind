@@ -16,4 +16,4 @@ models:
   # Tier 3 — Cloud brain: plans, coordinates, handles complex reasoning
   cloud-reasoning:
     provider: ollama-cloud
-    model: gemini-3-flash-preview:latest
+    model: glm-5.2:cloud

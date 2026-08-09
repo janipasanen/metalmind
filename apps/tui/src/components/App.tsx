@@ -144,6 +144,8 @@ export default function App({ config }: AppProps) {
   // staged before /clear was invisible but still attached to the next message.
   const [stagedImages, setStagedImages] = useState(0);
   const chatPageSize = useChatPageSize();
+  // Mirrored so the status bar shows the live routing mode (#routing).
+  const [evaluateEachPrompt, setEvaluateEachPrompt] = useState(true);
   const [healthWarning, setHealthWarning] = useState<string | null>(null);
   const [localWorkerModel, _setLocalWorkerModel] = useState<string | undefined>(undefined);
   const [localWorkerProvider, _setLocalWorkerProvider] = useState<string | undefined>(undefined);
@@ -234,6 +236,7 @@ export default function App({ config }: AppProps) {
         // agent, and keep writing to the SAME persisted session (#368).
         const resumeId = previous ? agent.adoptStateFrom(previous) : undefined;
         agentRef.current = agent;
+        setEvaluateEachPrompt(agent.getEvaluateEachPrompt()); // persisted across restarts
         // Dispose the replaced agent so its sqlite handle, MCP clients, and
         // background processes are released instead of leaking on each reload (#242).
         previous?.dispose();
@@ -353,6 +356,7 @@ export default function App({ config }: AppProps) {
           "  /workspace <path> - Allow AI to access an additional directory",
           "  /init             - Generate a starter project memory file (.metalmind/MEMORY.md)",
           "  /trust [allow|revoke] - Review/grant this project's startup hooks & MCP servers",
+          "  /routing [on|off] - Evaluate each prompt for a tier, or always use cloud",
           "  /skill            - list | activate <name> | deactivate <name>",
           "  /resume [id]      - List/resume sessions; search <text> | rename <id> <title> | tag <id> <tags>",
           "  /compact          - Summarize older turns to reclaim context window",
@@ -503,6 +507,40 @@ export default function App({ config }: AppProps) {
         const fmt = input.slice(7).trim().toLowerCase() === "json" ? "json" : "md";
         const path = agentRef.current?.exportTranscript(fmt as "md" | "json");
         yield { type: "text", text: path ? `Exported transcript to ${path}` : "Agent not initialised." } as const;
+        yield { type: "done" } as const;
+        return;
+      }
+
+      if (input === "/routing" || input.startsWith("/routing ")) {
+        const agent = agentRef.current;
+        const sub = input.slice(9).trim().toLowerCase();
+        if (!agent) {
+          yield { type: "text", text: "Agent not initialised." } as const;
+        } else if (sub === "on" || sub === "auto") {
+          const msg = agent.setEvaluateEachPrompt(true);
+          setEvaluateEachPrompt(true);
+          yield { type: "text", text: msg } as const;
+        } else if (sub === "off" || sub === "cloud") {
+          const msg = agent.setEvaluateEachPrompt(false);
+          setEvaluateEachPrompt(false);
+          yield { type: "text", text: msg } as const;
+        } else {
+          const on = agent.getEvaluateEachPrompt();
+          yield {
+            type: "text",
+            text: [
+              `Per-prompt routing: ${on ? "ON" : "OFF"}`,
+              "",
+              on
+                ? "Each prompt is evaluated and simple work runs on tier 1/2 (local) when that is enough; complex work escalates to tier 3 (cloud)."
+                : "Every prompt goes straight to tier 3 (cloud) — no evaluation.",
+              "",
+              "/routing on   — evaluate each prompt (default)",
+              "/routing off  — always use tier 3",
+              "/tier 1|2|3   — pin one tier for this session regardless of this setting",
+            ].join("\n"),
+          } as const;
+        }
         yield { type: "done" } as const;
         return;
       }
@@ -1313,7 +1351,7 @@ export default function App({ config }: AppProps) {
           <Text color="magenta">🖼 {stagedImages} image{stagedImages === 1 ? "" : "s"} attached to your next message</Text>
         </Box>
       )}
-      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} />
+      <StatusBar focusPanel={focusPanel} isStreaming={isStreaming} context={contextUsage} usage={usage} mode={agentMode} mcpServers={mcpServers} evaluateEachPrompt={evaluateEachPrompt} forcedTier={forcedTier} />
 
       {overlaysVisible && showCommandPalette && (
         <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} accent={theme.colors.accent}
@@ -1322,6 +1360,13 @@ export default function App({ config }: AppProps) {
             { id: "tier-1", title: "Tier 1: MLX GPU", description: "Choose + force local MLX model", action: () => setTierModelPickerFor(1) },
             { id: "tier-2", title: "Tier 2: Local Ollama", description: "Choose + force local Ollama model", action: () => setTierModelPickerFor(2) },
             { id: "tier-3", title: "Tier 3: Cloud brain", description: "Choose + force Ollama Cloud model", action: () => setTierModelPickerFor(3) },
+            { id: "routing", title: "Routing: Auto ⇄ Cloud-only", description: "Evaluate each prompt for a tier, or always use tier 3", action: () => {
+              const agent = agentRef.current;
+              if (!agent) return;
+              const next = !agent.getEvaluateEachPrompt();
+              notify("info", agent.setEvaluateEachPrompt(next));
+              setEvaluateEachPrompt(next);
+            } },
             { id: "provider", title: "Remote Provider", description: "Cloud provider for complex tasks", action: () => setShowProviderSelection(true) },
             { id: "model", title: "Remote Model", description: "Model used for complex tasks", action: () => setShowModelSelection(true) },
             { id: "mcp", title: "MCP", description: "Configure MCP servers", action: () => setShowMcpConfig(true) },

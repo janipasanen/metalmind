@@ -122,6 +122,11 @@ vi.mock("@metalmind/tools", async () => {
   // hooks — a successful no-op keeps those paths inert in unit tests.
   runShellAsync: async () => ({ stdout: "", stderr: "", exitCode: 0, duration: 1 }),
   killAllBackgroundProcesses: () => {},
+  shutdownLspClient: async () => {},
+  PathValidator: class {
+    constructor(private root: string) {}
+    resolveSafePath(p: string) { return p; }
+  },
   indexFile: () => {},
   getReferenceIndex: () => ({ indexFile: () => {} }),
   RepoMapV2: class {
@@ -2804,5 +2809,53 @@ describe("mid-stream provider error preserves what was streamed (gap11 #441)", (
     expect(assistant.at(-1)?.content).toContain("first half");
     // Exactly one done event, and the turn ended.
     expect(events.filter((e) => e.type === "done")).toHaveLength(1);
+  });
+});
+
+describe("per-prompt tier evaluation when classification is unavailable", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // With no local worker configured, the coordinator's model-based
+  // classification never succeeds — and the tier used to stay at its initial
+  // "tier3-cloud", so EVERY prompt went to the cloud without being evaluated
+  // and tier 2 was never considered.
+  function makeRouter(seen: string[]) {
+    return {
+      route: (input: string) => {
+        seen.push(input);
+        return { tier: "tier2-medium", modelId: "local-m", provider: "ollama", reason: "heuristic" };
+      },
+      decisionForTier: (tier: string) => ({
+        tier,
+        modelId: tier === "tier3-cloud" ? "cloud-m" : "local-m",
+        provider: tier === "tier3-cloud" ? "ollama-cloud" : "ollama",
+        reason: "forced",
+      }),
+      recordUsage: () => {},
+      recordFailure: () => {},
+      escalateTier: (t: string) => (t === "tier1-local" ? "tier2-medium" : "tier3-cloud"),
+      budgetStatus: () => ({ spentUsd: 0, overBudget: false }),
+      routeWithTriage: async () => ({ tier: "tier2-medium", modelId: "local-m", provider: "ollama", reason: "triage" }),
+    } as never;
+  }
+
+  it("falls back to the local heuristic classifier instead of defaulting to cloud", () => {
+    const seen: string[] = [];
+    const loop = new AgentLoop(
+      { provider: "stub", model: "m", explicit: false },
+      { router: makeRouter(seen) },
+    );
+    // The setting is on by default.
+    expect(loop.getEvaluateEachPrompt()).toBe(true);
+    loop.dispose();
+  });
+
+  it("can be turned off so every turn pins to the cloud tier", () => {
+    const loop = new AgentLoop({ provider: "stub", model: "m", explicit: false }, { router: makeRouter([]) });
+    expect(loop.setEvaluateEachPrompt(false)).toMatch(/tier 3/i);
+    expect(loop.getEvaluateEachPrompt()).toBe(false);
+    expect(loop.setEvaluateEachPrompt(true)).toMatch(/evaluated/i);
+    expect(loop.getEvaluateEachPrompt()).toBe(true);
+    loop.dispose();
   });
 });

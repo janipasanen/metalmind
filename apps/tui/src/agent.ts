@@ -657,6 +657,9 @@ export class AgentLoop {
   private lifecycleHooks: Partial<Record<HookEvent, HookDef[]>> = {};
   /** Execute-on-open features this project declares but is not trusted for (#442). */
   private untrustedCapabilities: string[] = [];
+  /** Evaluate every prompt to pick a tier (default), or pin to the cloud tier.
+   *  Off means "never spend time classifying — always use tier 3". */
+  private evaluateEachPrompt = true;
   /** metalmind.yaml permissions/tools sections, honored since #347. */
   private yamlPermissions: MetalmindConfig["permissions"];
   private yamlTools: MetalmindConfig["tools"];
@@ -703,6 +706,7 @@ export class AgentLoop {
     this.onApprovalRequest = options.onApprovalRequest;
     const xdg = loadXdgConfig();
     this.autoApprove = xdg.permissions?.autoApprove ?? false;
+    this.evaluateEachPrompt = xdg.routing?.evaluateEachPrompt ?? true;
     this.remoteBrain = xdg.remoteBrain ?? false;
     // Restore persisted per-tier model overrides (#185).
     for (const [tier, tm] of Object.entries(xdg.tierModels ?? {})) {
@@ -758,6 +762,20 @@ export class AgentLoop {
       );
     }
     void runHooks(this.lifecycleHooks, "sessionStart", this.projectRoot).catch(() => {});
+  }
+
+  /** Per-prompt tier evaluation: on = classify each prompt, off = pin to tier 3. */
+  getEvaluateEachPrompt(): boolean {
+    return this.evaluateEachPrompt;
+  }
+
+  setEvaluateEachPrompt(on: boolean): string {
+    this.evaluateEachPrompt = on;
+    const cfg = loadXdgConfig();
+    saveXdgConfig({ ...cfg, routing: { ...(cfg.routing ?? {}), evaluateEachPrompt: on } });
+    return on
+      ? "Per-prompt routing ON — each prompt is evaluated and may run on tier 1/2 (local) when that is enough."
+      : "Per-prompt routing OFF — every prompt goes to tier 3 (cloud) without evaluation.";
   }
 
   /** Workspace trust state, for /trust (#442/#443). */
@@ -1967,6 +1985,24 @@ export class AgentLoop {
       if (out?.suggestedTier === "local-worker") targetTierKey = "tier1-local";
       else if (out?.suggestedTier === "direct-tool") targetTierKey = "tier2-medium";
       // cloud-main → tier3-cloud (default)
+    } else if (this.evaluateEachPrompt) {
+      // Model-based classification is UNAVAILABLE (no local worker configured,
+      // or the sidecar is down). Falling through to the initial "tier3-cloud"
+      // sent every prompt — however trivial — to the cloud without evaluating
+      // it, and never even considered tier 2. The router's own TaskClassifier
+      // is a local heuristic that needs no model, so use it rather than
+      // defaulting to the most expensive tier.
+      try {
+        const heuristic = this.router!.route(userInput, 0, {
+          conversationDepth: this.turnCount,
+          historyTokens,
+        });
+        if (heuristic.tier === "tier1-local" || heuristic.tier === "tier2-medium" || heuristic.tier === "tier3-cloud") {
+          targetTierKey = heuristic.tier;
+        }
+      } catch {
+        /* keep the cloud default if even the heuristic fails */
+      }
     }
     // Remote-brain mode: the cloud model is always the brain/responder; bounded
     // subtasks are offloaded to the local model via the delegateToLocal tool (#186).

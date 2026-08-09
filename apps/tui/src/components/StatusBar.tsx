@@ -14,6 +14,11 @@ interface StatusBarProps {
   context?: { used: number; limit: number };
   usage?: { inputTokens: number; outputTokens: number };
   mode?: "build" | "plan";
+  /** Per-prompt tier evaluation vs pinned cloud — shown so the current routing
+   *  behaviour is always visible, not buried in a command. */
+  evaluateEachPrompt?: boolean;
+  /** A tier pinned with /tier, which overrides the evaluation setting. */
+  forcedTier?: 1 | 2 | 3 | null;
 }
 
 export default function StatusBar({
@@ -23,6 +28,8 @@ export default function StatusBar({
   context,
   usage,
   mode = "build",
+  evaluateEachPrompt = true,
+  forcedTier = null,
 }: StatusBarProps) {
   const connectedServers = mcpServers?.filter((s) => s.connected) ?? [];
   const totalMcpTools = connectedServers.reduce((sum, s) => sum + s.toolCount, 0);
@@ -48,6 +55,14 @@ export default function StatusBar({
     <Box marginTop={1} flexDirection="column">
       <Box>
         {mode === "plan" ? <Text color="cyan" bold>PLAN </Text> : null}
+        {/* Routing state, always visible (/routing to change). */}
+        {forcedTier !== null ? (
+          <Text color="yellow" bold>TIER {forcedTier} </Text>
+        ) : (
+          <Text color={evaluateEachPrompt ? "green" : "magenta"} bold>
+            {evaluateEachPrompt ? "AUTO " : "CLOUD "}
+          </Text>
+        )}
         <Text dimColor>
           {isStreaming
             ? "Streaming | Esc: cancel | "

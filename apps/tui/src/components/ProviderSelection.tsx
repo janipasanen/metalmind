@@ -20,7 +20,7 @@ export interface ProviderSelectionProps {
 const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4o",
-  "ollama-cloud": "gpt-oss:120b",
+  "ollama-cloud": "glm-5.2:cloud",
   ollama: "ministral-3:3b",
   mlx: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
 };

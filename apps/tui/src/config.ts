@@ -52,7 +52,7 @@ const PROVIDER_DEFAULTS: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4o",
   ollama: "deepseek-coder:1.3b",
-  "ollama-cloud": "gpt-oss:120b",
+  "ollama-cloud": "glm-5.2:cloud",
   mlx: "mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit",
 };
 

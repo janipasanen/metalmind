@@ -110,6 +110,9 @@ export interface UserConfig {
   routing?: {
     defaultLocalModel?: string;
     defaultReasoningModel?: string;
+    /** Evaluate every prompt to pick a tier (default true). When false, every
+     *  turn goes straight to tier 3 without classification. */
+    evaluateEachPrompt?: boolean;
   };
   mcpServers: Record<string, McpServerConfig>;
   workspacePaths: string[];
@@ -190,6 +193,7 @@ const DEFAULT_XDG_CONFIG: UserConfig = {
     openai: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
     anthropic: ["claude-sonnet-4-6", "claude-3-5-sonnet"],
     ollama: ["gpt-oss:120b", "gpt-oss:20b", "gemma3:27b", "llama3.3:70b"],
+    "ollama-cloud": ["glm-5.2:cloud", "glm-5.1", "deepseek-v4-pro", "kimi-k2.7-code", "gpt-oss:120b"],
     mlx: ["mlx-community/DeepSeek-Coder-1.3B-Instruct-4bit"],
   },
   mcpServers: {},
