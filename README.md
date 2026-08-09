@@ -141,9 +141,26 @@ The sidecar listens on `127.0.0.1:8742` and starts automatically when you launch
 with the `metalmind` command. To run it yourself:
 
 ```bash
-~/.local/share/metalmind/.venv/bin/python3 scripts/mlx-sidecar.py \
-  --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+./scripts/start-mlx-sidecar.sh          # uses the model from metalmind.yaml
+./scripts/start-mlx-sidecar.sh <model>  # or an explicit model / path
 ```
+
+Leave it running in its own terminal. It reads the tier-1 model out of
+`metalmind.yaml`, refuses to start on a partially downloaded model, and exits
+cleanly if a sidecar is already up.
+
+**Using a model downloaded by LM Studio** works too — point tier 1 at the
+directory:
+
+```yaml
+models:
+  local-mlx:
+    provider: mlx
+    model: /Users/you/.lmstudio/models/mlx-community/gemma-3-12b-it-qat-4bit
+```
+
+LM Studio writes `*.part` files while downloading, so wait for those to
+disappear before starting the sidecar.
 
 Check it with `curl -s 127.0.0.1:8742/health`. If it is not running, tier 1
 falls back to a local Ollama model and the status line says so.
