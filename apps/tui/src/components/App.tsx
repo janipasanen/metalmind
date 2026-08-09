@@ -304,8 +304,11 @@ export default function App({ config }: AppProps) {
         // Non-blocking pre-flight: warn up front on a bad key/missing model (#174).
         void agent.checkHealth().then((h) => {
           if (!cancelled) {
+            // Only the persistent line — notifying as well printed the SAME
+            // warning twice on startup. The line stays until the problem is
+            // fixed (it is re-checked after every turn), so a toast adds
+            // nothing but noise.
             setHealthWarning(h.ok ? null : h.message);
-            if (!h.ok) notify("warning", h.message);
           }
         });
 

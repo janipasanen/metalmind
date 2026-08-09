@@ -3420,10 +3420,41 @@ export class AgentLoop {
     // A configured-but-missing local model made requests fall silently through
     // to the cloud with the warning naming only MLX — the user had no way to
     // know why "local" work was being billed to a cloud tier.
-    problems.push(...(await this.unusableTiers()));
-    return problems.length === 0
-      ? { ok: true, message: "" }
-      : { ok: false, message: problems.join("  |  ") };
+    const tierProblems = await this.unusableTiers();
+    // The active provider's own health can restate a tier problem (MLX down is
+    // reported by both when tier 1 IS mlx), which read as two separate faults.
+    // Drop the standalone message when a tier line already covers it.
+    const covered = tierProblems.join(" ").toLowerCase();
+    const deduped = problems.filter((p) => {
+      const key = /sidecar/i.test(p) ? "sidecar" : /not installed/i.test(p) ? "not installed" : "";
+      return !(key && covered.includes(key));
+    });
+    const all = [...deduped, ...tierProblems];
+    // If the ONLY complaint is that the MLX sidecar is down, but tier 1 has a
+    // working ollama fallback, that is a degraded-but-fine state — say what is
+    // actually happening instead of showing a bare alarm for a session that
+    // works. (An unusable tier would have produced a tierProblems entry.)
+    if (tierProblems.length === 0 && all.length === 1 && /sidecar/i.test(all[0])) {
+      let fallback = "";
+      try {
+        const d = this.router?.decisionForTier("tier1-local", "fallback probe", false);
+        if (d && d.provider !== "mlx") fallback = ` — tier 1 is using its ${d.provider} fallback (${d.modelId})`;
+      } catch {
+        /* best-effort */
+      }
+      if (fallback) return { ok: false, message: `MLX sidecar not running${fallback}` };
+    }
+    return all.length === 0 ? { ok: true, message: "" } : { ok: false, message: all.join("  |  ") };
+  }
+
+  /** Whether the MLX sidecar is answering right now. */
+  private async mlxSidecarUp(): Promise<boolean> {
+    try {
+      const res = await fetch("http://127.0.0.1:8742/health", { signal: AbortSignal.timeout(1500) });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   /** Configured tiers that cannot actually serve a request right now. */
@@ -3450,8 +3481,14 @@ export class AgentLoop {
           const installed = ((await res.json()) as { models?: Array<{ name: string }> }).models ?? [];
           const bare = d.modelId.split(":")[0];
           if (!installed.some((m) => m.name === d.modelId || m.name.split(":")[0] === bare)) {
+            // Tier 1 falls back to ollama when the MLX sidecar is down, so the
+            // model named here may be a fallback the user never chose — say so
+            // rather than reporting a mystery model as "your" configuration.
+            const viaFallback = tier === "tier1-local" && !(await this.mlxSidecarUp());
             out.push(
-              `${label}: "${d.modelId}" is not installed (ollama pull ${d.modelId}) — requests skip this tier`,
+              viaFallback
+                ? `tier 1: MLX sidecar not running, and its ollama fallback "${d.modelId}" is not installed (ollama pull ${d.modelId}) — requests skip this tier`
+                : `${label}: "${d.modelId}" is not installed (ollama pull ${d.modelId}) — requests skip this tier`,
             );
           }
         } catch {
